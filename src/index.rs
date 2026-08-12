@@ -6,7 +6,6 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     io::ErrorKind,
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::{mpsc, Arc, RwLock},
     thread,
@@ -31,10 +30,21 @@ struct RebuildState<'a> {
 
 struct ScanContext<'a> {
     root: &'a Path,
-    root_device: u64,
+    root_device: Option<u64>,
     excludes: &'a GlobSet,
     max_file_bytes: u64,
     build_candidates: bool,
+}
+
+#[cfg(unix)]
+fn device_id(metadata: &fs::Metadata) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Some(metadata.dev())
+}
+
+#[cfg(not(unix))]
+fn device_id(_: &fs::Metadata) -> Option<u64> {
+    None
 }
 
 #[derive(Clone, Debug)]
@@ -396,9 +406,9 @@ fn build_root_index(
     max_file_bytes: u64,
 ) -> Result<(usize, BTreeMap<String, BTreeSet<PathBuf>>), String> {
     let matcher = compile_excludes(excludes)?;
-    let root_device = fs::symlink_metadata(root)
-        .map_err(|error| format!("{}: {error}", root.display()))?
-        .dev();
+    let root_device = device_id(
+        &fs::symlink_metadata(root).map_err(|error| format!("{}: {error}", root.display()))?,
+    );
     let mut map = BTreeMap::new();
     let mut documents = Vec::new();
     let context = ScanContext {
@@ -419,9 +429,9 @@ fn scan_directory_unit(
     max_file_bytes: u64,
     build_candidates: bool,
 ) -> Result<DirectoryScan, String> {
-    let root_device = fs::symlink_metadata(root)
-        .map_err(|error| format!("{}: {error}", root.display()))?
-        .dev();
+    let root_device = device_id(
+        &fs::symlink_metadata(root).map_err(|error| format!("{}: {error}", root.display()))?,
+    );
     let mut map = BTreeMap::new();
     let metadata = match fs::symlink_metadata(unit) {
         Ok(metadata) => metadata,
@@ -430,7 +440,7 @@ fn scan_directory_unit(
         }
         Err(error) => return Err(format!("{}: {error}", unit.display())),
     };
-    if metadata.dev() != root_device
+    if device_id(&metadata).is_some_and(|device| Some(device) != root_device)
         || metadata.file_type().is_symlink()
         || excluded(unit, root, excludes)
     {
@@ -509,7 +519,7 @@ fn walk(
         Err(error) if error.kind() == ErrorKind::PermissionDenied => return Ok(0),
         Err(error) => return Err(format!("{}: {error}", path.display())),
     };
-    if metadata.dev() != context.root_device {
+    if device_id(&metadata).is_some_and(|device| Some(device) != context.root_device) {
         return Ok(0);
     }
     if metadata.file_type().is_symlink() {
