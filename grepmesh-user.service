@@ -1,0 +1,14 @@
+[Unit]
+Description=GrepMesh MCP search
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PATH=@GREPMESH_PATH@
+ExecStart=@GREPMESH_BIN@ --config @GREPMESH_CONFIG@
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
