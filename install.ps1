@@ -43,8 +43,10 @@ try {
     $binary = Join-Path $prefix 'grepmesh-mcp.exe'
     $taskName = 'GrepMesh MCP'
     $taskCommand = '"{0}" --config "{1}"' -f $binary, $configPath
-    & schtasks.exe /Create /TN $taskName /SC ONLOGON /TR $taskCommand /F 2>$null | Out-Null
-    if ($LASTEXITCODE -eq 0) {
+    $task = Start-Process -Wait -PassThru -WindowStyle Hidden -FilePath schtasks.exe -ArgumentList @(
+        '/Create', '/TN', $taskName, '/SC', 'ONLOGON', '/TR', $taskCommand, '/F'
+    )
+    if ($task.ExitCode -eq 0) {
         & schtasks.exe /Run /TN $taskName | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Failed to start the GrepMesh logon task.' }
     } else {
