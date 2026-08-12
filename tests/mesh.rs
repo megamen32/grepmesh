@@ -598,3 +598,186 @@ async fn stalled_peer_body_keeps_completed_local_results() {
     let _ = child.wait();
     fake_thread.join().unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_search_status_returns_a_bounded_final_page() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().to_path_buf();
+    fs::write(
+        root.join("many-async-canary.txt"),
+        (0..6)
+            .map(|number| format!("async canary {number}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let fake_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let fake_url = format!(
+        "http://127.0.0.1:{}/mcp",
+        fake_listener.local_addr().unwrap().port()
+    );
+    let fake_thread = std::thread::spawn(move || {
+        let (mut stream, _) = fake_listener.accept().unwrap();
+        let mut request = [0u8; 4096];
+        let _ = stream.read(&mut request);
+        std::thread::sleep(Duration::from_millis(250));
+        let body = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"content": [{"type": "text", "text": "{}"}], "isError": false}
+        }))
+        .unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(&body).unwrap();
+    });
+
+    let port = free_port();
+    let url = format!("http://127.0.0.1:{port}/mcp");
+    let cfg = AppConfig {
+        host_id: "A".into(),
+        bind: format!("127.0.0.1:{port}").parse().unwrap(),
+        local_bind: None,
+        root: root.clone(),
+        roots: std::collections::BTreeMap::new(),
+        peers: vec![PeerConfig {
+            host_id: "B".into(),
+            local_url: "http://127.0.0.1:1/mcp".into(),
+            routable_url: fake_url,
+        }],
+        limits: grepmesh::config::LimitsConfig {
+            peer_timeout_ms: 500,
+            overall_timeout_ms: 700,
+            max_results: 10,
+            ..Default::default()
+        },
+        exclude_globs: vec![],
+        topology_cache_path: None,
+        index_path: None,
+        gptadmin_topology_url: None,
+        gptadmin_token_env: None,
+        peer_auth_token_env: None,
+        topology_ttl_ms: 30_000,
+    };
+    let path = temp.path().join("config.json");
+    write_config(&path, &cfg);
+    let mut child = spawn_server(&path);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let search = rpc(
+        &url,
+        "tools/call",
+        serde_json::json!({
+            "name": "search_text",
+            "arguments": {
+                "query": "async canary", "hosts": "*", "limit": 10, "wait_ms": 25
+            }
+        }),
+    )
+    .await;
+    let running: serde_json::Value =
+        serde_json::from_str(search["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(running["state"], "running");
+    let job_id = running["job_id"].as_str().unwrap().to_string();
+    assert!(running["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|result| result["host_id"] == "A"));
+    assert!(running["host_status"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|status| status["host_id"] == "A"));
+
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    let complete = rpc(
+        &url,
+        "tools/call",
+        serde_json::json!({
+            "name": "search_status",
+            "arguments": {"job_id": job_id, "page_size": 2}
+        }),
+    )
+    .await;
+    let first_page: serde_json::Value =
+        serde_json::from_str(complete["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(first_page["state"], "complete");
+    assert_eq!(first_page["results"].as_array().unwrap().len(), 2);
+    let cursor = first_page["cursor"].as_str().unwrap().to_string();
+
+    let next = rpc(
+        &url,
+        "tools/call",
+        serde_json::json!({
+            "name": "search_status",
+            "arguments": {"job_id": job_id, "cursor": cursor, "page_size": 2}
+        }),
+    )
+    .await;
+    let second_page: serde_json::Value =
+        serde_json::from_str(next["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(second_page["state"], "complete");
+    assert_eq!(second_page["results"].as_array().unwrap().len(), 2);
+    assert_ne!(
+        first_page["results"][0]["line_number"],
+        second_page["results"][0]["line_number"]
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+    fake_thread.join().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_with_sufficient_wait_returns_the_complete_result_directly() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().to_path_buf();
+    fs::write(root.join("direct-canary.txt"), "direct wait canary\n").unwrap();
+    let port = free_port();
+    let url = format!("http://127.0.0.1:{port}/mcp");
+    let cfg = AppConfig {
+        host_id: "A".into(),
+        bind: format!("127.0.0.1:{port}").parse().unwrap(),
+        local_bind: None,
+        root: root.clone(),
+        roots: std::collections::BTreeMap::new(),
+        peers: vec![],
+        limits: Default::default(),
+        exclude_globs: vec![],
+        topology_cache_path: None,
+        index_path: None,
+        gptadmin_topology_url: None,
+        gptadmin_token_env: None,
+        peer_auth_token_env: None,
+        topology_ttl_ms: 30_000,
+    };
+    let path = temp.path().join("config.json");
+    write_config(&path, &cfg);
+    let mut child = spawn_server(&path);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let search = rpc(
+        &url,
+        "tools/call",
+        serde_json::json!({
+            "name": "search_text",
+            "arguments": {"query": "direct wait canary", "wait_ms": 500}
+        }),
+    )
+    .await;
+    let value: serde_json::Value =
+        serde_json::from_str(search["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(value.get("state").is_none());
+    assert!(value.get("job_id").is_none());
+    assert!(value["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|result| result["host_id"] == "A"));
+
+    let _ = child.kill();
+    let _ = child.wait();
+}

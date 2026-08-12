@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.grepmesh.mcp</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@GREPMESH_BIN@</string>
+    <string>--config</string>
+    <string>@GREPMESH_CONFIG@</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>@GREPMESH_PATH@</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>@GREPMESH_LOG@</string>
+  <key>StandardErrorPath</key>
+  <string>@GREPMESH_LOG@</string>
+</dict>
+</plist>

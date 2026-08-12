@@ -16,6 +16,17 @@ use tokio::{
     time::{timeout, Instant},
 };
 
+fn rg_command() -> TokioCommand {
+    let sibling = std::env::current_exe().ok().and_then(|exe| {
+        let name = if cfg!(windows) { "rg.exe" } else { "rg" };
+        exe.parent().map(|parent| parent.join(name))
+    });
+    match sibling.filter(|path| path.is_file()) {
+        Some(path) => TokioCommand::new(path),
+        None => TokioCommand::new("rg"),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchLine {
     pub line_number: usize,
@@ -489,7 +500,7 @@ async fn search_text_impl(
     deadline: Instant,
     candidate_paths: Option<Vec<PathBuf>>,
 ) -> Result<SearchOutcome> {
-    let mut command = TokioCommand::new("rg");
+    let mut command = rg_command();
     command.arg("-n").arg("--hidden");
     match mode {
         SearchMode::Literal => {
@@ -777,7 +788,7 @@ async fn find_paths_impl(
     max_response_bytes: usize,
     deadline: Instant,
 ) -> Result<SearchOutcome> {
-    let mut command = TokioCommand::new("rg");
+    let mut command = rg_command();
     command.arg("--files").arg("--hidden").arg("--no-messages");
     for glob in exclude_globs {
         command.arg("--glob").arg(format!("!{glob}"));

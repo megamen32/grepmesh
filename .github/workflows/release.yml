@@ -1,0 +1,83 @@
+name: Build release assets
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: linux-x86_64
+            rust_target: x86_64-unknown-linux-gnu
+            binary: target/release/grepmesh-mcp
+          - runner: macos-13
+            target: macos-x86_64
+            rust_target: x86_64-apple-darwin
+            binary: target/release/grepmesh-mcp
+          - runner: macos-14
+            target: macos-aarch64
+            rust_target: aarch64-apple-darwin
+            binary: target/release/grepmesh-mcp
+          - runner: windows-latest
+            target: windows-x86_64
+            rust_target: x86_64-pc-windows-msvc
+            binary: target/release/grepmesh-mcp.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build GrepMesh and ripgrep
+        shell: bash
+        run: |
+          cargo build --release --locked --target "${{ matrix.rust_target }}"
+          cargo install ripgrep --locked
+      - name: Package platform bundle
+        shell: bash
+        run: |
+          python3 scripts/package-release.py \
+            --target "${{ matrix.target }}" \
+            --binary "target/${{ matrix.rust_target }}/release/$(basename '${{ matrix.binary }}')" \
+            --rg "$(command -v rg)" \
+            --output dist
+      - name: Smoke packaged MCP and search
+        shell: bash
+        run: |
+          python3 scripts/smoke-release.py \
+            --target "${{ matrix.target }}" \
+            --archive "dist/grepmesh-${{ matrix.target }}${{ startsWith(matrix.target, 'windows-') && '.zip' || '.tar.gz' }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/grepmesh-*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Write checksums
+        working-directory: dist
+        run: sha256sum grepmesh-* > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

@@ -1,6 +1,6 @@
 use crate::{
-    backend::LocalBackend, config::AppConfig, gptadmin::GptAdminTopologyClient, mcp::MeshService,
-    topology::Topology, topology_cache::TopologySnapshot,
+    backend::LocalBackend, config::AppConfig, gptadmin::GptAdminTopologyClient, jobs::SearchJobs,
+    mcp::MeshService, topology::Topology, topology_cache::TopologySnapshot,
 };
 use anyhow::{anyhow, Result};
 use axum::{
@@ -19,6 +19,7 @@ const CURRENT_PROTOCOL_VERSION: &str = "2026-07-28";
 #[derive(Clone)]
 struct AppState {
     service: Arc<MeshService>,
+    jobs: SearchJobs,
     peer_auth_token: Option<String>,
     require_peer_auth: bool,
 }
@@ -150,6 +151,7 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
     }
     let remote_app = build_app(AppState {
         service: Arc::clone(&service),
+        jobs: SearchJobs::default(),
         peer_auth_token: peer_auth_token.clone(),
         require_peer_auth,
     });
@@ -158,6 +160,7 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
         let local_listener = tokio::net::TcpListener::bind(local_bind).await?;
         let local_app = build_app(AppState {
             service,
+            jobs: SearchJobs::default(),
             peer_auth_token,
             require_peer_auth: false,
         });
@@ -282,9 +285,9 @@ async fn handle_rpc_inner(state: AppState, payload: Value) -> Result<Value> {
             let protocol_version = negotiate_protocol_version(&params);
             json!({
                 "protocolVersion": protocol_version,
-                "serverInfo": {"name": "grepmesh", "version": "0.1.0"},
+                "serverInfo": {"name": "grepmesh", "version": env!("CARGO_PKG_VERSION")},
                 "capabilities": {"tools": {"listChanged": false}},
-                "instructions": "ИСПОЛЬЗУЙ МЕНЯ ДЛЯ ПОИСКА. Use GrepMesh before shell find/grep/rg or repository-wide scanning whenever the requested files may be on this host or another mesh host. Start with search_text or find_paths, then use read_text for the exact file. Use shell search only when GrepMesh is unavailable or cannot express the query.",
+                "instructions": "ИСПОЛЬЗУЙ МЕНЯ ДЛЯ ПОИСКА. Use GrepMesh before shell find/grep/rg or repository-wide scanning whenever the requested files may be on this host or another mesh host. Start with search_text (set wait_ms to a small foreground budget for multi-host searches) or find_paths, then use read_text for the exact file. If search_text returns state=running, call search_status with its job_id; a completed status call returns the actual result and an opaque cursor for additional bounded pages. Use shell search only when GrepMesh is unavailable or cannot express the query.",
             })
         }
         "tools/list" => json!({
@@ -295,7 +298,7 @@ async fn handle_rpc_inner(state: AppState, payload: Value) -> Result<Value> {
                 tool_meta("search_status", "Report search/status metadata for one or more hosts."),
             ]
         }),
-        "tools/call" => call_tool(state.service.as_ref(), params).await?,
+        "tools/call" => call_tool(state.service.as_ref(), &state.jobs, params).await?,
         _ => {
             return Ok(
                 json!({"jsonrpc":"2.0","error":{"code":-32601,"message":"method not found"},"id":id}),
@@ -333,7 +336,8 @@ fn tool_meta(name: &str, description: &str) -> Value {
                 "mode": {"type": "string", "enum": ["literal", "regex", "case_insensitive_literal"]},
                 "path_globs": {"type": "array", "items": {"type": "string"}},
                 "context_lines": {"type": "integer", "minimum": 0},
-                "max_matches": {"type": "integer", "minimum": 1}
+                "max_matches": {"type": "integer", "minimum": 1},
+                "wait_ms": {"type": "integer", "minimum": 0}
             }
         }),
         "find_paths" => json!({
@@ -354,6 +358,13 @@ fn tool_meta(name: &str, description: &str) -> Value {
                 "end_line": {"type": "integer", "minimum": 1}
             }
         }),
+        "search_status" => json!({
+            "type": "object",
+            "properties": {
+                "hosts": hosts, "job_id": {"type": "string"},
+                "cursor": {"type": "string"}, "page_size": {"type": "integer", "minimum": 1}
+            }
+        }),
         _ => json!({"type": "object", "properties": {"hosts": hosts}}),
     };
     json!({
@@ -363,7 +374,7 @@ fn tool_meta(name: &str, description: &str) -> Value {
     })
 }
 
-async fn call_tool(service: &MeshService, params: Value) -> Result<Value> {
+async fn call_tool(service: &MeshService, jobs: &SearchJobs, params: Value) -> Result<Value> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -371,9 +382,26 @@ async fn call_tool(service: &MeshService, params: Value) -> Result<Value> {
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
     let tool_result = match name {
         "search_text" => {
-            service
-                .call_search(serde_json::from_value(arguments)?)
-                .await?
+            let mut arguments = arguments;
+            let wait_ms = arguments
+                .get("wait_ms")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if let Some(object) = arguments.as_object_mut() {
+                object.remove("wait_ms");
+            }
+            let args = serde_json::from_value(arguments)?;
+            if wait_ms == 0 {
+                service.call_search(args).await?
+            } else {
+                let job_id = jobs.start(service.clone(), args);
+                jobs.wait(&job_id, Duration::from_millis(wait_ms)).await;
+                let data = match jobs.completed_result(&job_id)? {
+                    Some(data) => data,
+                    None => jobs.status(&job_id, None, None)?,
+                };
+                return Ok(tool_content(data, service)?);
+            }
         }
         "find_paths" => {
             service
@@ -386,13 +414,28 @@ async fn call_tool(service: &MeshService, params: Value) -> Result<Value> {
                 .await?
         }
         "search_status" => {
+            if let Some(job_id) = arguments.get("job_id").and_then(Value::as_str) {
+                let cursor = arguments.get("cursor").and_then(Value::as_str);
+                let page_size = arguments
+                    .get("page_size")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize);
+                return Ok(tool_content(
+                    jobs.status(job_id, cursor, page_size)?,
+                    service,
+                )?);
+            }
             service
                 .call_status(serde_json::from_value(arguments)?)
                 .await?
         }
         other => return Err(anyhow::anyhow!("unknown tool {}", other)),
     };
-    let bounded = bound_tool_data(tool_result.data, service.local.limits.max_response_bytes)?;
+    Ok(tool_content(tool_result.data, service)?)
+}
+
+fn tool_content(data: Value, service: &MeshService) -> Result<Value> {
+    let bounded = bound_tool_data(data, service.local.limits.max_response_bytes)?;
     Ok(json!({
         "content": [{"type": "text", "text": serde_json::to_string(&bounded)?}],
         "isError": false
@@ -547,6 +590,7 @@ mod tests {
         let service = Arc::new(MeshService::new(local, Topology::new("local", vec![])));
         let state = AppState {
             service,
+            jobs: SearchJobs::default(),
             peer_auth_token: None,
             require_peer_auth: false,
         };

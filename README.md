@@ -17,9 +17,21 @@ both paths. [Reproduce the benchmark](bench/remote-search.js).
 curl -fsSL https://raw.githubusercontent.com/megamen32/grepmesh/main/install.sh | bash
 ```
 
+```powershell
+irm https://raw.githubusercontent.com/megamen32/grepmesh/main/install.ps1 | iex
+```
+
 That command downloads ready-to-run `grepmesh-mcp` and `rg` binaries, creates a
-local config, installs a user service, and starts GrepMesh at
+local config, installs a user service (systemd, launchd, or a Windows logon
+task), and starts GrepMesh at
 `http://127.0.0.1:9419/mcp`. No Rust, Cargo, clone, or manual build required.
+Binary releases support Linux x86_64, macOS arm64/x86_64, and Windows x86_64.
+
+For multi-host searches, pass a small `wait_ms` budget. Fast searches return
+their result immediately. Slower searches return ready matches plus a `job_id`;
+poll `search_status` with that ID to receive the completed result and opaque
+cursor pages without flooding the model context or relying on a remote file
+path.
 
 ## Why GrepMesh
 
