@@ -1,0 +1,6 @@
+/target/
+*.index.json
+*.topology.json
+.grepmesh/
+__pycache__/
+*.pyc

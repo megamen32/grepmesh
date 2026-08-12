@@ -1,0 +1,24 @@
+[Unit]
+Description=GrepMesh MCP local and federated file search
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=grepmesh
+Group=grepmesh
+EnvironmentFile=/etc/grepmesh-mcp/peer.env
+ExecStart=/usr/local/bin/grepmesh-mcp --config /etc/grepmesh-mcp/config.json
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/grepmesh-mcp
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
