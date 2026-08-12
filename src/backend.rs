@@ -275,10 +275,15 @@ impl LocalBackend {
             }
         } else {
             for name in names {
-                let paths = self
-                    .root_paths
-                    .get(name)
-                    .ok_or_else(|| anyhow!("unknown root {}", name))?;
+                let paths = if let Some(paths) = self.root_paths.get(name) {
+                    paths
+                } else {
+                    let requested = Path::new(name);
+                    self.root_paths
+                        .values()
+                        .find(|paths| paths.iter().any(|path| path == requested))
+                        .ok_or_else(|| anyhow!("unknown root {}", name))?
+                };
                 roots.extend(paths.iter().cloned());
             }
         }

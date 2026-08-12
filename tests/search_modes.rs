@@ -121,6 +121,25 @@ async fn named_roots_are_selectable_and_paths_remain_absolute() {
         opt.path().join("opt.txt").display().to_string()
     );
 
+    let absolute_selected = backend
+        .search_text(
+            "home-only",
+            10,
+            0,
+            SearchMode::Literal,
+            vec![],
+            vec![home.path().display().to_string()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(absolute_selected.len(), 1);
+
+    let absolute_paths = backend
+        .find_paths("home.txt", 10, vec![home.path().display().to_string()])
+        .await
+        .unwrap();
+    assert_eq!(absolute_paths.len(), 1);
+
     let unknown = backend
         .search_text(
             "home-only",
@@ -132,6 +151,18 @@ async fn named_roots_are_selectable_and_paths_remain_absolute() {
         )
         .await;
     assert!(unknown.is_err());
+
+    let unconfigured_absolute = backend
+        .search_text(
+            "home-only",
+            10,
+            0,
+            SearchMode::Literal,
+            vec![],
+            vec![home.path().join("nested").display().to_string()],
+        )
+        .await;
+    assert!(unconfigured_absolute.is_err());
 }
 
 #[tokio::test]
