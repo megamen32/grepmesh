@@ -40,11 +40,26 @@ jobs:
         with:
           targets: ${{ matrix.rust_target }}
       - uses: Swatinem/rust-cache@v2
-      - name: Build GrepMesh and ripgrep
+      - name: Build GrepMesh
         shell: bash
         run: |
           cargo build --release --locked --target "${{ matrix.rust_target }}"
+      - name: Build ripgrep
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
           cargo install ripgrep --locked
+      - name: Install ripgrep on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $release = Invoke-RestMethod https://api.github.com/repos/BurntSushi/ripgrep/releases/latest
+          $asset = $release.assets | Where-Object { $_.name -match 'x86_64-pc-windows-msvc.zip$' } | Select-Object -First 1
+          if (-not $asset) { throw 'ripgrep Windows release asset not found' }
+          Invoke-WebRequest -UseBasicParsing $asset.browser_download_url -OutFile rg.zip
+          Expand-Archive rg.zip rg-release
+          $rg = Get-ChildItem rg-release -Recurse -Filter rg.exe | Select-Object -First 1
+          Copy-Item $rg.FullName "$env:USERPROFILE\.cargo\bin\rg.exe"
       - name: Package platform bundle
         shell: bash
         run: |
