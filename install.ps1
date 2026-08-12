@@ -43,10 +43,20 @@ try {
     $binary = Join-Path $prefix 'grepmesh-mcp.exe'
     $taskName = 'GrepMesh MCP'
     $taskCommand = '"{0}" --config "{1}"' -f $binary, $configPath
-    & schtasks.exe /Create /TN $taskName /SC ONLOGON /TR $taskCommand /F | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Failed to create the GrepMesh logon task.' }
-    & schtasks.exe /Run /TN $taskName | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Failed to start the GrepMesh logon task.' }
+    & schtasks.exe /Create /TN $taskName /SC ONLOGON /TR $taskCommand /F 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        & schtasks.exe /Run /TN $taskName | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Failed to start the GrepMesh logon task.' }
+    } else {
+        $startup = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'
+        New-Item -ItemType Directory -Force -Path $startup | Out-Null
+        [System.IO.File]::WriteAllText(
+            (Join-Path $startup 'grepmesh.cmd'),
+            "@start `"`" $taskCommand" + [Environment]::NewLine,
+            [System.Text.Encoding]::ASCII
+        )
+        Start-Process -WindowStyle Hidden -FilePath $binary -ArgumentList @('--config', $configPath)
+    }
 } finally {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $temp
 }
