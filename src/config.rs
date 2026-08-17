@@ -103,6 +103,38 @@ impl Default for LimitsConfig {
     }
 }
 
+const DEFAULT_BACKUP_CATALOG_STALE_AFTER_MS: u64 = 24 * 60 * 60 * 1_000;
+
+/// Optional, fixture-only configuration for the local backup catalog.
+///
+/// It names no object-store endpoint or credential. `fixture_path` remains
+/// process configuration and is not part of the browser-facing catalog model.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct BackupCatalogConfig {
+    #[serde(default)]
+    pub provider_alias: Option<String>,
+    #[serde(default)]
+    pub prefix: Option<String>,
+    #[serde(default)]
+    pub fixture_path: Option<PathBuf>,
+    #[serde(default = "default_backup_catalog_stale_after_ms")]
+    pub stale_after_ms: u64,
+}
+
+fn default_backup_catalog_stale_after_ms() -> u64 {
+    DEFAULT_BACKUP_CATALOG_STALE_AFTER_MS
+}
+
+impl BackupCatalogConfig {
+    pub fn effective_stale_after_ms(&self) -> u64 {
+        if self.stale_after_ms == 0 {
+            DEFAULT_BACKUP_CATALOG_STALE_AFTER_MS
+        } else {
+            self.stale_after_ms
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
     pub host_id: String,
@@ -131,6 +163,8 @@ pub struct AppConfig {
     pub gptadmin_token_env: Option<String>,
     #[serde(default)]
     pub peer_auth_token_env: Option<String>,
+    #[serde(default)]
+    pub backup_catalog: Option<BackupCatalogConfig>,
     #[serde(default = "default_topology_ttl_ms")]
     pub topology_ttl_ms: u64,
 }

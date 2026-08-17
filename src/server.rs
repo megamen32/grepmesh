@@ -99,6 +99,10 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
         .filter(|token| !token.trim().is_empty());
     let remote_bind = config.bind;
     let local_bind = config.local_bind;
+    if local_bind.is_some_and(|bind| !bind.ip().is_loopback()) {
+        return Err(anyhow!("local_bind must be a loopback address"));
+    }
+    let backup_catalog = config.backup_catalog.clone();
     let require_peer_auth = !remote_bind.ip().is_loopback();
     if require_peer_auth && local_bind.is_none() {
         return Err(anyhow!(
@@ -149,6 +153,7 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
             }
         });
     }
+    let console_service = Arc::clone(&service);
     let remote_app = build_app(AppState {
         service: Arc::clone(&service),
         jobs: SearchJobs::default(),
@@ -163,7 +168,8 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
             jobs: SearchJobs::default(),
             peer_auth_token,
             require_peer_auth: false,
-        });
+        })
+        .merge(crate::console::router(console_service, backup_catalog));
         tokio::try_join!(
             axum::serve(listener, remote_app),
             axum::serve(local_listener, local_app)

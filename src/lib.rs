@@ -1,5 +1,7 @@
 pub mod backend;
+pub mod backup_catalog;
 pub mod config;
+pub mod console;
 pub mod gptadmin;
 pub mod index;
 pub mod jobs;

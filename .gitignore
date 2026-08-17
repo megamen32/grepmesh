@@ -1,4 +1,5 @@
 /target/
+/graphify-out/
 *.index.json
 *.topology.json
 .grepmesh/

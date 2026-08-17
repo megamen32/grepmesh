@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "generated_at_ms": 1723840000000,
+  "backups": [
+    {
+      "completed_at_ms": 1723839000000,
+      "object_count": 4,
+      "byte_count": 1200
+    },
+    {
+      "completed_at_ms": 1723839500000,
+      "object_count": 6,
+      "byte_count": 3400
+    }
+  ]
+}

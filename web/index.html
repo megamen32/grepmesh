@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>GrepMesh Console</title>
+    <link rel="stylesheet" href="/ui/console.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">⌁</span>
+          <div>
+            <p class="eyebrow">LOCAL OPERATOR CONSOLE</p>
+            <h1>GrepMesh</h1>
+          </div>
+        </div>
+        <div class="connection" id="connection" role="status" aria-live="polite">
+          <span class="pulse" aria-hidden="true"></span>
+          <span>Loading catalog…</span>
+        </div>
+      </header>
+
+      <section class="intro" aria-labelledby="console-title">
+        <div>
+          <p class="eyebrow">SEARCH THE MESH</p>
+          <h2 id="console-title">Find the exact text, then inspect a bounded preview.</h2>
+          <p>Search stays on this local Console. Select an available host and root to reduce scope.</p>
+        </div>
+        <div class="security-note">
+          <span aria-hidden="true">◈</span>
+          <p><strong>Local access</strong><br />This Console never asks for a peer URL, token, or credential.</p>
+        </div>
+      </section>
+
+      <div class="layout">
+        <section class="workspace panel" aria-labelledby="search-heading">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">LIVE QUERY</p>
+              <h2 id="search-heading">Search</h2>
+            </div>
+            <button class="quiet-button" type="button" id="refresh-catalog">Refresh catalog</button>
+          </div>
+
+          <form id="search-form" novalidate>
+            <label class="search-label" for="query">Text or pattern</label>
+            <div class="query-row">
+              <input id="query" name="query" type="search" autocomplete="off" placeholder="e.g. TODO, error code, or file name" required />
+              <button class="primary-button" id="search-button" type="submit">
+                <span>Search</span><kbd>↵</kbd>
+              </button>
+            </div>
+            <p class="input-help">The request is sent only to the local GrepMesh API.</p>
+
+            <div class="filters" aria-label="Search filters">
+              <label>
+                <span>Host</span>
+                <select id="host-filter" name="host" disabled>
+                  <option value="">All available hosts</option>
+                </select>
+              </label>
+              <label>
+                <span>Root</span>
+                <select id="root-filter" name="root" disabled>
+                  <option value="">All permitted roots</option>
+                </select>
+              </label>
+            </div>
+          </form>
+
+          <div class="search-state idle" id="search-state" role="status" aria-live="polite">
+            <span class="state-dot" aria-hidden="true"></span>
+            <span>Choose a query to begin.</span>
+          </div>
+
+          <div class="results-header">
+            <h3>Results</h3>
+            <span id="results-count">No query yet</span>
+          </div>
+          <div class="results" id="results" aria-live="polite">
+            <div class="empty-results">
+              <span class="empty-icon" aria-hidden="true">⌕</span>
+              <p>Matches will appear here.</p>
+              <small>Open a result to inspect the limited preview.</small>
+            </div>
+          </div>
+        </section>
+
+        <aside class="side-column">
+          <section class="panel inspector" aria-labelledby="preview-heading">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">BOUNDED INSPECTOR</p>
+                <h2 id="preview-heading">Preview</h2>
+              </div>
+              <span class="safe-label">Result-bound</span>
+            </div>
+            <div id="preview" class="preview-empty" role="status" aria-live="polite">
+              <span class="empty-icon" aria-hidden="true">▧</span>
+              <p>Select a search result.</p>
+              <small>Only a result returned by this Console can be previewed.</small>
+            </div>
+          </section>
+
+          <section class="panel backup-card" aria-labelledby="backup-heading">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">SEPARATE FROM LIVE SEARCH</p>
+                <h2 id="backup-heading">Backup catalog</h2>
+              </div>
+              <span class="backup-state unknown" id="backup-badge">Checking…</span>
+            </div>
+            <div id="backup-body" class="backup-body" role="status" aria-live="polite">
+              <p>Checking backup catalog availability…</p>
+              <small>This card reports catalog coverage only; it does not restore or search backup content.</small>
+            </div>
+          </section>
+        </aside>
+      </div>
+    </main>
+    <script src="/ui/console.js" defer></script>
+  </body>
+</html>
