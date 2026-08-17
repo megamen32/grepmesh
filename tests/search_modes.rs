@@ -152,14 +152,32 @@ async fn named_roots_are_selectable_and_paths_remain_absolute() {
         .await;
     assert!(unknown.is_err());
 
-    let unconfigured_absolute = backend
+    let project = home.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(project.join("nested.txt"), "nested-only\n").unwrap();
+    let nested_absolute = backend
         .search_text(
-            "home-only",
+            "nested-only",
             10,
             0,
             SearchMode::Literal,
             vec![],
-            vec![home.path().join("nested").display().to_string()],
+            vec![project.display().to_string()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(nested_absolute.len(), 1);
+    assert_eq!(nested_absolute[0].path, project.join("nested.txt").display().to_string());
+
+    let outside_root = tempfile::tempdir().unwrap();
+    let unconfigured_absolute = backend
+        .search_text(
+            "nested-only",
+            10,
+            0,
+            SearchMode::Literal,
+            vec![],
+            vec![outside_root.path().display().to_string()],
         )
         .await;
     assert!(unconfigured_absolute.is_err());

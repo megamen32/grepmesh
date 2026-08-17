@@ -276,15 +276,23 @@ impl LocalBackend {
         } else {
             for name in names {
                 let paths = if let Some(paths) = self.root_paths.get(name) {
-                    paths
+                    paths.clone()
                 } else {
                     let requested = Path::new(name);
-                    self.root_paths
+                    let requested = fs::canonicalize(requested)
+                        .with_context(|| format!("resolve requested root {name}"))?;
+                    let allowed = self
+                        .root_paths
                         .values()
-                        .find(|paths| paths.iter().any(|path| path == requested))
-                        .ok_or_else(|| anyhow!("unknown root {}", name))?
+                        .flatten()
+                        .filter_map(|path| fs::canonicalize(path).ok())
+                        .any(|path| requested.starts_with(path));
+                    if !allowed {
+                        return Err(anyhow!("unknown root {}", name));
+                    }
+                    vec![requested]
                 };
-                roots.extend(paths.iter().cloned());
+                roots.extend(paths);
             }
         }
         roots.sort();
