@@ -30,11 +30,18 @@ Cargo, clone, or manual build is required when a matching release asset exists.
 The checked-in release workflow targets Linux x86_64, macOS arm64/x86_64, and
 Windows x86_64; confirm that a release asset exists for your platform.
 
-For multi-host searches, pass a small `wait_ms` budget. Fast searches return
-their result immediately. Slower searches return ready matches plus a `job_id`;
-poll `search_status` with that ID to receive the completed result and opaque
-cursor pages without flooding the model context or relying on a remote file
-path.
+For multi-host searches, GrepMesh waits up to 30 seconds by default. Fast
+searches return immediately. A still-running search returns ready matches and
+an opaque `job_id` (plus opaque `artifact_id` while partial); poll
+`search_status` with the job ID and its opaque cursor for incremental batches.
+It includes a 30-second poll hint. The configured result limit is stable in
+arrival order: the first unique hits admitted are never replaced by a later
+peer, so a batch cannot contradict a later final result.
+
+Search jobs are stored as private service artifacts, not filesystem paths
+exposed to MCP clients. They expire after the configured TTL; after a service
+restart an in-flight job is explicitly reported as `lost`, and an unknown or
+expired job tells the client to start the search again.
 
 ## Why GrepMesh
 

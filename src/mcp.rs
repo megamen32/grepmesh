@@ -369,6 +369,21 @@ impl MeshService {
             .unwrap_or_else(|_| vec![self.local.host_id.clone()])
     }
 
+    /// Resolve a user-facing search target once, before `SearchJobs` fans it
+    /// out. This deliberately does not claim a request id: every background
+    /// host call receives its own id and still uses the normal peer path.
+    pub fn resolve_search_hosts(&self, args: &SearchArgs) -> Result<Vec<String>> {
+        let normalized = normalize_request(
+            &self.local.host_id,
+            self.known_host_ids(),
+            args.hosts.clone(),
+            None,
+            None,
+            None,
+        )?;
+        Ok(unique_hosts(&normalized.hosts))
+    }
+
     fn peer_config(&self, host_id: &str) -> Option<crate::topology::PeerConfig> {
         self.topology
             .read()
@@ -400,6 +415,20 @@ impl MeshService {
     }
 
     pub async fn call_search(&self, args: SearchArgs) -> Result<ToolResult> {
+        self.call_search_with_overall_timeout(
+            args,
+            Duration::from_millis(self.local.limits.overall_timeout_ms),
+        )
+        .await
+    }
+
+    /// Background jobs deliberately use their own bounded deadline. The
+    /// interactive mesh timeout remains unchanged for ordinary callers.
+    pub async fn call_search_with_overall_timeout(
+        &self,
+        args: SearchArgs,
+        overall_timeout: Duration,
+    ) -> Result<ToolResult> {
         let SearchArgs {
             query,
             verbose,
@@ -435,6 +464,7 @@ impl MeshService {
                 mode,
                 path_globs,
                 roots,
+                overall_timeout,
             )
             .await?;
         results.sort_by(|a, b| {
@@ -723,6 +753,7 @@ impl MeshService {
         mode: SearchMode,
         path_globs: Vec<String>,
         roots: Vec<String>,
+        overall_timeout: Duration,
     ) -> Result<(Vec<SearchHit>, Vec<PerHostStatus>, bool, bool)> {
         let mut futures = Vec::new();
         for target in unique_hosts(&normalized.hosts) {
@@ -818,7 +849,7 @@ impl MeshService {
                 }
             }));
         }
-        self.join_hosts(futures).await
+        self.join_hosts_with_timeout(futures, overall_timeout).await
     }
 
     async fn find_paths_across(
@@ -941,6 +972,22 @@ impl MeshService {
         F: std::future::Future<Output = Result<(Vec<SearchHit>, Vec<PerHostStatus>, bool, bool)>>
             + Send,
     {
+        self.join_hosts_with_timeout(
+            futures,
+            Duration::from_millis(self.local.limits.overall_timeout_ms),
+        )
+        .await
+    }
+
+    async fn join_hosts_with_timeout<F>(
+        &self,
+        futures: Vec<(String, F)>,
+        overall_timeout: Duration,
+    ) -> Result<(Vec<SearchHit>, Vec<PerHostStatus>, bool, bool)>
+    where
+        F: std::future::Future<Output = Result<(Vec<SearchHit>, Vec<PerHostStatus>, bool, bool)>>
+            + Send,
+    {
         let mut pending = FuturesUnordered::new();
         let mut pending_hosts = BTreeSet::new();
         for (host_id, future) in futures {
@@ -951,7 +998,7 @@ impl MeshService {
         let mut statuses = Vec::new();
         let mut partial = false;
         let mut truncated = false;
-        let deadline = Instant::now() + Duration::from_millis(self.local.limits.overall_timeout_ms);
+        let deadline = Instant::now() + overall_timeout;
         while !pending_hosts.is_empty() {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {

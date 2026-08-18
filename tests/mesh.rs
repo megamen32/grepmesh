@@ -1,6 +1,7 @@
 use grepmesh::{
     backend::{LocalBackend, SearchMode},
     config::AppConfig,
+    jobs::SearchJobs,
     mcp::{normalize_request, HostsInput, MeshService, SearchArgs},
     topology::{PeerConfig, Topology},
 };
@@ -56,6 +57,21 @@ fn normalize_wildcard_hop_and_dedup_rules() {
         Some(1)
     )
     .is_err());
+}
+
+#[test]
+fn missing_search_job_is_explicitly_expired_without_result_payload() {
+    let status = SearchJobs::default()
+        .status("opaque-missing-job", None, None)
+        .unwrap();
+    assert_eq!(status["state"], "expired");
+    assert_eq!(status["lost"], true);
+    assert!(status.get("results").is_none());
+    assert!(status.get("matches").is_none());
+    assert!(status["error"]
+        .as_str()
+        .unwrap()
+        .contains("expired or was lost"));
 }
 
 #[test]
@@ -636,9 +652,19 @@ async fn async_search_status_returns_a_bounded_final_page() {
         let mut request = [0u8; 4096];
         let _ = stream.read(&mut request);
         std::thread::sleep(Duration::from_millis(250));
+        let result_text = serde_json::to_string(&serde_json::json!({
+            "request_id": "peer-async", "origin_host": "B", "hop_count": 1,
+            "host_id": "A", "partial": false, "truncated": false,
+            "results": [{
+                "host_id": "A", "path": "/remote-async.txt", "line_number": 1,
+                "column": 1, "text": "async canary remote", "context": []
+            }],
+            "host_status": [{"host_id": "A", "ok": true, "error": null}]
+        }))
+        .unwrap();
         let body = serde_json::to_vec(&serde_json::json!({
             "jsonrpc": "2.0", "id": 1,
-            "result": {"content": [{"type": "text", "text": "{}"}], "isError": false}
+            "result": {"content": [{"type": "text", "text": result_text}], "isError": false}
         }))
         .unwrap();
         write!(
@@ -653,19 +679,21 @@ async fn async_search_status_returns_a_bounded_final_page() {
     let port = free_port();
     let url = format!("http://127.0.0.1:{port}/mcp");
     let cfg = AppConfig {
-        host_id: "A".into(),
+        host_id: "B".into(),
         bind: format!("127.0.0.1:{port}").parse().unwrap(),
         local_bind: None,
         root: root.clone(),
         roots: std::collections::BTreeMap::new(),
         peers: vec![PeerConfig {
-            host_id: "B".into(),
+            host_id: "A".into(),
             local_url: "http://127.0.0.1:1/mcp".into(),
             routable_url: fake_url,
         }],
         limits: grepmesh::config::LimitsConfig {
             peer_timeout_ms: 500,
-            overall_timeout_ms: 700,
+            // This is the ordinary synchronous fan-out ceiling. The job must
+            // outlive it and still collect A after the 250ms peer delay.
+            overall_timeout_ms: 50,
             max_results: 10,
             ..Default::default()
         },
@@ -689,7 +717,7 @@ async fn async_search_status_returns_a_bounded_final_page() {
         serde_json::json!({
             "name": "search_text",
             "arguments": {
-                "query": "async canary", "hosts": "*", "limit": 10, "wait_ms": 25
+                "query": "async canary", "hosts": "*", "limit": 10, "wait_ms": 100, "verbose": true
             }
         }),
     )
@@ -702,14 +730,42 @@ async fn async_search_status_returns_a_bounded_final_page() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|result| result["host_id"] == "A"));
+        .any(|result| result["host_id"] == "B"));
     assert!(running["host_status"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|status| status["host_id"] == "A"));
+        .any(|status| status["host_id"] == "B"));
+    assert!(running["pending_hosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|host| host == "A"));
+    assert_eq!(running["next_poll_after_ms"], 30_000);
+    assert!(running["message"]
+        .as_str()
+        .unwrap()
+        .contains("Search continues"));
+    let delivered_cursor = running["cursor"].as_str().unwrap().to_string();
 
     tokio::time::sleep(Duration::from_millis(350)).await;
+    let complete = rpc(
+        &url,
+        "tools/call",
+        serde_json::json!({
+            "name": "search_status",
+            "arguments": {"job_id": job_id, "cursor": delivered_cursor, "page_size": 2}
+        }),
+    )
+    .await;
+    let incremental: serde_json::Value =
+        serde_json::from_str(complete["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(incremental["state"], "complete");
+    assert_eq!(incremental["results"].as_array().unwrap().len(), 1);
+    // A sorts before the already-delivered B, but its later arrival is still
+    // returned exactly once because the cursor is an append-only watermark.
+    assert_eq!(incremental["results"][0]["host_id"], "A");
+
     let complete = rpc(
         &url,
         "tools/call",
@@ -724,6 +780,27 @@ async fn async_search_status_returns_a_bounded_final_page() {
     assert_eq!(first_page["state"], "complete");
     assert_eq!(first_page["results"].as_array().unwrap().len(), 2);
     let cursor = first_page["cursor"].as_str().unwrap().to_string();
+
+    // The opaque reference is durable: a fresh server process can retrieve
+    // the private service-owned artifact without receiving its filesystem path.
+    let _ = child.kill();
+    let _ = child.wait();
+    child = spawn_server(&path);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let restored = rpc(
+        &url,
+        "tools/call",
+        serde_json::json!({
+            "name": "search_status",
+            "arguments": {"job_id": job_id, "page_size": 2}
+        }),
+    )
+    .await;
+    let restored: serde_json::Value =
+        serde_json::from_str(restored["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(restored["state"], "complete");
+    assert!(restored.get("artifact_id").is_none());
+    assert!(restored.get("artifact_path").is_none());
 
     let next = rpc(
         &url,
@@ -842,6 +919,10 @@ async fn search_text_tool_defaults_to_compact_ranges_with_verbose_raw_opt_in() {
     assert_eq!(
         search_schema["inputSchema"]["properties"]["verbose"]["type"],
         "boolean"
+    );
+    assert_eq!(
+        search_schema["inputSchema"]["properties"]["wait_ms"]["default"],
+        30_000
     );
 
     let compact = rpc(

@@ -39,6 +39,7 @@ pub fn default_exclude_globs() -> Vec<String> {
         "**/go/pkg/mod/**",
         "**/.local/share/Trash/**",
         "**/diag-live/**",
+        "**/.grepmesh-jobs/**",
         "**/.ssh/**",
         "**/.gnupg/**",
         "**/.aws/credentials",
@@ -69,6 +70,16 @@ pub struct LimitsConfig {
     pub overall_timeout_ms: u64,
     #[serde(default = "default_max_file_bytes")]
     pub max_file_bytes: u64,
+    /// Independent ceiling for an asynchronous search job. This must exceed
+    /// the foreground wait budget; it is not the synchronous fan-out timeout.
+    #[serde(default = "default_search_job_timeout_ms")]
+    pub search_job_timeout_ms: u64,
+    #[serde(default = "default_search_job_ttl_ms")]
+    pub search_job_ttl_ms: u64,
+    #[serde(default = "default_search_job_max_bytes")]
+    pub search_job_max_bytes: u64,
+    #[serde(default = "default_search_job_store_max_bytes")]
+    pub search_job_store_max_bytes: u64,
 }
 
 fn default_max_results() -> usize {
@@ -89,6 +100,18 @@ fn default_overall_timeout_ms() -> u64 {
 fn default_max_file_bytes() -> u64 {
     16 * 1024 * 1024
 }
+fn default_search_job_timeout_ms() -> u64 {
+    10 * 60 * 1_000
+}
+fn default_search_job_ttl_ms() -> u64 {
+    30 * 60 * 1_000
+}
+fn default_search_job_max_bytes() -> u64 {
+    8 * 1024 * 1024
+}
+fn default_search_job_store_max_bytes() -> u64 {
+    64 * 1024 * 1024
+}
 
 impl Default for LimitsConfig {
     fn default() -> Self {
@@ -99,6 +122,10 @@ impl Default for LimitsConfig {
             peer_timeout_ms: default_peer_timeout_ms(),
             overall_timeout_ms: default_overall_timeout_ms(),
             max_file_bytes: default_max_file_bytes(),
+            search_job_timeout_ms: default_search_job_timeout_ms(),
+            search_job_ttl_ms: default_search_job_ttl_ms(),
+            search_job_max_bytes: default_search_job_max_bytes(),
+            search_job_store_max_bytes: default_search_job_store_max_bytes(),
         }
     }
 }

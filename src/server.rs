@@ -20,6 +20,7 @@ use std::{env, sync::Arc, time::Duration};
 
 const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
 const CURRENT_PROTOCOL_VERSION: &str = "2026-07-28";
+const DEFAULT_FOREGROUND_SEARCH_WAIT_MS: u64 = 30_000;
 
 #[derive(Clone)]
 struct AppState {
@@ -121,6 +122,7 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
     }
     let service =
         Arc::new(MeshService::new(local, topology).with_peer_auth_token(peer_auth_token.clone()));
+    let jobs = SearchJobs::persistent(service.local.root.clone(), &service.local.limits)?;
     if let Some(client) = topology_client {
         let refresh_service = Arc::clone(&service);
         let cache_path = config.topology_cache_path.clone();
@@ -161,7 +163,7 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
     let console_service = Arc::clone(&service);
     let remote_app = build_app(AppState {
         service: Arc::clone(&service),
-        jobs: SearchJobs::default(),
+        jobs: jobs.clone(),
         peer_auth_token: peer_auth_token.clone(),
         require_peer_auth,
     });
@@ -170,7 +172,7 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
         let local_listener = tokio::net::TcpListener::bind(local_bind).await?;
         let local_app = build_app(AppState {
             service,
-            jobs: SearchJobs::default(),
+            jobs,
             peer_auth_token,
             require_peer_auth: false,
         })
@@ -349,7 +351,8 @@ fn tool_meta(name: &str, description: &str) -> Value {
                 "path_globs": {"type": "array", "items": {"type": "string"}},
                 "context_lines": {"type": "integer", "minimum": 0},
                 "max_matches": {"type": "integer", "minimum": 1},
-                "wait_ms": {"type": "integer", "minimum": 0}
+                "wait_ms": {"type": "integer", "minimum": 0, "default": DEFAULT_FOREGROUND_SEARCH_WAIT_MS,
+                    "description": "Foreground wait budget; defaults to 30 seconds. A running search returns an opaque job_id and can be polled."}
             }
         }),
         "find_paths" => json!({
@@ -395,10 +398,8 @@ async fn call_tool(service: &MeshService, jobs: &SearchJobs, params: Value) -> R
     let tool_result = match name {
         "search_text" => {
             let mut arguments = arguments;
-            let wait_ms = arguments
-                .get("wait_ms")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
+            let explicit_wait_ms = arguments.get("wait_ms").and_then(Value::as_u64);
+            let wait_ms = explicit_wait_ms.unwrap_or(DEFAULT_FOREGROUND_SEARCH_WAIT_MS);
             if let Some(object) = arguments.as_object_mut() {
                 object.remove("wait_ms");
             }
@@ -407,13 +408,29 @@ async fn call_tool(service: &MeshService, jobs: &SearchJobs, params: Value) -> R
                 service.call_search(args).await?
             } else {
                 let verbose = args.verbose;
-                let job_id = jobs.start(service.clone(), args);
+                let job_id = jobs.start(service.clone(), args)?;
                 jobs.wait(&job_id, Duration::from_millis(wait_ms)).await;
-                let data = match jobs.completed_result(&job_id)? {
-                    Some(data) if verbose => data,
-                    Some(data) => compact_search_response_data(data)?,
-                    None => jobs.status(&job_id, None, None)?,
-                };
+                let mut data = jobs.status(&job_id, None, None)?;
+                let running = jobs.is_running(&job_id);
+                if !running {
+                    // Explicit wait callers historically receive a normal
+                    // final search response, not a job envelope.
+                    for field in [
+                        "state",
+                        "job_id",
+                        "cursor",
+                        "pending_hosts",
+                        "next_poll_after_ms",
+                        "message",
+                    ] {
+                        data.as_object_mut()
+                            .expect("job status object")
+                            .remove(field);
+                    }
+                }
+                if !verbose {
+                    data = compact_job_search_data(data)?;
+                }
                 return Ok(tool_content(data, service)?);
             }
         }
@@ -434,10 +451,15 @@ async fn call_tool(service: &MeshService, jobs: &SearchJobs, params: Value) -> R
                     .get("page_size")
                     .and_then(Value::as_u64)
                     .map(|value| value as usize);
-                return Ok(tool_content(
-                    jobs.status(job_id, cursor, page_size)?,
-                    service,
-                )?);
+                let data = jobs.status(job_id, cursor, page_size)?;
+                let data = if data.get("state").and_then(Value::as_str) == Some("expired")
+                    || jobs.is_verbose(job_id)?
+                {
+                    data
+                } else {
+                    compact_job_search_data(data)?
+                };
+                return Ok(tool_content(data, service)?);
             }
             service
                 .call_status(serde_json::from_value(arguments)?)
@@ -446,6 +468,27 @@ async fn call_tool(service: &MeshService, jobs: &SearchJobs, params: Value) -> R
         other => return Err(anyhow::anyhow!("unknown tool {}", other)),
     };
     Ok(tool_content(tool_result.data, service)?)
+}
+
+fn compact_job_search_data(data: Value) -> Result<Value> {
+    let envelope = data.clone();
+    let mut compact = compact_search_response_data(data)?;
+    for field in [
+        "state",
+        "job_id",
+        "artifact_id",
+        "cursor",
+        "pending_hosts",
+        "next_poll_after_ms",
+        "message",
+        "lost",
+        "error",
+    ] {
+        if let Some(value) = envelope.get(field) {
+            compact[field] = value.clone();
+        }
+    }
+    Ok(compact)
 }
 
 fn tool_content(data: Value, service: &MeshService) -> Result<Value> {
@@ -595,6 +638,22 @@ mod tests {
             negotiate_protocol_version(&json!({})),
             DEFAULT_PROTOCOL_VERSION
         );
+    }
+
+    #[test]
+    fn compact_job_response_keeps_only_the_opaque_artifact_reference() {
+        let compact = compact_job_search_data(json!({
+            "state": "running", "job_id": "job-deadbeef-1", "artifact_id": "job-deadbeef-1",
+            "request_id": "job-deadbeef-1", "origin_host": "A", "hop_count": 0, "host_id": "A",
+            "partial": true, "truncated": false, "results": [{
+                "host_id": "A", "path": "/private/result.txt", "line_number": 1,
+                "column": 1, "text": "needle", "context": []
+            }], "host_status": [], "pending_hosts": ["B"], "next_poll_after_ms": 30_000
+        }))
+        .unwrap();
+        assert_eq!(compact["artifact_id"], "job-deadbeef-1");
+        assert!(compact.get("artifact_path").is_none());
+        assert_eq!(compact["results"][0]["data"], "needle");
     }
 
     #[tokio::test]
