@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    error::Error as StdError,
     path::PathBuf,
     sync::{Arc, RwLock},
     time::{Duration, Instant},
@@ -1087,7 +1088,7 @@ impl MeshService {
                     .json(&payload)
                     .send()
                     .await
-                    .context("send remote request")?;
+                    .map_err(|error| anyhow!(Self::redacted_outbound_error(&error)))?;
                 if !resp.status().is_success() {
                     return Err(anyhow!("remote HTTP status {}", resp.status()));
                 }
@@ -1112,6 +1113,35 @@ impl MeshService {
             return Err(anyhow!("remote error: {}", err));
         }
         Ok(value.get("result").cloned().unwrap_or(value))
+    }
+
+    fn redacted_outbound_error(error: &reqwest::Error) -> String {
+        let phase = if error.is_timeout() {
+            "timeout"
+        } else if error.is_connect() {
+            "connect"
+        } else if error.is_body() {
+            "body"
+        } else if error.is_request() {
+            "request"
+        } else {
+            "transport"
+        };
+        let mut source = error.source();
+        while let Some(cause) = source {
+            if let Some(io_error) = cause.downcast_ref::<std::io::Error>() {
+                let mut summary = format!(
+                    "send remote request: {phase}; io_kind={:?}",
+                    io_error.kind()
+                );
+                if let Some(errno) = io_error.raw_os_error() {
+                    summary.push_str(&format!("; errno={errno}"));
+                }
+                return summary;
+            }
+            source = cause.source();
+        }
+        format!("send remote request: {phase}")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1247,5 +1277,36 @@ mod tests {
         assert_eq!(rendered["results"][0]["line_number"], 16);
         assert_eq!(rendered["matches"], rendered["results"]);
         assert!(rendered["results"][0].get("data").is_none());
+    }
+
+    #[tokio::test]
+    async fn outbound_reqwest_error_summary_is_classified_and_redacted() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://127.0.0.1:{}/private-token-must-not-leak",
+            listener.local_addr().unwrap().port()
+        );
+        drop(listener);
+        let error = Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(&url)
+            .send()
+            .await
+            .unwrap_err();
+
+        let summary = MeshService::redacted_outbound_error(&error);
+        assert!(
+            summary.starts_with("send remote request: connect"),
+            "{summary}"
+        );
+        assert!(summary.contains("io_kind=ConnectionRefused"), "{summary}");
+        assert!(summary.contains("errno="), "{summary}");
+        assert!(!summary.contains("127.0.0.1"), "{summary}");
+        assert!(
+            !summary.contains("private-token-must-not-leak"),
+            "{summary}"
+        );
     }
 }
