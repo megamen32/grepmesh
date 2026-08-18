@@ -345,7 +345,12 @@ impl MeshService {
         Self {
             local,
             topology: Arc::new(RwLock::new(topology)),
-            client: Client::new(),
+            // Peer URLs are private mesh routes. They must not inherit a
+            // desktop or launchd HTTP proxy that cannot reach the peer LAN.
+            client: Client::builder()
+                .no_proxy()
+                .build()
+                .expect("build direct peer HTTP client"),
             peer_auth_token: None,
             seen_requests: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         }
