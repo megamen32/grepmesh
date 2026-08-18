@@ -98,6 +98,7 @@ async fn malformed_search_inputs_are_failed_partial_mcp_results() {
         let result = service
             .call_search(SearchArgs {
                 query: query.into(),
+                verbose: false,
                 hosts: Some(HostsInput::One("local".into())),
                 request_id: Some(request_id.into()),
                 origin_host: None,
@@ -143,6 +144,7 @@ async fn permission_denied_search_is_partial_and_keeps_readable_match() {
     let result = service
         .call_search(SearchArgs {
             query: "Name".into(),
+            verbose: false,
             hosts: Some(HostsInput::One("local".into())),
             request_id: Some("permission-partial".into()),
             origin_host: None,
@@ -161,7 +163,7 @@ async fn permission_denied_search_is_partial_and_keeps_readable_match() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|hit| hit["text"]
+        .any(|hit| hit["data"]
             .as_str()
             .is_some_and(|text| text.contains("Name"))));
     let status = result
@@ -314,8 +316,12 @@ async fn black_box_two_process_peer_fanout_and_partial_results() {
     let value: serde_json::Value = serde_json::from_str(result_text).unwrap();
     assert_eq!(value["host_id"], "A");
     let results = value["results"].as_array().unwrap();
-    assert!(results.iter().any(|r| r["host_id"] == "A"));
-    assert!(results.iter().any(|r| r["host_id"] == "B"));
+    assert!(results.iter().any(|r| r["path"]
+        .as_str()
+        .is_some_and(|path| path.ends_with("a-canary.txt"))));
+    assert!(results.iter().any(|r| r["path"]
+        .as_str()
+        .is_some_and(|path| path.ends_with("b-canary.txt"))));
 
     let paths = rpc(
         &url_a,
@@ -373,8 +379,12 @@ async fn black_box_two_process_peer_fanout_and_partial_results() {
     .unwrap();
     assert_eq!(partial_value["partial"], true);
     let partial_results = partial_value["results"].as_array().unwrap();
-    assert!(partial_results.iter().any(|r| r["host_id"] == "A"));
-    assert!(!partial_results.iter().any(|r| r["host_id"] == "B"));
+    assert!(partial_results.iter().any(|r| r["path"]
+        .as_str()
+        .is_some_and(|path| path.ends_with("a-canary.txt"))));
+    assert!(!partial_results.iter().any(|r| r["path"]
+        .as_str()
+        .is_some_and(|path| path.ends_with("b-canary.txt"))));
 
     let _ = child_a.kill();
     let _ = child_a.wait();
@@ -486,7 +496,7 @@ async fn remote_partial_status_and_local_results_survive_fanout() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|result| result["host_id"] == "B"));
+        .any(|result| result["path"] == "/fake/partial-canary.txt"));
     assert!(search_value["host_status"]
         .as_array()
         .unwrap()
@@ -591,7 +601,9 @@ async fn stalled_peer_body_keeps_completed_local_results() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|result| result["host_id"] == "A"));
+        .any(|result| result["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("local-stalled.txt"))));
     assert!(value["host_status"]
         .as_array()
         .unwrap()
@@ -782,7 +794,90 @@ async fn search_with_sufficient_wait_returns_the_complete_result_directly() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|result| result["host_id"] == "A"));
+        .any(|result| result["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("direct-canary.txt"))));
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[tokio::test]
+async fn search_text_tool_defaults_to_compact_ranges_with_verbose_raw_opt_in() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().to_path_buf();
+    let file = root.join("result.rs");
+    fs::write(&file, "before\nneedle one\nneedle two\nafter\n").unwrap();
+    let port = free_port();
+    let url = format!("http://127.0.0.1:{port}/mcp");
+    let config = AppConfig {
+        host_id: "A".into(),
+        bind: format!("127.0.0.1:{port}").parse().unwrap(),
+        local_bind: None,
+        root,
+        roots: std::collections::BTreeMap::new(),
+        peers: vec![],
+        limits: Default::default(),
+        exclude_globs: vec![],
+        topology_cache_path: None,
+        index_path: Some(temp.path().join("index.sqlite")),
+        gptadmin_topology_url: None,
+        gptadmin_token_env: None,
+        peer_auth_token_env: None,
+        backup_catalog: None,
+        topology_ttl_ms: 30_000,
+    };
+    let path = temp.path().join("config.json");
+    write_config(&path, &config);
+    let mut child = spawn_server(&path);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let tools = rpc(&url, "tools/list", serde_json::json!({})).await;
+    let search_schema = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "search_text")
+        .unwrap();
+    assert_eq!(
+        search_schema["inputSchema"]["properties"]["verbose"]["type"],
+        "boolean"
+    );
+
+    let compact = rpc(
+        &url,
+        "tools/call",
+        serde_json::json!({
+            "name": "search_text",
+            "arguments": {"query": "needle", "context_lines": 0}
+        }),
+    )
+    .await;
+    let compact: serde_json::Value =
+        serde_json::from_str(compact["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        compact["results"],
+        serde_json::json!([{
+            "path": file.display().to_string(),
+            "data": "needle one\nneedle two",
+            "loc": "2-3"
+        }])
+    );
+    assert!(compact.get("matches").is_none());
+
+    let verbose = rpc(
+        &url,
+        "tools/call",
+        serde_json::json!({
+            "name": "search_text",
+            "arguments": {"query": "needle", "context_lines": 0, "verbose": true}
+        }),
+    )
+    .await;
+    let verbose: serde_json::Value =
+        serde_json::from_str(verbose["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(verbose["results"][0]["line_number"], 2);
+    assert_eq!(verbose["matches"], verbose["results"]);
 
     let _ = child.kill();
     let _ = child.wait();

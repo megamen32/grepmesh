@@ -114,10 +114,11 @@ async fn catalog(State(state): State<ConsoleState>) -> Json<Value> {
     Json(json!({"hosts": hosts, "roots": roots}))
 }
 
-async fn search(State(state): State<ConsoleState>, Json(args): Json<SearchArgs>) -> Response {
+async fn search(State(state): State<ConsoleState>, Json(mut args): Json<SearchArgs>) -> Response {
     if args.query.trim().is_empty() {
         return bad_request("query must not be empty");
     }
+    args.verbose = true;
     match state.service.call_search(args).await {
         Ok(result) => {
             let mut data = result.data;

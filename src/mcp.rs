@@ -38,6 +38,8 @@ impl HostsInput {
 pub struct SearchArgs {
     pub query: String,
     #[serde(default)]
+    pub verbose: bool,
+    #[serde(default)]
     pub hosts: Option<HostsInput>,
     #[serde(default)]
     pub request_id: Option<String>,
@@ -195,6 +197,131 @@ fn with_search_matches_alias<T: Serialize>(response: SearchResponse<T>) -> Resul
     Ok(value)
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct CompactSearchResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host: Option<String>,
+    path: String,
+    data: String,
+    loc: String,
+}
+
+#[derive(Debug)]
+struct CompactSearchRange {
+    host_id: String,
+    path: String,
+    start_line: usize,
+    end_line: usize,
+    lines: BTreeMap<usize, String>,
+}
+
+fn compact_search_results(mut hits: Vec<SearchHit>) -> Vec<CompactSearchResult> {
+    hits.sort_by(|a, b| {
+        a.host_id
+            .cmp(&b.host_id)
+            .then(a.path.cmp(&b.path))
+            .then(a.line_number.cmp(&b.line_number))
+    });
+
+    let mut ranges = Vec::<CompactSearchRange>::new();
+    for hit in hits {
+        let mut lines = hit.context;
+        if lines.is_empty() && hit.line_number != 0 {
+            lines.push(crate::backend::MatchLine {
+                line_number: hit.line_number,
+                text: hit.text,
+            });
+        }
+        lines.sort_by_key(|line| line.line_number);
+        let Some(start_line) = lines.first().map(|line| line.line_number) else {
+            continue;
+        };
+        let end_line = lines
+            .last()
+            .map(|line| line.line_number)
+            .unwrap_or(start_line);
+
+        if let Some(previous) = ranges.last_mut().filter(|range| {
+            range.host_id == hit.host_id
+                && range.path == hit.path
+                && start_line <= range.end_line.saturating_add(1)
+        }) {
+            previous.end_line = previous.end_line.max(end_line);
+            for line in lines {
+                previous.lines.entry(line.line_number).or_insert(line.text);
+            }
+        } else {
+            let mut range_lines = BTreeMap::new();
+            for line in lines {
+                range_lines.entry(line.line_number).or_insert(line.text);
+            }
+            ranges.push(CompactSearchRange {
+                host_id: hit.host_id,
+                path: hit.path,
+                start_line,
+                end_line,
+                lines: range_lines,
+            });
+        }
+    }
+
+    let mut hosts_by_path = BTreeMap::<String, BTreeSet<String>>::new();
+    for range in &ranges {
+        hosts_by_path
+            .entry(range.path.clone())
+            .or_default()
+            .insert(range.host_id.clone());
+    }
+    ranges
+        .into_iter()
+        .map(|range| {
+            let show_host = hosts_by_path
+                .get(&range.path)
+                .is_some_and(|hosts| hosts.len() > 1);
+            CompactSearchResult {
+                host: show_host.then_some(range.host_id),
+                path: range.path,
+                data: range.lines.into_values().collect::<Vec<_>>().join("\n"),
+                loc: if range.start_line == range.end_line {
+                    range.start_line.to_string()
+                } else {
+                    format!("{}-{}", range.start_line, range.end_line)
+                },
+            }
+        })
+        .collect()
+}
+
+fn render_search_response(response: SearchResponse<SearchHit>, verbose: bool) -> Result<Value> {
+    if verbose {
+        return with_search_matches_alias(response);
+    }
+    let SearchResponse {
+        request_id,
+        origin_host,
+        hop_count,
+        host_id,
+        partial,
+        truncated,
+        results,
+        host_status,
+    } = response;
+    Ok(serde_json::to_value(SearchResponse {
+        request_id,
+        origin_host,
+        hop_count,
+        host_id,
+        partial,
+        truncated,
+        results: compact_search_results(results),
+        host_status,
+    })?)
+}
+
+pub fn compact_search_response_data(data: Value) -> Result<Value> {
+    render_search_response(serde_json::from_value(data)?, false)
+}
+
 fn with_search_paths_alias<T: Serialize>(
     response: SearchResponse<T>,
     paths: Vec<Value>,
@@ -275,6 +402,7 @@ impl MeshService {
     pub async fn call_search(&self, args: SearchArgs) -> Result<ToolResult> {
         let SearchArgs {
             query,
+            verbose,
             hosts,
             request_id,
             origin_host,
@@ -323,16 +451,19 @@ impl MeshService {
         let request_id = normalized.request_id.clone();
         let origin_host = normalized.origin_host.clone();
         let hop_count = normalized.hop_count;
-        let data = with_search_matches_alias(SearchResponse {
-            request_id: request_id.clone(),
-            origin_host: origin_host.clone(),
-            hop_count,
-            host_id: self.local.host_id.clone(),
-            partial,
-            truncated,
-            results,
-            host_status: host_status.clone(),
-        })?;
+        let data = render_search_response(
+            SearchResponse {
+                request_id: request_id.clone(),
+                origin_host: origin_host.clone(),
+                hop_count,
+                host_id: self.local.host_id.clone(),
+                partial,
+                truncated,
+                results,
+                host_status: host_status.clone(),
+            },
+            verbose,
+        )?;
         Ok(self.wrap_result(
             request_id.clone(),
             origin_host.clone(),
@@ -640,6 +771,7 @@ impl MeshService {
                                 "search_text",
                                 json!({
                                     "query": query,
+                                    "verbose": true,
                                     "hosts": ["local"],
                                     "request_id": request_id,
                                     "origin_host": origin_host,
@@ -983,4 +1115,85 @@ pub fn decode_tool_result<T: for<'de> Deserialize<'de>>(value: Value) -> Result<
         }
     }
     Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hit(host: &str, path: &str, lines: &[(usize, &str)]) -> SearchHit {
+        SearchHit {
+            host_id: host.into(),
+            path: path.into(),
+            line_number: lines[0].0,
+            context: lines
+                .iter()
+                .map(|(line_number, text)| crate::backend::MatchLine {
+                    line_number: *line_number,
+                    text: (*text).into(),
+                })
+                .collect(),
+            text: lines[0].1.into(),
+            column: 1,
+        }
+    }
+
+    fn response(results: Vec<SearchHit>) -> SearchResponse<SearchHit> {
+        SearchResponse {
+            request_id: "request".into(),
+            origin_host: "A".into(),
+            hop_count: 0,
+            host_id: "A".into(),
+            partial: false,
+            truncated: false,
+            results,
+            host_status: vec![],
+        }
+    }
+
+    #[test]
+    fn search_text_defaults_to_compact_host_path_ranges() {
+        let rendered = render_search_response(
+            response(vec![
+                hit(
+                    "B",
+                    "/same.rs",
+                    &[
+                        (204, "line 204"),
+                        (205, "line 205"),
+                        (206, "line 206"),
+                        (207, "line 207"),
+                    ],
+                ),
+                hit("A", "/other.rs", &[(9, "only line")]),
+                hit("A", "/same.rs", &[(17, "line 17")]),
+                hit("A", "/same.rs", &[(16, "line 16")]),
+            ]),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rendered["results"],
+            serde_json::json!([
+                {"path": "/other.rs", "data": "only line", "loc": "9"},
+                {"host": "A", "path": "/same.rs", "data": "line 16\nline 17", "loc": "16-17"},
+                {"host": "B", "path": "/same.rs", "data": "line 204\nline 205\nline 206\nline 207", "loc": "204-207"}
+            ])
+        );
+        assert!(rendered.get("matches").is_none());
+    }
+
+    #[test]
+    fn verbose_search_text_keeps_legacy_raw_results_and_matches_alias() {
+        let rendered = render_search_response(
+            response(vec![hit("A", "/same.rs", &[(16, "line 16")])]),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(rendered["results"][0]["line_number"], 16);
+        assert_eq!(rendered["matches"], rendered["results"]);
+        assert!(rendered["results"][0].get("data").is_none());
+    }
 }

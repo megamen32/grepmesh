@@ -51,7 +51,9 @@ impl SearchJobs {
         let local_service = service.clone();
         let local_args = args.clone();
         tokio::spawn(async move {
-            let outcome = service.call_search(args).await;
+            let mut raw_args = args;
+            raw_args.verbose = true;
+            let outcome = service.call_search(raw_args).await;
             if let Ok(mut jobs) = jobs.inner.lock() {
                 if let Some(job) = jobs.get_mut(&completed_job_id) {
                     match outcome {

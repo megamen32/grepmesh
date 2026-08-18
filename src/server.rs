@@ -1,6 +1,11 @@
 use crate::{
-    backend::LocalBackend, config::AppConfig, gptadmin::GptAdminTopologyClient, jobs::SearchJobs,
-    mcp::MeshService, topology::Topology, topology_cache::TopologySnapshot,
+    backend::LocalBackend,
+    config::AppConfig,
+    gptadmin::GptAdminTopologyClient,
+    jobs::SearchJobs,
+    mcp::{compact_search_response_data, MeshService},
+    topology::Topology,
+    topology_cache::TopologySnapshot,
 };
 use anyhow::{anyhow, Result};
 use axum::{
@@ -338,6 +343,7 @@ fn tool_meta(name: &str, description: &str) -> Value {
             "required": ["query"],
             "properties": {
                 "query": {"type": "string"}, "hosts": hosts,
+                "verbose": {"type": "boolean", "description": "Return legacy per-line search hits instead of compact ranges."},
                 "roots": {"type": "array", "items": {"type": "string"}},
                 "mode": {"type": "string", "enum": ["literal", "regex", "case_insensitive_literal"]},
                 "path_globs": {"type": "array", "items": {"type": "string"}},
@@ -400,10 +406,12 @@ async fn call_tool(service: &MeshService, jobs: &SearchJobs, params: Value) -> R
             if wait_ms == 0 {
                 service.call_search(args).await?
             } else {
+                let verbose = args.verbose;
                 let job_id = jobs.start(service.clone(), args);
                 jobs.wait(&job_id, Duration::from_millis(wait_ms)).await;
                 let data = match jobs.completed_result(&job_id)? {
-                    Some(data) => data,
+                    Some(data) if verbose => data,
+                    Some(data) => compact_search_response_data(data)?,
                     None => jobs.status(&job_id, None, None)?,
                 };
                 return Ok(tool_content(data, service)?);

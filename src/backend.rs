@@ -562,7 +562,7 @@ async fn search_text_impl(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .with_context(|| "run rg search")?;
+        .map_err(|err| anyhow!("start rg search in {}: {err}", root.display()))?;
     let Some(mut stdout) = child.stdout.take() else {
         terminate_child(&mut child).await;
         return Err(anyhow!("rg search did not provide stdout"));
