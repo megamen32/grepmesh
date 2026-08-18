@@ -111,6 +111,16 @@ async fn local_console_ui_and_catalog_have_a_browser_safe_success_shape() {
     assert!(ui.contains("class=\"results finder-list\""));
     assert!(ui.contains("No file selected."));
 
+    let script = client
+        .get(format!("{}/ui/console.js", harness.local_base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(script.status(), StatusCode::OK);
+    let script = script.text().await.unwrap();
+    assert!(script.contains("/api/browse"));
+    assert!(script.contains("browseDirectory(root)"));
+
     let catalog = client
         .get(format!("{}/api/catalog", harness.local_base))
         .send()
@@ -127,6 +137,60 @@ async fn local_console_ui_and_catalog_have_a_browser_safe_success_shape() {
             && host.get("bearer").is_none()
             && host.get("url").is_none()
     }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_console_browse_lists_immediate_safe_entries_for_a_catalog_root() {
+    let fixture = tempfile::tempdir().unwrap();
+    fs::create_dir(fixture.path().join("nested")).unwrap();
+    fs::write(fixture.path().join("finder-canary.txt"), "finder canary\n").unwrap();
+    let harness = start_console(fixture.path()).await;
+    let client = Client::new();
+
+    let catalog = client
+        .get(format!("{}/api/catalog", harness.local_base))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    let root = catalog["roots"]
+        .as_array()
+        .and_then(|roots| roots.first())
+        .and_then(Value::as_str)
+        .expect("the local catalog must expose its configured root");
+
+    let browse = client
+        .post(format!("{}/api/browse", harness.local_base))
+        .json(&json!({"host": "local", "path": root}))
+        .send()
+        .await
+        .unwrap();
+    let browse_status = browse.status();
+    assert_browser_json(&browse);
+    let browse: Value = browse.json().await.unwrap();
+    assert_eq!(browse_status, StatusCode::OK, "{browse}");
+    let entries = browse["entries"]
+        .as_array()
+        .expect("browse must return a browser-safe entries array");
+    assert!(entries.iter().any(|entry| {
+        entry["name"] == "nested" && entry["kind"] == "directory" && entry["path"].is_string()
+    }));
+    assert!(entries.iter().any(|entry| {
+        entry["name"] == "finder-canary.txt" && entry["kind"] == "file" && entry["size"].is_number()
+    }));
+    assert!(entries.iter().all(|entry| {
+        entry.get("token").is_none() && entry.get("bearer").is_none() && entry.get("url").is_none()
+    }));
+
+    let remote_browse = client
+        .post(format!("{}/api/browse", harness.remote_base))
+        .json(&json!({"host": "local", "path": root}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(remote_browse.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

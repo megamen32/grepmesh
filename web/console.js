@@ -1,17 +1,14 @@
 (() => {
   "use strict";
 
-  const api = Object.freeze({ catalog: "/api/catalog", search: "/api/search", preview: "/api/preview", backup: "/api/backup/availability" });
-  // This is intentionally null until the Console has a server-issued directory-browsing contract.
-  // Do not replace roots below with guessed filesystem entries.
-  const directoryAdapter = Object.freeze({ listDirectory: null });
+  const api = Object.freeze({ catalog: "/api/catalog", browse: "/api/browse", search: "/api/search", preview: "/api/preview", backup: "/api/backup/availability" });
   const $ = (id) => document.getElementById(id);
   const dom = {
     connection: $("connection"), form: $("search-form"), query: $("query"), refresh: $("refresh-catalog"),
     button: $("search-button"), state: $("search-state"), hosts: $("host-sidebar"), results: $("results"),
     count: $("results-count"), preview: $("preview"), backupBadge: $("backup-badge"), backup: $("backup-body"),
   };
-  const state = { catalog: null, selected: null, selectedHost: "", selectedRoot: "", results: [], mode: "browse", directoryAdapter };
+  const state = { catalog: null, selected: null, selectedHost: "", selectedRoot: null, browseTarget: null, results: [], mode: "browse" };
 
   function text(value) { return value == null ? "" : String(value); }
   function pick(object, keys, fallback = undefined) { for (const key of keys) if (object && object[key] !== undefined && object[key] !== null) return object[key]; return fallback; }
@@ -31,10 +28,11 @@
   }
   function catalogEntries(payload) {
     const source = dataOf(payload); const rawHosts = pick(source, ["hosts", "nodes", "available_hosts"], []);
-    const hosts = (Array.isArray(rawHosts) ? rawHosts : []).map((entry) => ({ id: text(typeof entry === "string" ? entry : pick(entry, ["id", "host_id", "host"])), label: text(typeof entry === "string" ? entry : pick(entry, ["label", "name", "host_id", "id"])), roots: Array.isArray(entry?.roots) ? entry.roots.map(text) : [] })).filter((entry) => entry.id);
+    const hosts = (Array.isArray(rawHosts) ? rawHosts : []).map((entry) => ({ id: text(typeof entry === "string" ? entry : pick(entry, ["id", "host_id", "host"])), label: text(typeof entry === "string" ? entry : pick(entry, ["label", "name", "host_id", "id"])), roots: Array.isArray(entry?.roots) ? entry.roots.map((root) => ({ host: text(typeof root === "string" ? pick(entry, ["id", "host_id", "host"]) : pick(root, ["host", "host_id"], pick(entry, ["id", "host_id", "host"]))), path: text(typeof root === "string" ? root : pick(root, ["path", "root", "id"])), name: text(typeof root === "string" ? root : pick(root, ["name", "label", "path", "root", "id"])) })).filter((root) => root.host && root.path) : [] })).filter((entry) => entry.id);
     const rootValues = pick(source, ["roots", "available_roots"], []);
-    const roots = (Array.isArray(rootValues) ? rootValues : []).map((entry) => text(typeof entry === "string" ? entry : pick(entry, ["id", "path", "root"]))).filter(Boolean);
-    return { hosts, roots: [...new Set(roots)] };
+    const roots = hosts.flatMap((host) => host.roots);
+    if (!roots.length) roots.push(...(Array.isArray(rootValues) ? rootValues : []).map((entry) => ({ host: "", path: text(typeof entry === "string" ? entry : pick(entry, ["id", "path", "root"])), name: text(typeof entry === "string" ? entry : pick(entry, ["name", "label", "path", "root", "id"])) })).filter((root) => root.path));
+    return { hosts, roots: roots.filter((root, index, items) => items.findIndex((candidate) => candidate.host === root.host && candidate.path === root.path) === index) };
   }
   function visibleRoots() {
     const host = state.catalog?.hosts.find((item) => item.id === state.selectedHost);
@@ -42,7 +40,7 @@
   }
   function resetPreview() {
     const preview = clear(dom.preview); preview.className = "preview-empty";
-    preview.append(element("span", "empty-icon", "▧"), element("p", "No file selected."), element("small", "Choose a search result to inspect its bounded preview. Directory browsing is not available yet."));
+    preview.append(element("span", "empty-icon", "▧"), element("p", "No file selected."), element("small", "Choose a root or directory to browse metadata, or a search result to inspect its bounded preview."));
   }
   function renderHosts() {
     const hosts = clear(dom.hosts);
@@ -53,18 +51,23 @@
       button.addEventListener("click", () => selectHost(host.id)); hosts.append(button);
     });
   }
-  function selectHost(hostId) { state.selectedHost = hostId; state.selectedRoot = ""; state.mode = "browse"; renderHosts(); renderBrowseRoots(); resetPreview(); }
-  function selectRoot(root) { state.selectedRoot = root; state.mode = "browse"; renderBrowseRoots(); resetPreview(); setSearchState("idle", `Search scope selected: ${root}`); }
+  function selectHost(hostId) { state.selectedHost = hostId; state.selectedRoot = null; state.browseTarget = null; state.selected = null; state.mode = "browse"; renderHosts(); renderBrowseRoots(); resetPreview(); }
+  function selectRoot(root) { state.selectedRoot = root; state.browseTarget = root; state.selected = null; state.mode = "browse"; renderBrowseRoots(); resetPreview(); browseDirectory(root); }
   function renderBrowseRoots() {
     clear(dom.results); const roots = visibleRoots(); dom.count.textContent = roots.length ? `${roots.length} permitted ${roots.length === 1 ? "root" : "roots"}` : "No permitted roots";
-    if (!roots.length) { const empty = element("div", "empty-results"); empty.append(element("span", "empty-icon", "—"), element("p", "No roots are available for this scope."), element("small", "Directory contents are intentionally not shown until a browse API is provided.")); dom.results.append(empty); return; }
+    if (!roots.length) { const empty = element("div", "empty-results"); empty.append(element("span", "empty-icon", "—"), element("p", "No roots are available for this scope."), element("small", "Choose a host with an available root to browse its immediate entries.")); dom.results.append(empty); return; }
     roots.forEach((root) => {
-      const button = element("button", `root-item ${root === state.selectedRoot ? "selected" : ""}`); button.type = "button"; button.dataset.root = root;
-      button.append(element("span", "root-icon", "▱"), element("span", "root-name", root), element("span", "root-kind", "Search root")); button.addEventListener("click", () => selectRoot(root)); dom.results.append(button);
+      const button = element("button", `root-item ${root.path === state.selectedRoot?.path && root.host === state.selectedRoot?.host ? "selected" : ""}`); button.type = "button"; button.dataset.root = root.path;
+      button.append(element("span", "root-icon", "▱"), element("span", "root-name", root.name || root.path), element("span", "root-kind", root.host ? `${root.host} root` : "Search root")); button.addEventListener("click", () => selectRoot(root)); dom.results.append(button);
     });
   }
-  function renderCatalog(payload) { state.catalog = catalogEntries(payload); if (state.selectedHost && !state.catalog.hosts.some((host) => host.id === state.selectedHost)) state.selectedHost = ""; renderHosts(); renderBrowseRoots(); setConnection("ready", state.catalog.hosts.length ? `${state.catalog.hosts.length} host${state.catalog.hosts.length === 1 ? "" : "s"} available` : "Catalog is ready"); }
+  function renderCatalog(payload) { state.catalog = catalogEntries(payload); if (state.selectedHost && !state.catalog.hosts.some((host) => host.id === state.selectedHost)) state.selectedHost = ""; if (state.selectedRoot && !state.catalog.roots.some((root) => root.host === state.selectedRoot.host && root.path === state.selectedRoot.path)) state.selectedRoot = null; renderHosts(); renderBrowseRoots(); setConnection("ready", state.catalog.hosts.length ? `${state.catalog.hosts.length} host${state.catalog.hosts.length === 1 ? "" : "s"} available` : "Catalog is ready"); }
   async function loadCatalog() { setConnection("", "Loading catalog…"); try { renderCatalog(await request(api.catalog)); } catch (error) { clear(dom.hosts).append(element("p", "sidebar-empty", "Catalog unavailable")); clear(dom.results).append(element("div", "empty-results", `Catalog unavailable: ${errorMessage(error)}`)); setConnection("error", "Catalog unavailable"); setSearchState("error", `Catalog unavailable: ${errorMessage(error)}`); } }
+  function normalizeEntries(payload, host) { const source = dataOf(payload); return (Array.isArray(source.entries) ? source.entries : []).map((entry, index) => ({ host: text(pick(entry, ["host_id", "host"], host)), name: text(pick(entry, ["name"], "Unnamed entry")), path: text(pick(entry, ["path"], "")), kind: text(pick(entry, ["kind"], "other")), size: pick(entry, ["size"]), modified: pick(entry, ["modified_ms"]), key: `${host}:${pick(entry, ["path"], index)}` })).filter((entry) => entry.path); }
+  function browseEntryDetails(entry) { const content = clear(dom.preview); content.className = "preview-content"; const title = element("div", "preview-title"); title.append(element("code", "", entry.path), element("span", "", entry.kind)); const details = [entry.kind, entry.size == null ? "size unavailable" : `${entry.size} bytes`, entry.modified == null ? "modified time unavailable" : `modified ${new Date(Number(entry.modified)).toLocaleString()}`]; content.append(title, element("pre", "", details.join("\n")), element("small", "", entry.kind === "directory" ? "Listing immediate entries…" : "Browse selection is metadata-only. Search for bounded file content.")); }
+  function renderBrowseEntries(entries) { clear(dom.results); dom.count.textContent = entries.length ? `${entries.length} ${entries.length === 1 ? "entry" : "entries"}` : "No immediate entries"; if (!entries.length) { const empty = element("div", "empty-results"); empty.append(element("span", "empty-icon", "—"), element("p", "No immediate entries."), element("small", "This directory is empty or all of its children are excluded.")); dom.results.append(empty); return; } entries.forEach((entry) => { const button = element("button", "result browse-entry"); button.type = "button"; button.dataset.key = entry.key; const meta = element("div", "result-meta"); meta.append(element("span", "host-tag", entry.host), element("span", "", entry.kind), element("span", "", entry.size == null ? "" : `${entry.size} bytes`)); button.append(element("div", "result-path", entry.name), element("div", "result-snippet", entry.path), meta); button.addEventListener("click", () => selectBrowseEntry(entry, button)); dom.results.append(button); }); }
+  async function browseDirectory(target) { if (!target?.host || !target?.path) return; state.browseTarget = target; setSearchState("running", `Listing immediate entries in ${target.path}…`); dom.count.textContent = "Loading entries…"; try { const payload = await request(api.browse, { method: "POST", body: JSON.stringify({ host: target.host, path: target.path }) }); if (state.browseTarget !== target) return; renderBrowseEntries(normalizeEntries(payload, target.host)); setSearchState("complete", `Listed immediate entries in ${target.path}.`); } catch (error) { if (state.browseTarget !== target) return; clear(dom.results).append(element("div", "empty-results", `Browse unavailable: ${errorMessage(error)}`)); dom.count.textContent = "Browse unavailable"; setSearchState("error", `Browse failed: ${errorMessage(error)}`); } }
+  function selectBrowseEntry(entry, button) { state.selected = entry; document.querySelectorAll(".browse-entry.selected").forEach((item) => item.classList.remove("selected")); button.classList.add("selected"); browseEntryDetails(entry); if (entry.kind === "directory") browseDirectory(entry); }
   function normalizeResults(payload) { const source = dataOf(payload); const raw = pick(source, ["results", "matches", "hits"], []); return (Array.isArray(raw) ? raw : []).map((item, index) => ({ previewId: text(pick(item, ["preview_id"], "")), host: text(pick(item, ["host_id", "host"], "local")), path: text(pick(item, ["path", "file"], "")), line: Number(pick(item, ["line_number", "line", "start_line"], 1)) || 1, snippet: text(pick(item, ["snippet", "text", "line_text", "match"], "")), key: `${pick(item, ["preview_id", "id"], "")}:${index}` })).filter((item) => item.path || item.previewId); }
   function statusDetails(payload) { const source = dataOf(payload); const hostStatus = pick(source, ["host_status", "hosts"], []); const failures = (Array.isArray(hostStatus) ? hostStatus : []).filter((item) => item && item.ok === false); return { partial: Boolean(pick(source, ["partial"], false)), truncated: Boolean(pick(source, ["truncated"], false)), failures }; }
   function renderResults(results) { clear(dom.results); if (!results.length) { const empty = element("div", "empty-results"); empty.append(element("span", "empty-icon", "—"), element("p", "No matching files."), element("small", "Try a different query or broader permitted scope.")); dom.results.append(empty); return; } results.forEach((result) => { const button = element("button", "result"); button.type = "button"; button.dataset.key = result.key; const meta = element("div", "result-meta"); meta.append(element("span", "host-tag", result.host), element("span", "", `line ${result.line}`)); button.append(element("div", "result-path", result.path || "Previewable result"), element("div", "result-snippet", result.snippet || "Open bounded preview"), meta); button.addEventListener("click", () => selectResult(result, button)); dom.results.append(button); }); }

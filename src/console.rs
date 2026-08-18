@@ -6,7 +6,7 @@
 
 use crate::{
     backup_catalog::{read_fixture_availability, BackupCatalogConfig},
-    mcp::{MeshService, ReadTextArgs, SearchArgs},
+    mcp::{ListDirectoryArgs, ListLocationsArgs, MeshService, ReadTextArgs, SearchArgs},
 };
 use axum::{
     extract::State,
@@ -18,6 +18,7 @@ use axum::{
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
+    path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -60,6 +61,7 @@ pub fn router(service: Arc<MeshService>, backup_catalog: Option<BackupCatalogCon
         .route("/ui/console.css", get(stylesheet))
         .route("/ui/console.js", get(script))
         .route("/api/catalog", get(catalog))
+        .route("/api/browse", post(browse))
         .route("/api/search", post(search))
         .route("/api/preview", post(preview))
         .route("/api/backup/availability", get(backup_availability))
@@ -87,31 +89,94 @@ async fn script() -> impl IntoResponse {
     )
 }
 
-async fn catalog(State(state): State<ConsoleState>) -> Json<Value> {
-    let roots = state
+async fn catalog(State(state): State<ConsoleState>) -> Response {
+    match state
         .service
-        .local
-        .root_paths
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
-    let hosts = state
-        .service
-        .topology
-        .read()
-        .map(|topology| topology.known_host_ids().collect::<Vec<_>>())
-        .unwrap_or_else(|_| vec![state.service.local.host_id.clone()])
-        .into_iter()
-        .map(|id| {
-            let host_roots = if id == state.service.local.host_id {
-                roots.clone()
-            } else {
-                Vec::new()
-            };
-            json!({"id": id, "roots": host_roots})
+        .call_list_locations(ListLocationsArgs {
+            hosts: None,
+            request_id: None,
+            origin_host: None,
+            hop_count: None,
         })
-        .collect::<Vec<_>>();
-    Json(json!({"hosts": hosts, "roots": roots}))
+        .await
+    {
+        Ok(result) => {
+            let locations = result
+                .data
+                .get("locations")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut roots_by_host = BTreeMap::<String, Vec<String>>::new();
+            for location in &locations {
+                let (Some(host), Some(path)) = (
+                    location.get("host").and_then(Value::as_str),
+                    location.get("path").and_then(Value::as_str),
+                ) else {
+                    continue;
+                };
+                roots_by_host
+                    .entry(host.to_string())
+                    .or_default()
+                    .push(path.to_string());
+            }
+            for status in result
+                .data
+                .get("host_status")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(host) = status.get("host_id").and_then(Value::as_str) {
+                    roots_by_host.entry(host.to_string()).or_default();
+                }
+            }
+            for roots in roots_by_host.values_mut() {
+                roots.sort();
+                roots.dedup();
+            }
+            let roots = roots_by_host
+                .values()
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>();
+            let hosts = roots_by_host
+                .into_iter()
+                .map(|(id, roots)| json!({"id": id, "roots": roots}))
+                .collect::<Vec<_>>();
+            Json(json!({
+                "hosts": hosts,
+                "roots": roots,
+                "partial": result.partial,
+                "host_status": result.host_status,
+            }))
+            .into_response()
+        }
+        Err(err) => bad_request(err.to_string()),
+    }
+}
+
+async fn browse(State(state): State<ConsoleState>, Json(request): Json<Value>) -> Response {
+    let Some(host) = request.get("host").and_then(Value::as_str) else {
+        return bad_request("host is required");
+    };
+    let Some(path) = request.get("path").and_then(Value::as_str) else {
+        return bad_request("path is required");
+    };
+    match state
+        .service
+        .call_list_directory(ListDirectoryArgs {
+            host: host.to_string(),
+            path: PathBuf::from(path),
+            request_id: None,
+            origin_host: None,
+            hop_count: None,
+        })
+        .await
+    {
+        Ok(result) => Json(result.data).into_response(),
+        Err(err) => bad_request(err.to_string()),
+    }
 }
 
 async fn search(State(state): State<ConsoleState>, Json(mut args): Json<SearchArgs>) -> Response {
