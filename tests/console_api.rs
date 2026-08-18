@@ -105,7 +105,11 @@ async fn local_console_ui_and_catalog_have_a_browser_safe_success_shape() {
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.starts_with("text/html")));
-    assert!(ui.text().await.unwrap().contains("/api/search"));
+    let ui = ui.text().await.unwrap();
+    assert!(ui.contains("/api/search"));
+    assert!(ui.contains("id=\"host-sidebar\""));
+    assert!(ui.contains("class=\"results finder-list\""));
+    assert!(ui.contains("No file selected."));
 
     let catalog = client
         .get(format!("{}/api/catalog", harness.local_base))

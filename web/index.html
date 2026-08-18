@@ -23,52 +23,35 @@
         </div>
       </header>
 
-      <section class="intro" aria-labelledby="console-title">
-        <div>
-          <p class="eyebrow">SEARCH THE MESH</p>
-          <h2 id="console-title">Find the exact text, then inspect a bounded preview.</h2>
-          <p>Search stays on this local Console. Select an available host and root to reduce scope.</p>
-        </div>
-        <div class="security-note">
-          <span aria-hidden="true">◈</span>
-          <p><strong>Local access</strong><br />This Console never asks for a peer URL, token, or credential.</p>
-        </div>
-      </section>
+      <section class="finder" aria-label="GrepMesh finder">
+        <aside class="finder-sidebar" aria-labelledby="locations-heading">
+          <div class="sidebar-heading">
+            <p class="eyebrow">LIVE CATALOG</p>
+            <h2 id="locations-heading">Locations</h2>
+          </div>
+          <div id="host-sidebar" class="host-sidebar" aria-live="polite">
+            <p class="sidebar-empty">Loading available hosts…</p>
+          </div>
+          <button class="quiet-button sidebar-refresh" type="button" id="refresh-catalog">Refresh catalog</button>
+          <p class="sidebar-note">Hosts and roots are permitted search scopes, not a directory listing.</p>
+        </aside>
 
-      <div class="layout">
-        <section class="workspace panel" aria-labelledby="search-heading">
-          <div class="panel-heading">
+        <section class="finder-browser panel" aria-labelledby="browser-heading">
+          <div class="browser-heading">
             <div>
-              <p class="eyebrow">LIVE QUERY</p>
-              <h2 id="search-heading">Search</h2>
+              <p class="eyebrow">LIVE SEARCH</p>
+              <h2 id="browser-heading">Search scopes</h2>
             </div>
-            <button class="quiet-button" type="button" id="refresh-catalog">Refresh catalog</button>
+            <span id="results-count">No query yet</span>
           </div>
 
           <form id="search-form" novalidate>
             <label class="search-label" for="query">Text or pattern</label>
             <div class="query-row">
               <input id="query" name="query" type="search" autocomplete="off" placeholder="e.g. TODO, error code, or file name" required />
-              <button class="primary-button" id="search-button" type="submit">
-                <span>Search</span><kbd>↵</kbd>
-              </button>
+              <button class="primary-button" id="search-button" type="submit"><span>Search</span><kbd>↵</kbd></button>
             </div>
-            <p class="input-help">The request is sent only to the local GrepMesh API.</p>
-
-            <div class="filters" aria-label="Search filters">
-              <label>
-                <span>Host</span>
-                <select id="host-filter" name="host" disabled>
-                  <option value="">All available hosts</option>
-                </select>
-              </label>
-              <label>
-                <span>Root</span>
-                <select id="root-filter" name="root" disabled>
-                  <option value="">All permitted roots</option>
-                </select>
-              </label>
-            </div>
+            <p class="input-help">The request is sent only to the local GrepMesh API. Select a host or root in the sidebar/list to narrow it.</p>
           </form>
 
           <div class="search-state idle" id="search-state" role="status" aria-live="polite">
@@ -76,41 +59,28 @@
             <span>Choose a query to begin.</span>
           </div>
 
-          <div class="results-header">
-            <h3>Results</h3>
-            <span id="results-count">No query yet</span>
-          </div>
-          <div class="results" id="results" aria-live="polite">
-            <div class="empty-results">
-              <span class="empty-icon" aria-hidden="true">⌕</span>
-              <p>Matches will appear here.</p>
-              <small>Open a result to inspect the limited preview.</small>
-            </div>
+          <div class="list-header" aria-hidden="true"><span>Name</span><span>Scope</span></div>
+          <div class="results finder-list" id="results" aria-live="polite">
+            <div class="empty-results"><span class="empty-icon" aria-hidden="true">⌕</span><p>Loading permitted roots…</p></div>
           </div>
         </section>
 
-        <aside class="side-column">
-          <section class="panel inspector" aria-labelledby="preview-heading">
+        <aside class="finder-details" aria-labelledby="preview-heading">
+          <section class="panel inspector">
             <div class="panel-heading">
-              <div>
-                <p class="eyebrow">BOUNDED INSPECTOR</p>
-                <h2 id="preview-heading">Preview</h2>
-              </div>
+              <div><p class="eyebrow">SELECTED ITEM</p><h2 id="preview-heading">Details</h2></div>
               <span class="safe-label">Result-bound</span>
             </div>
             <div id="preview" class="preview-empty" role="status" aria-live="polite">
               <span class="empty-icon" aria-hidden="true">▧</span>
-              <p>Select a search result.</p>
-              <small>Only a result returned by this Console can be previewed.</small>
+              <p>No file selected.</p>
+              <small>Choose a search result to inspect its bounded preview. Directory browsing is not available yet.</small>
             </div>
           </section>
 
           <section class="panel backup-card" aria-labelledby="backup-heading">
             <div class="panel-heading">
-              <div>
-                <p class="eyebrow">SEPARATE FROM LIVE SEARCH</p>
-                <h2 id="backup-heading">Backup catalog</h2>
-              </div>
+              <div><p class="eyebrow">SEPARATE FROM LIVE SEARCH</p><h2 id="backup-heading">Backup catalog</h2></div>
               <span class="backup-state unknown" id="backup-badge">Checking…</span>
             </div>
             <div id="backup-body" class="backup-body" role="status" aria-live="polite">
@@ -119,7 +89,7 @@
             </div>
           </section>
         </aside>
-      </div>
+      </section>
     </main>
     <script src="/ui/console.js" defer></script>
   </body>
