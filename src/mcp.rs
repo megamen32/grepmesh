@@ -1,7 +1,7 @@
 use crate::{
     backend::{
-        dedup_hits, LocalBackend, PerHostStatus, ReadResponse, SearchHit, SearchMode,
-        SearchResponse, StatusResponse,
+        dedup_hits, DirectoryEntry, LocalBackend, Location, PerHostStatus, ReadResponse, SearchHit,
+        SearchMode, SearchResponse, StatusResponse,
     },
     topology::Topology,
 };
@@ -105,6 +105,51 @@ pub struct StatusArgs {
     pub origin_host: Option<String>,
     #[serde(default)]
     pub hop_count: Option<u8>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ListLocationsArgs {
+    #[serde(default)]
+    pub hosts: Option<HostsInput>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub origin_host: Option<String>,
+    #[serde(default)]
+    pub hop_count: Option<u8>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ListDirectoryArgs {
+    pub host: String,
+    pub path: PathBuf,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub origin_host: Option<String>,
+    #[serde(default)]
+    pub hop_count: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BrowseResponse<T> {
+    request_id: String,
+    origin_host: String,
+    hop_count: u8,
+    host_id: String,
+    target_host_id: String,
+    partial: bool,
+    truncated: bool,
+    host_status: Vec<PerHostStatus>,
+    #[serde(skip_serializing, alias = "locations", alias = "entries")]
+    items: Vec<T>,
+}
+
+fn browse_data<T: Serialize>(response: BrowseResponse<T>, field: &str) -> Result<Value> {
+    let items = serde_json::to_value(&response.items)?;
+    let mut value = serde_json::to_value(response)?;
+    value[field] = items;
+    Ok(value)
 }
 
 #[derive(Debug, Clone)]
@@ -664,6 +709,162 @@ impl MeshService {
             response.truncated,
             host_status,
             json!(response),
+        ))
+    }
+
+    pub async fn call_list_locations(&self, args: ListLocationsArgs) -> Result<ToolResult> {
+        let normalized = normalize_request(
+            &self.local.host_id,
+            self.known_host_ids(),
+            args.hosts,
+            args.request_id,
+            args.origin_host,
+            args.hop_count,
+        )?;
+        self.claim_request(&normalized.request_id)?;
+        let mut locations = Vec::new();
+        let mut host_status = Vec::new();
+        let mut partial = false;
+        for target in unique_hosts(&normalized.hosts) {
+            if target == self.local.host_id {
+                locations.extend(self.local.list_locations());
+                host_status.push(PerHostStatus {
+                    host_id: target,
+                    ok: true,
+                    error: None,
+                });
+                continue;
+            }
+            let result = async {
+                let peer = self
+                    .peer_config(&target)
+                    .ok_or_else(|| anyhow!("unknown peer {}", target))?;
+                let value = self
+                    .call_remote(
+                        &peer.routable_url,
+                        "list_locations",
+                        json!({
+                            "hosts": ["local"],
+                            "request_id": normalized.request_id,
+                            "origin_host": normalized.origin_host,
+                            "hop_count": 1u8,
+                        }),
+                    )
+                    .await?;
+                decode_tool_result::<BrowseResponse<Location>>(value)
+            }
+            .await;
+            match result {
+                Ok(response) => {
+                    locations.extend(response.items);
+                    if response.host_status.is_empty() {
+                        host_status.push(PerHostStatus {
+                            host_id: target,
+                            ok: !response.partial,
+                            error: response
+                                .partial
+                                .then(|| "remote response was partial".to_string()),
+                        });
+                    } else {
+                        host_status.extend(response.host_status);
+                    }
+                    partial |= response.partial;
+                }
+                Err(err) => {
+                    partial = true;
+                    host_status.push(PerHostStatus {
+                        host_id: target,
+                        ok: false,
+                        error: Some(err.to_string()),
+                    });
+                }
+            }
+        }
+        locations.sort_by(|a, b| a.host.cmp(&b.host).then(a.path.cmp(&b.path)));
+        let response = BrowseResponse {
+            request_id: normalized.request_id.clone(),
+            origin_host: normalized.origin_host.clone(),
+            hop_count: normalized.hop_count,
+            host_id: self.local.host_id.clone(),
+            target_host_id: self.local.host_id.clone(),
+            partial,
+            truncated: false,
+            host_status: host_status.clone(),
+            items: locations,
+        };
+        Ok(self.wrap_result(
+            normalized.request_id,
+            normalized.origin_host,
+            normalized.hop_count,
+            partial,
+            false,
+            host_status,
+            browse_data(response, "locations")?,
+        ))
+    }
+
+    pub async fn call_list_directory(&self, args: ListDirectoryArgs) -> Result<ToolResult> {
+        let normalized = normalize_request(
+            &self.local.host_id,
+            self.known_host_ids(),
+            Some(HostsInput::One(args.host.clone())),
+            args.request_id,
+            args.origin_host,
+            args.hop_count,
+        )?;
+        self.claim_request(&normalized.request_id)?;
+        let target = normalized
+            .hosts
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.local.host_id.clone());
+        let response = if target == self.local.host_id {
+            BrowseResponse {
+                request_id: normalized.request_id.clone(),
+                origin_host: normalized.origin_host.clone(),
+                hop_count: normalized.hop_count,
+                host_id: self.local.host_id.clone(),
+                target_host_id: self.local.host_id.clone(),
+                partial: false,
+                truncated: false,
+                host_status: vec![PerHostStatus {
+                    host_id: self.local.host_id.clone(),
+                    ok: true,
+                    error: None,
+                }],
+                items: self.local.list_directory(&args.path)?,
+            }
+        } else {
+            let peer = self
+                .peer_config(&target)
+                .ok_or_else(|| anyhow!("unknown peer {}", target))?;
+            let value = self
+                .call_remote(
+                    &peer.routable_url,
+                    "list_directory",
+                    json!({
+                        "host": "local",
+                        "path": args.path,
+                        "request_id": normalized.request_id,
+                        "origin_host": normalized.origin_host,
+                        "hop_count": 1u8,
+                    }),
+                )
+                .await?;
+            let mut response = decode_tool_result::<BrowseResponse<DirectoryEntry>>(value)?;
+            response.host_id = self.local.host_id.clone();
+            response.target_host_id = target;
+            response
+        };
+        let host_status = response.host_status.clone();
+        Ok(self.wrap_result(
+            normalized.request_id,
+            normalized.origin_host,
+            normalized.hop_count,
+            response.partial,
+            response.truncated,
+            host_status,
+            browse_data(response, "entries")?,
         ))
     }
 

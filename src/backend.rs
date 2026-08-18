@@ -8,7 +8,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Stdio,
-    time::Duration,
+    time::{Duration, UNIX_EPOCH},
 };
 use tokio::{
     io::AsyncReadExt,
@@ -75,6 +75,22 @@ pub struct ReadChunk {
     pub start_line: usize,
     pub end_line: usize,
     pub lines: Vec<MatchLine>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Location {
+    pub host: String,
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DirectoryEntry {
+    pub name: String,
+    pub path: String,
+    pub kind: String,
+    pub size: Option<u64>,
+    pub modified_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +279,84 @@ impl LocalBackend {
             indexed_files: index.indexed_files,
             index_last_error: index.last_error,
         })
+    }
+
+    pub fn list_locations(&self) -> Vec<Location> {
+        self.root_paths
+            .iter()
+            .flat_map(|(name, paths)| {
+                paths.iter().map(|path| Location {
+                    host: self.host_id.clone(),
+                    name: name.clone(),
+                    path: path.display().to_string(),
+                })
+            })
+            .collect()
+    }
+
+    pub fn list_directory(&self, path: &Path) -> Result<Vec<DirectoryEntry>> {
+        let roots = self
+            .root_paths
+            .values()
+            .flatten()
+            .filter_map(|root| fs::canonicalize(root).ok())
+            .collect::<Vec<_>>();
+        let path = fs::canonicalize(path)
+            .with_context(|| format!("resolve directory {}", path.display()))?;
+        if !roots.iter().any(|root| path.starts_with(root)) {
+            return Err(anyhow!(
+                "path {} is outside configured roots",
+                path.display()
+            ));
+        }
+        if excluded_path(&path, &roots, &self.exclude_globs) {
+            return Err(anyhow!("path {} is excluded", path.display()));
+        }
+        if !path.is_dir() {
+            return Err(anyhow!("path {} is not a directory", path.display()));
+        }
+
+        let mut entries = Vec::new();
+        for entry in
+            fs::read_dir(&path).with_context(|| format!("list directory {}", path.display()))?
+        {
+            let Ok(entry) = entry else { continue };
+            let Ok(entry_path) = fs::canonicalize(entry.path()) else {
+                continue;
+            };
+            if !roots.iter().any(|root| entry_path.starts_with(root))
+                || excluded_path(&entry_path, &roots, &self.exclude_globs)
+            {
+                continue;
+            }
+            let Ok(metadata) = fs::metadata(&entry_path) else {
+                continue;
+            };
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let kind = if metadata.is_dir() {
+                "directory"
+            } else if metadata.is_file() {
+                "file"
+            } else {
+                "other"
+            };
+            let modified_ms = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .and_then(|duration| u64::try_from(duration.as_millis()).ok());
+            entries.push(DirectoryEntry {
+                name,
+                path: entry_path.display().to_string(),
+                kind: kind.to_string(),
+                size: metadata.is_file().then_some(metadata.len()),
+                modified_ms,
+            });
+        }
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(entries)
     }
 
     fn selected_roots(&self, names: &[String]) -> Result<Vec<PathBuf>> {
@@ -985,6 +1079,27 @@ fn normalize_absolute_path_any(roots: &[PathBuf], path: &Path) -> Result<PathBuf
         ));
     }
     Ok(path.to_path_buf())
+}
+
+fn excluded_path(path: &Path, roots: &[PathBuf], exclude_globs: &[String]) -> bool {
+    roots.iter().any(|root| {
+        path.strip_prefix(root)
+            .ok()
+            .is_some_and(|relative| excluded_relative_path(relative, exclude_globs))
+    })
+}
+
+fn excluded_relative_path(path: &Path, exclude_globs: &[String]) -> bool {
+    let path = path.to_string_lossy().replace('\\', "/");
+    exclude_globs.iter().any(|pattern| {
+        Glob::new(pattern)
+            .map(|glob| glob.compile_matcher().is_match(&path))
+            .unwrap_or(false)
+            || pattern
+                .strip_suffix("/**")
+                .map(|prefix| prefix.trim_start_matches("**/").trim_start_matches("./"))
+                .is_some_and(|prefix| path == prefix || path.starts_with(&format!("{prefix}/")))
+    })
 }
 
 pub fn dedup_hits<T, F>(items: Vec<T>, key: F) -> Vec<T>

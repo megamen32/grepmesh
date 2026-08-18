@@ -308,6 +308,8 @@ async fn handle_rpc_inner(state: AppState, payload: Value) -> Result<Value> {
                 tool_meta("search_text", "Search text across one or more hosts."),
                 tool_meta("find_paths", "Find file paths across one or more hosts."),
                 tool_meta("read_text", "Read a text file from a specific host."),
+                tool_meta("list_locations", "List configured browse locations across hosts."),
+                tool_meta("list_directory", "List immediate safe directory entries for one host."),
                 tool_meta("search_status", "Report search/status metadata for one or more hosts."),
             ]
         }),
@@ -371,6 +373,17 @@ fn tool_meta(name: &str, description: &str) -> Value {
                 "host": {"type": "string"}, "path": {"type": "string"},
                 "start_line": {"type": "integer", "minimum": 1},
                 "end_line": {"type": "integer", "minimum": 1}
+            }
+        }),
+        "list_locations" => json!({
+            "type": "object",
+            "properties": {"hosts": hosts}
+        }),
+        "list_directory" => json!({
+            "type": "object",
+            "required": ["host", "path"],
+            "properties": {
+                "host": {"type": "string"}, "path": {"type": "string"}
             }
         }),
         "search_status" => json!({
@@ -442,6 +455,16 @@ async fn call_tool(service: &MeshService, jobs: &SearchJobs, params: Value) -> R
         "read_text" => {
             service
                 .call_read_text(serde_json::from_value(arguments)?)
+                .await?
+        }
+        "list_locations" => {
+            service
+                .call_list_locations(serde_json::from_value(arguments)?)
+                .await?
+        }
+        "list_directory" => {
+            service
+                .call_list_directory(serde_json::from_value(arguments)?)
                 .await?
         }
         "search_status" => {

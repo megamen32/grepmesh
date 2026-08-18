@@ -86,6 +86,45 @@ fn read_text_routes_by_host_and_path() {
     assert_eq!(chunks[0].lines[0].text, "hello");
 }
 
+#[test]
+fn browse_lists_configured_locations_and_immediate_safe_entries() {
+    let temp = TempDir::new().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(workspace.join("nested")).unwrap();
+    fs::create_dir_all(workspace.join("node_modules")).unwrap();
+    fs::write(workspace.join("note.txt"), "finder canary\n").unwrap();
+    fs::write(
+        workspace.join("node_modules").join("hidden.js"),
+        "ignored\n",
+    )
+    .unwrap();
+
+    let mut roots = std::collections::BTreeMap::new();
+    roots.insert("workspace".to_string(), vec![workspace.clone()]);
+    let backend = LocalBackend::new("A", temp.path(), Default::default()).with_named_roots(roots);
+
+    let locations = backend.list_locations();
+    assert!(locations
+        .iter()
+        .any(|location| location.name == "workspace"
+            && location.path == workspace.display().to_string()));
+
+    let entries = backend.list_directory(&workspace).unwrap();
+    assert!(entries
+        .iter()
+        .any(|entry| entry.name == "nested" && entry.kind == "directory"));
+    assert!(entries
+        .iter()
+        .any(|entry| entry.name == "note.txt" && entry.kind == "file" && entry.size == Some(14)));
+    assert!(!entries.iter().any(|entry| entry.name == "node_modules"));
+    assert!(backend
+        .list_directory(&temp.path().join("outside"))
+        .is_err());
+    assert!(backend
+        .list_directory(&workspace.join("node_modules"))
+        .is_err());
+}
+
 #[tokio::test]
 async fn malformed_search_inputs_are_failed_partial_mcp_results() {
     let root = tempfile::tempdir().unwrap();
@@ -242,6 +281,8 @@ async fn black_box_two_process_peer_fanout_and_partial_results() {
     let root_b = temp_b.path().to_path_buf();
     fs::write(root_a.join("a-canary.txt"), "alpha canary from A\n").unwrap();
     fs::write(root_b.join("b-canary.txt"), "bravo canary from B\n").unwrap();
+    fs::create_dir(root_b.join("child")).unwrap();
+    fs::write(root_b.join("child").join("inside.txt"), "browse child\n").unwrap();
     let port_a = free_port();
     let port_b = free_port();
     let url_a = format!("http://127.0.0.1:{port_a}/mcp");
@@ -304,7 +345,14 @@ async fn black_box_two_process_peer_fanout_and_partial_results() {
     let init = rpc(&url_a, "initialize", serde_json::json!({})).await;
     assert_eq!(init["jsonrpc"], "2.0");
     let tools = rpc(&url_a, "tools/list", serde_json::json!({})).await;
-    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 4);
+    let tool_names = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(tool_names.contains(&"list_locations"));
+    assert!(tool_names.contains(&"list_directory"));
 
     let status = rpc(
         &url_a,
@@ -373,6 +421,44 @@ async fn black_box_two_process_peer_fanout_and_partial_results() {
         read_value["chunks"][0]["lines"][0]["text"],
         "bravo canary from B"
     );
+
+    let locations = rpc(
+        &url_a,
+        "tools/call",
+        serde_json::json!({
+            "name": "list_locations",
+            "arguments": {"hosts": "*"}
+        }),
+    )
+    .await;
+    let locations_value: serde_json::Value =
+        serde_json::from_str(locations["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(locations_value["locations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |location| location["host"] == "B" && location["path"] == root_b.display().to_string()
+        ));
+    assert_eq!(locations_value["host_status"].as_array().unwrap().len(), 2);
+
+    let directory = rpc(
+        &url_a,
+        "tools/call",
+        serde_json::json!({
+            "name": "list_directory",
+            "arguments": {"host": "B", "path": root_b}
+        }),
+    )
+    .await;
+    let directory_value: serde_json::Value =
+        serde_json::from_str(directory["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(directory_value["target_host_id"], "B");
+    assert!(directory_value["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["name"] == "child" && entry["kind"] == "directory"));
 
     fs::remove_file(root_b.join("b-canary.txt")).unwrap();
     let _ = child_b.kill();
