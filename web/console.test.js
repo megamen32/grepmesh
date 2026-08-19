@@ -18,12 +18,46 @@ class Element {
 
   get firstElementChild() { return this.children[0] || null; }
   get lastElementChild() { return this.children.at(-1) || null; }
-  append(...children) { this.children.push(...children); }
+  append(...children) { children.forEach((child) => { child.parentElement = this; }); this.children.push(...children); }
   replaceChildren(...children) { this.children = children; }
   addEventListener(type, listener) { this.events.set(type, listener); }
   click() { this.events.get("click")?.({ preventDefault() {} }); }
+  dispatch(type, target = this) { this.events.get(type)?.({ target, preventDefault() {} }); }
+  closest(selector) {
+    for (let node = this; node; node = node.parentElement) if (selector === ".location-item" && node.className.split(/\s+/).includes("location-item")) return node;
+    return null;
+  }
+  contains(candidate) { for (let node = candidate; node; node = node.parentElement) if (node === this) return true; return false; }
   focus() {}
 }
+
+test("Locations sidebar delegates a nested Location click to its browse request", async () => {
+  const { nodes, requests } = consoleFixture({ hosts: [{ id: "server-100", roots: ["/etc"] }], roots: ["/etc"] });
+  await settle();
+
+  const location = nodes["locations-sidebar"].children.find((node) => node.className.includes("location-item"));
+  assert.ok(location, "catalog root should render as a clickable Location");
+  assert.equal(location.events.has("click"), false, "location buttons must use the stable sidebar listener rather than a listener that disappears on re-render");
+  nodes["locations-sidebar"].dispatch("click", location.children[1]);
+  await settle();
+
+  const browse = requests.find((request) => request.url === "/api/browse");
+  assert.ok(browse, "a nested Location click must dispatch the browse request");
+  assert.deepEqual(JSON.parse(browse.options.body), { host: "server-100", path: "/etc" });
+});
+
+test("delegated Locations keep the search form wired", async () => {
+  const { nodes, requests } = consoleFixture({ hosts: [{ id: "server-100", roots: ["/etc"] }], roots: ["/etc"] });
+  await settle();
+
+  nodes.query.value = "nginx";
+  nodes["search-form"].dispatch("submit");
+  await settle();
+
+  const search = requests.find((request) => request.url === "/api/search");
+  assert.ok(search, "submitting search must still call the search API");
+  assert.deepEqual(JSON.parse(search.options.body), { query: "nginx" });
+});
 
 function consoleFixture(catalog, browseEntries = []) {
   const ids = ["connection", "search-form", "query", "refresh-catalog", "search-button", "search-state", "host-sidebar", "locations-sidebar", "results", "results-count", "preview", "backup-badge", "backup-body"];
@@ -64,7 +98,7 @@ for (const [name, catalog] of [
 
     const location = nodes["locations-sidebar"].children.find((node) => node.className.includes("location-item"));
     assert.ok(location, "catalog root should render as a clickable Location");
-    location.click();
+    nodes["locations-sidebar"].dispatch("click", location);
     await settle();
 
     const browse = requests.find((request) => request.url === "/api/browse");
