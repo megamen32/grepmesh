@@ -24,23 +24,32 @@
       </header>
 
       <section class="finder" aria-label="GrepMesh finder">
-        <aside class="finder-sidebar" aria-labelledby="locations-heading">
+        <aside class="finder-sidebar" aria-labelledby="devices-heading">
           <div class="sidebar-heading">
             <p class="eyebrow">LIVE CATALOG</p>
-            <h2 id="locations-heading">Locations</h2>
+            <h2 id="devices-heading">Devices</h2>
           </div>
           <div id="host-sidebar" class="host-sidebar" aria-live="polite">
             <p class="sidebar-empty">Loading available hosts…</p>
           </div>
+          <section class="sidebar-section" aria-labelledby="locations-heading">
+            <div class="sidebar-section-heading">
+              <p class="eyebrow">CONFIGURED DRIVES</p>
+              <h2 id="locations-heading">Locations</h2>
+            </div>
+            <div id="locations-sidebar" class="locations-sidebar" aria-live="polite">
+              <p class="sidebar-empty">Loading configured locations…</p>
+            </div>
+          </section>
           <button class="quiet-button sidebar-refresh" type="button" id="refresh-catalog">Refresh catalog</button>
-          <p class="sidebar-note">Hosts and roots are permitted search scopes, not a directory listing.</p>
+          <p class="sidebar-note">Select a Location to browse its immediate entries. Selected Devices and Locations also narrow search.</p>
         </aside>
 
         <section class="finder-browser panel" aria-labelledby="browser-heading">
           <div class="browser-heading">
             <div>
-              <p class="eyebrow">LIVE SEARCH</p>
-              <h2 id="browser-heading">Search scopes</h2>
+              <p class="eyebrow">FINDER</p>
+              <h2 id="browser-heading">Browse</h2>
             </div>
             <span id="results-count">No query yet</span>
           </div>
@@ -51,7 +60,7 @@
               <input id="query" name="query" type="search" autocomplete="off" placeholder="e.g. TODO, error code, or file name" required />
               <button class="primary-button" id="search-button" type="submit"><span>Search</span><kbd>↵</kbd></button>
             </div>
-            <p class="input-help">The request is sent only to the local GrepMesh API. Select a host or root in the sidebar/list to narrow it.</p>
+            <p class="input-help">The request is sent only to the local GrepMesh API. Selected Devices and Locations narrow the search scope.</p>
           </form>
 
           <div class="search-state idle" id="search-state" role="status" aria-live="polite">
@@ -59,9 +68,9 @@
             <span>Choose a query to begin.</span>
           </div>
 
-          <div class="list-header" aria-hidden="true"><span>Name</span><span>Scope</span></div>
+          <div class="list-header" aria-hidden="true"><span>Name</span><span>Location</span></div>
           <div class="results finder-list" id="results" aria-live="polite">
-            <div class="empty-results"><span class="empty-icon" aria-hidden="true">⌕</span><p>Loading permitted roots…</p></div>
+            <div class="empty-results"><span class="empty-icon" aria-hidden="true">⌕</span><p>Select a Location to browse its immediate entries.</p></div>
           </div>
         </section>
 
