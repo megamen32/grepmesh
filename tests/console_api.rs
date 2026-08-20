@@ -111,11 +111,15 @@ async fn local_console_ui_and_catalog_have_a_browser_safe_success_shape() {
     assert!(ui.contains("class=\"results finder-list\""));
     assert!(ui.contains("No file selected."));
     assert!(ui.contains("Choose a root or directory to browse metadata"));
-    assert!(ui.contains("<script src=\"/ui/console.js?v=20260819-finder-events\" defer></script>"));
+    assert!(ui.contains("<script src=\"/ui/console.js?v=20260820-host-failures\" defer></script>"));
     assert!(!ui.contains("Directory browsing is not available yet."));
+    assert!(ui.contains("id=\"host-failures\""));
 
     let script = client
-        .get(format!("{}/ui/console.js?v=20260819-finder-events", harness.local_base))
+        .get(format!(
+            "{}/ui/console.js?v=20260820-host-failures",
+            harness.local_base
+        ))
         .send()
         .await
         .unwrap();
@@ -123,6 +127,8 @@ async fn local_console_ui_and_catalog_have_a_browser_safe_success_shape() {
     let script = script.text().await.unwrap();
     assert!(script.contains("/api/browse"));
     assert!(script.contains("browseDirectory(root)"));
+    assert!(script.contains("renderHostFailures(details.failures)"));
+    assert!(script.contains("Host ${failure.host} unavailable"));
 
     let catalog = client
         .get(format!("{}/api/catalog", harness.local_base))
