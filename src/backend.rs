@@ -851,7 +851,7 @@ fn permission_denied_diagnostic(stderr: &[u8]) -> Option<String> {
             let line = line.to_ascii_lowercase();
             line.contains("permission denied") || line.contains("operation not permitted")
         })
-        .then_some(diagnostic)
+        .then_some("some configured paths were not readable".to_string())
 }
 
 async fn terminate_child(child: &mut tokio::process::Child) {

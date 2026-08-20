@@ -227,10 +227,10 @@ async fn permission_denied_search_is_partial_and_keeps_readable_match() {
         .find(|status| status.host_id == "A")
         .unwrap();
     assert!(!status.ok);
-    assert!(status
-        .error
-        .as_deref()
-        .is_some_and(|error| error.contains("Permission denied")));
+    assert_eq!(
+        status.error.as_deref(),
+        Some("some configured paths were not readable")
+    );
 }
 
 fn free_port() -> u16 {
