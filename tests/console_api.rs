@@ -128,7 +128,7 @@ async fn local_console_ui_and_catalog_have_a_browser_safe_success_shape() {
     assert!(script.contains("/api/browse"));
     assert!(script.contains("browseDirectory(root)"));
     assert!(script.contains("renderHostFailures(details.failures)"));
-    assert!(script.contains("Host ${failure.host} unavailable"));
+    assert!(script.contains("Host ${failure.host} reported an error"));
 
     let catalog = client
         .get(format!("{}/api/catalog", harness.local_base))
