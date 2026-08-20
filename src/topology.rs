@@ -7,6 +7,11 @@ pub struct PeerConfig {
     pub host_id: String,
     pub local_url: String,
     pub routable_url: String,
+    /// Optional loopback HTTP CONNECT endpoint backed by an approved GPTAdmin
+    /// Network Tunnel capability. It is used only after a direct TCP connect
+    /// failure; it never replaces the routable peer URL.
+    #[serde(default)]
+    pub gptadmin_proxy_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +51,7 @@ impl Topology {
                 host_id: node.host_id,
                 local_url: node.local_url,
                 routable_url: node.routable_url,
+                gptadmin_proxy_url: None,
             })
             .collect();
         Ok(Self {

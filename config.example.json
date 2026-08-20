@@ -5,7 +5,14 @@
   "roots": {
     "projects": ["/home/user/projects"]
   },
-  "peers": [],
+  "peers": [
+    {
+      "host_id": "optional-tunnel-peer",
+      "local_url": "http://127.0.0.1:9419/mcp",
+      "routable_url": "http://192.0.2.10:9419/mcp",
+      "gptadmin_proxy_url": "http://127.0.0.1:3126"
+    }
+  ],
   "limits": {
     "max_results": 100,
     "context_lines": 3,

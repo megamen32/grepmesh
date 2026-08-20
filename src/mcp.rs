@@ -407,8 +407,18 @@ impl MeshService {
         self
     }
 
-    pub fn replace_topology(&self, topology: Topology) {
+    pub fn replace_topology(&self, mut topology: Topology) {
         if let Ok(mut current) = self.topology.write() {
+            // GPTAdmin topology is intentionally a credential-free projection.
+            // Retain only the local, optional loopback connector setting for a
+            // known host when a refreshed projection omits it.
+            for peer in &mut topology.peers {
+                if peer.gptadmin_proxy_url.is_none() {
+                    peer.gptadmin_proxy_url = current
+                        .peer(&peer.host_id)
+                        .and_then(|known| known.gptadmin_proxy_url.clone());
+                }
+            }
             *current = topology;
         }
     }
@@ -679,7 +689,7 @@ impl MeshService {
                 .ok_or_else(|| anyhow!("unknown peer {}", target))?;
             let value = self
                 .call_remote(
-                    &peer.routable_url,
+                    &peer,
                     "read_text",
                     json!({
                         "host": "local",
@@ -741,7 +751,7 @@ impl MeshService {
                     .ok_or_else(|| anyhow!("unknown peer {}", target))?;
                 let value = self
                     .call_remote(
-                        &peer.routable_url,
+                        &peer,
                         "list_locations",
                         json!({
                             "hosts": ["local"],
@@ -840,7 +850,7 @@ impl MeshService {
                 .ok_or_else(|| anyhow!("unknown peer {}", target))?;
             let value = self
                 .call_remote(
-                    &peer.routable_url,
+                    &peer,
                     "list_directory",
                     json!({
                         "host": "local",
@@ -1005,7 +1015,7 @@ impl MeshService {
                             .ok_or_else(|| anyhow!("unknown peer {}", target))?;
                         let value = service
                             .call_remote(
-                                &peer.routable_url,
+                                &peer,
                                 "search_text",
                                 json!({
                                     "query": query,
@@ -1098,7 +1108,7 @@ impl MeshService {
                             .ok_or_else(|| anyhow!("unknown peer {}", target))?;
                         let value = service
                             .call_remote(
-                                &peer.routable_url,
+                                &peer,
                                 "find_paths",
                                 json!({
                                     "query": query,
@@ -1158,7 +1168,7 @@ impl MeshService {
             .ok_or_else(|| anyhow!("unknown peer {}", target))?;
         let value = self
             .call_remote(
-                &peer.routable_url,
+                &peer,
                 "search_status",
                 json!({
                     "hosts": ["local"],
@@ -1264,7 +1274,39 @@ impl MeshService {
         Ok((merged, statuses, partial, truncated))
     }
 
-    async fn call_remote(&self, url: &str, tool: &str, arguments: Value) -> Result<Value> {
+    async fn call_remote(
+        &self,
+        peer: &crate::topology::PeerConfig,
+        tool: &str,
+        arguments: Value,
+    ) -> Result<Value> {
+        match self
+            .call_remote_direct(&peer.routable_url, tool, arguments.clone())
+            .await
+        {
+            Ok(value) => Ok(value),
+            Err(direct_error) if is_direct_connect_error(&direct_error) => {
+                let proxy_url = peer
+                    .gptadmin_proxy_url
+                    .as_deref()
+                    .filter(|url| !url.trim().is_empty())
+                    .ok_or_else(|| {
+                        anyhow!("direct transport unavailable; no GPTAdmin fallback is configured")
+                    })?;
+                self.call_remote_via_gptadmin_proxy(proxy_url, &peer.routable_url, tool, arguments)
+                    .await
+                    .map_err(|fallback_error| {
+                        anyhow!(
+                            "direct transport unavailable; GPTAdmin fallback failed: {:#}",
+                            fallback_error
+                        )
+                    })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn call_remote_direct(&self, url: &str, tool: &str, arguments: Value) -> Result<Value> {
         let payload = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -1314,6 +1356,117 @@ impl MeshService {
             return Err(anyhow!("remote error: {}", err));
         }
         Ok(value.get("result").cloned().unwrap_or(value))
+    }
+
+    async fn call_remote_via_gptadmin_proxy(
+        &self,
+        proxy_url: &str,
+        peer_url: &str,
+        tool: &str,
+        arguments: Value,
+    ) -> Result<Value> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+
+        let proxy = validated_loopback_proxy_url(proxy_url)?;
+        let peer = reqwest::Url::parse(peer_url).context("parse peer URL for GPTAdmin fallback")?;
+        if peer.scheme() != "http" {
+            return Err(anyhow!(
+                "GPTAdmin fallback supports only http peer URLs; got {}",
+                peer.scheme()
+            ));
+        }
+        let host = peer
+            .host_str()
+            .ok_or_else(|| anyhow!("peer URL has no host"))?;
+        let port = peer
+            .port_or_known_default()
+            .ok_or_else(|| anyhow!("peer URL has no port"))?;
+        let target = format!("{host}:{port}");
+        let proxy_host = proxy
+            .host_str()
+            .ok_or_else(|| anyhow!("GPTAdmin proxy URL has no host"))?;
+        let proxy_port = proxy.port_or_known_default().unwrap_or(80);
+        let payload = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": arguments},
+        })
+        .to_string();
+        let path = match peer.query() {
+            Some(query) => format!("{}?{query}", peer.path()),
+            None => peer.path().to_string(),
+        };
+        timeout(
+            Duration::from_millis(self.local.limits.peer_timeout_ms),
+            async {
+                let mut stream = TcpStream::connect((proxy_host, proxy_port))
+                    .await
+                    .context("connect to GPTAdmin loopback proxy")?;
+                let connect = format!(
+                    "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nConnection: keep-alive\r\n\r\n"
+                );
+                stream
+                    .write_all(connect.as_bytes())
+                    .await
+                    .context("write proxy CONNECT")?;
+                let connect_response = read_http_headers(&mut stream).await?;
+                if !connect_response.starts_with("HTTP/1.1 200")
+                    && !connect_response.starts_with("HTTP/1.0 200")
+                {
+                    return Err(anyhow!("GPTAdmin proxy CONNECT was rejected"));
+                }
+                let mut request = format!(
+                    "POST {path} HTTP/1.1\r\nHost: {target}\r\nAccept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/call\r\nMcp-Name: {tool}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+                    payload.len()
+                );
+                if let Some(token) = self.peer_auth_token.as_deref() {
+                    request.push_str(&format!("Authorization: Bearer {token}\r\n"));
+                }
+                request.push_str("\r\n");
+                stream
+                    .write_all(request.as_bytes())
+                    .await
+                    .context("write tunneled request")?;
+                stream
+                    .write_all(payload.as_bytes())
+                    .await
+                    .context("write tunneled payload")?;
+                let headers = read_http_headers(&mut stream).await?;
+                if !headers.starts_with("HTTP/1.1 2") && !headers.starts_with("HTTP/1.0 2") {
+                    return Err(anyhow!("remote HTTP status via GPTAdmin fallback"));
+                }
+                let max_response_bytes = self.local.limits.max_response_bytes;
+                let mut body = Vec::new();
+                let mut chunk = [0; 8 * 1024];
+                loop {
+                    let read = stream
+                        .read(&mut chunk)
+                        .await
+                        .context("read tunneled response")?;
+                    if read == 0 {
+                        break;
+                    }
+                    if max_response_bytes != 0
+                        && body.len().saturating_add(read) > max_response_bytes
+                    {
+                        return Err(anyhow!(
+                            "remote response exceeds max_response_bytes ({max_response_bytes})"
+                        ));
+                    }
+                    body.extend_from_slice(&chunk[..read]);
+                }
+                let value =
+                    serde_json::from_slice::<Value>(&body).context("parse tunneled remote response")?;
+                if let Some(err) = value.get("error") {
+                    return Err(anyhow!("remote error: {}", err));
+                }
+                Ok(value.get("result").cloned().unwrap_or(value))
+            },
+        )
+        .await
+        .context("GPTAdmin fallback timeout")?
     }
 
     fn redacted_outbound_error(error: &reqwest::Error) -> String {
@@ -1367,6 +1520,50 @@ impl MeshService {
             host_status,
         }
     }
+}
+
+fn is_direct_connect_error(error: &anyhow::Error) -> bool {
+    error
+        .to_string()
+        .starts_with("send remote request: connect")
+}
+
+fn validated_loopback_proxy_url(value: &str) -> Result<reqwest::Url> {
+    let url = reqwest::Url::parse(value.trim()).context("parse GPTAdmin proxy URL")?;
+    let loopback = matches!(
+        url.host_str(),
+        Some("127.0.0.1") | Some("::1") | Some("[::1]")
+    );
+    if url.scheme() != "http"
+        || !loopback
+        || url.username() != ""
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+    {
+        return Err(anyhow!(
+            "GPTAdmin fallback proxy must be a credential-free http loopback URL with no path"
+        ));
+    }
+    Ok(url)
+}
+
+async fn read_http_headers(stream: &mut tokio::net::TcpStream) -> Result<String> {
+    use tokio::io::AsyncReadExt;
+    let mut headers = Vec::new();
+    while headers.len() < 32 * 1024 {
+        let mut byte = [0u8; 1];
+        stream
+            .read_exact(&mut byte)
+            .await
+            .context("read HTTP headers")?;
+        headers.push(byte[0]);
+        if headers.ends_with(b"\r\n\r\n") {
+            return String::from_utf8(headers).context("decode HTTP headers");
+        }
+    }
+    Err(anyhow!("HTTP headers exceed 32768 bytes"))
 }
 
 fn unique_hosts(hosts: &[String]) -> Vec<String> {
@@ -1509,5 +1706,11 @@ mod tests {
             !summary.contains("private-token-must-not-leak"),
             "{summary}"
         );
+    }
+
+    #[test]
+    fn gptadmin_proxy_url_rejects_non_root_path() {
+        assert!(validated_loopback_proxy_url("http://127.0.0.1:3126/tunnel").is_err());
+        assert!(validated_loopback_proxy_url("http://127.0.0.1:3126/").is_ok());
     }
 }
