@@ -50,6 +50,14 @@ pub fn default_exclude_globs() -> Vec<String> {
         "**/*.key",
         "**/shadow",
         "**/gshadow",
+        "proc/**",
+        "sys/**",
+        "dev/**",
+        "run/**",
+        "**/proc/**",
+        "**/sys/**",
+        "**/dev/**",
+        "**/run/**",
     ]
     .into_iter()
     .map(str::to_string)
@@ -220,5 +228,18 @@ impl AppConfig {
 
     pub fn overall_timeout(&self) -> Duration {
         Duration::from_millis(self.limits.overall_timeout_ms)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_exclude_globs;
+
+    #[test]
+    fn defaults_exclude_runtime_pseudo_filesystems() {
+        let excludes = default_exclude_globs();
+        for pattern in ["proc/**", "sys/**", "dev/**", "run/**"] {
+            assert!(excludes.contains(&pattern.to_string()), "missing {pattern}");
+        }
     }
 }
