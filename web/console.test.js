@@ -59,6 +59,41 @@ test("delegated Locations keep the search form wired", async () => {
   assert.deepEqual(JSON.parse(search.options.body), { query: "nginx" });
 });
 
+test("device sidebar persistently renders a safe degraded device error without health polling", async () => {
+  const { nodes, requests } = consoleFixture({
+    hosts: [{
+      id: "mac-mini",
+      roots: ["/Users/operator/projects"],
+      health: "offline",
+      last_error: "Device did not respond before the request deadline.",
+    }],
+    roots: ["/Users/operator/projects"],
+  });
+  await settle();
+
+  const device = nodes["host-sidebar"].children.find((node) => node.className.includes("host-item") && node.children.some((child) => child.textContent === "mac-mini"));
+  assert.ok(device, "the catalog device should remain in the sidebar");
+  assert.ok(device.children.some((child) => child.className.includes("offline") && child.textContent === "offline"));
+  assert.ok(device.children.some((child) => child.textContent === "Device did not respond before the request deadline."));
+  assert.equal(requests.filter((request) => request.url === "/api/catalog").length, 1, "health is catalog-refresh driven, not periodically polled");
+});
+
+test("device sidebar distinguishes a readable-but-partial device from an offline device", async () => {
+  const { nodes } = consoleFixture({
+    hosts: [{
+      id: "mac-m1",
+      roots: ["/Users/user"],
+      health: "degraded",
+      last_error: "Some configured paths are not readable.",
+    }],
+  });
+  await settle();
+  const device = nodes["host-sidebar"].children.find((node) =>
+    node.className.includes("host-item") && node.children.some((child) => child.textContent === "mac-m1"));
+  assert.ok(device);
+  assert.ok(device.children.some((child) => child.className.includes("degraded") && child.textContent === "degraded"));
+});
+
 function consoleFixture(catalog, browseEntries = []) {
   const ids = ["connection", "search-form", "query", "refresh-catalog", "search-button", "search-state", "host-sidebar", "locations-sidebar", "results", "results-count", "preview", "backup-badge", "backup-body"];
   const nodes = Object.fromEntries(ids.map((id) => [id, new Element()]));

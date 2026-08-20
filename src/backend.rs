@@ -16,15 +16,28 @@ use tokio::{
     time::{timeout, Instant},
 };
 
-fn rg_command() -> TokioCommand {
+fn rg_command() -> Option<TokioCommand> {
     let sibling = std::env::current_exe().ok().and_then(|exe| {
         let name = if cfg!(windows) { "rg.exe" } else { "rg" };
         exe.parent().map(|parent| parent.join(name))
     });
     match sibling.filter(|path| path.is_file()) {
-        Some(path) => TokioCommand::new(path),
-        None => TokioCommand::new("rg"),
+        Some(path) => Some(TokioCommand::new(path)),
+        None => executable_on_path("rg").map(TokioCommand::new),
     }
+}
+
+fn executable_on_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path).find_map(|directory| {
+            let candidate = directory.join(name);
+            candidate.is_file().then_some(candidate)
+        })
+    })
+}
+
+fn grep_command() -> TokioCommand {
+    TokioCommand::new("grep")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -523,6 +536,8 @@ impl LocalBackend {
         let deadline = Instant::now() + Duration::from_millis(self.limits.overall_timeout_ms);
         let mut hits = Vec::new();
         let mut truncated = false;
+        let mut partial = false;
+        let mut partial_error = None;
         for root in roots {
             let remaining = limit.saturating_sub(hits.len());
             if remaining == 0 {
@@ -543,6 +558,10 @@ impl LocalBackend {
             )
             .await?;
             hits.extend(outcome.hits);
+            partial |= outcome.partial;
+            if partial_error.is_none() {
+                partial_error = outcome.partial_error;
+            }
             if outcome.truncated {
                 truncated = true;
                 break;
@@ -553,8 +572,8 @@ impl LocalBackend {
         Ok(SearchOutcome {
             hits,
             truncated,
-            partial: false,
-            partial_error: None,
+            partial,
+            partial_error,
         })
     }
 
@@ -618,8 +637,17 @@ async fn search_text_impl(
     deadline: Instant,
     candidate_paths: Option<Vec<PathBuf>>,
 ) -> Result<SearchOutcome> {
-    let mut command = rg_command();
-    command.arg("-n").arg("--hidden");
+    let using_rg = rg_command().is_some();
+    let mut command = rg_command().unwrap_or_else(grep_command);
+    command.arg("-n");
+    if using_rg {
+        command.arg("--hidden");
+    } else {
+        command
+            .arg("-R")
+            .arg("-H")
+            .arg("--binary-files=without-match");
+    }
     match mode {
         SearchMode::Literal => {
             command.arg("-F");
@@ -629,15 +657,33 @@ async fn search_text_impl(
             command.arg("-F").arg("-i");
         }
     }
-    for glob in path_globs {
-        command.arg("--glob").arg(glob);
+    if using_rg {
+        for glob in path_globs {
+            command.arg("--glob").arg(glob);
+        }
+        for glob in exclude_globs {
+            command.arg("--glob").arg(format!("!{glob}"));
+        }
+        command
+            .arg("--max-filesize")
+            .arg(max_file_bytes.to_string());
+    } else {
+        if !path_globs.is_empty() {
+            return Err(anyhow!(
+                "path_globs require rg; install ripgrep or retry without path_globs"
+            ));
+        }
+        for glob in exclude_globs {
+            if let Some(name) = glob
+                .strip_prefix("**/")
+                .and_then(|value| value.strip_suffix("/**"))
+            {
+                command.arg(format!("--exclude-dir={name}"));
+            } else if let Some(name) = glob.strip_prefix("**/") {
+                command.arg(format!("--exclude={name}"));
+            }
+        }
     }
-    for glob in exclude_globs {
-        command.arg("--glob").arg(format!("!{glob}"));
-    }
-    command
-        .arg("--max-filesize")
-        .arg(max_file_bytes.to_string());
     if candidate_paths
         .as_ref()
         .is_some_and(|paths| !paths.is_empty())
@@ -667,7 +713,13 @@ async fn search_text_impl(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|err| anyhow!("start rg search in {}: {err}", root.display()))?;
+        .map_err(|err| {
+            anyhow!(
+                "start {} search in {}: {err}",
+                if using_rg { "rg" } else { "grep" },
+                root.display()
+            )
+        })?;
     let Some(mut stdout) = child.stdout.take() else {
         terminate_child(&mut child).await;
         return Err(anyhow!("rg search did not provide stdout"));
@@ -814,7 +866,7 @@ async fn search_text_impl(
             return Err(anyhow!("rg search diagnostics exceeded 65536 bytes"));
         }
         if status.code() == Some(2) {
-            let diagnostic = permission_denied_diagnostic(&stderr).ok_or_else(|| {
+            let diagnostic = non_readable_traversal_diagnostic(&stderr).ok_or_else(|| {
                 anyhow!(
                     "rg search failed with {}: {}",
                     status,
@@ -839,7 +891,7 @@ async fn search_text_impl(
     })
 }
 
-fn permission_denied_diagnostic(stderr: &[u8]) -> Option<String> {
+fn non_readable_traversal_diagnostic(stderr: &[u8]) -> Option<String> {
     let diagnostic = String::from_utf8_lossy(stderr).trim().to_string();
     let mut lines = diagnostic
         .lines()
@@ -849,7 +901,14 @@ fn permission_denied_diagnostic(stderr: &[u8]) -> Option<String> {
     lines
         .all(|line| {
             let line = line.to_ascii_lowercase();
-            line.contains("permission denied") || line.contains("operation not permitted")
+            line.contains("permission denied")
+                || line.contains("operation not permitted")
+                || line.contains("not readable")
+                || line.contains("input/output error")
+                || line.contains("resource busy")
+                || line.contains("resource deadlock avoided")
+                || line.contains("no such file or directory")
+                || line.contains("stale file handle")
         })
         .then_some("some configured paths were not readable".to_string())
 }
@@ -906,8 +965,12 @@ async fn find_paths_impl(
     max_response_bytes: usize,
     deadline: Instant,
 ) -> Result<SearchOutcome> {
-    let mut command = rg_command();
-    command.arg("--files").arg("--hidden").arg("--no-messages");
+    let Some(mut command) = rg_command() else {
+        return Err(anyhow!(
+            "path search requires rg; install ripgrep (text search falls back to grep)"
+        ));
+    };
+    command.arg("--files").arg("--hidden");
     for glob in exclude_globs {
         command.arg("--glob").arg(format!("!{glob}"));
     }
@@ -915,7 +978,7 @@ async fn find_paths_impl(
         .arg(".")
         .current_dir(root)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .with_context(|| "run rg --files")?;
@@ -923,6 +986,14 @@ async fn find_paths_impl(
         terminate_child(&mut child).await;
         return Err(anyhow!("rg --files did not provide stdout"));
     };
+    let Some(mut stderr) = child.stderr.take() else {
+        terminate_child(&mut child).await;
+        return Err(anyhow!("rg --files did not provide stderr"));
+    };
+    let stderr_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).await.map(|_| bytes)
+    });
     let mut hits = Vec::new();
     let mut pending = Vec::new();
     let mut stdout_bytes = 0usize;
@@ -999,7 +1070,25 @@ async fn find_paths_impl(
                 return Err(anyhow!("rg path search timed out"));
             }
         };
-        if !status.success() && status.code() != Some(1) && status.code() != Some(2) {
+        let stderr = stderr_task
+            .await
+            .context("collect rg --files diagnostics")??;
+        if status.code() == Some(2) {
+            let diagnostic = non_readable_traversal_diagnostic(&stderr).ok_or_else(|| {
+                anyhow!(
+                    "rg --files failed with {}: {}",
+                    status,
+                    String::from_utf8_lossy(&stderr).trim()
+                )
+            })?;
+            return Ok(SearchOutcome {
+                hits,
+                truncated: false,
+                partial: true,
+                partial_error: Some(diagnostic),
+            });
+        }
+        if !status.success() && status.code() != Some(1) {
             return Err(anyhow!("rg --files failed with {}", status));
         }
     }
@@ -1126,4 +1215,29 @@ where
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::non_readable_traversal_diagnostic;
+
+    #[test]
+    fn non_readable_traversal_errors_have_one_safe_diagnostic_for_text_and_paths() {
+        for stderr in [
+            b"rg: ./Library/Mobile Documents: Operation not permitted (os error 1)\n".as_slice(),
+            b"rg: ./iCloud: Permission denied (os error 13)\n".as_slice(),
+            b"rg: ./volume: Input/output error (os error 5)\n".as_slice(),
+            b"rg: ./Library/Mobile Documents: Resource deadlock avoided\n".as_slice(),
+        ] {
+            assert_eq!(
+                non_readable_traversal_diagnostic(stderr).as_deref(),
+                Some("some configured paths were not readable")
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_queries_are_not_misclassified_as_traversal_errors() {
+        assert!(non_readable_traversal_diagnostic(b"regex parse error:\n    (\n").is_none());
+    }
 }

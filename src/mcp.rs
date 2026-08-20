@@ -1086,10 +1086,10 @@ impl MeshService {
                             outcome.hits,
                             vec![PerHostStatus {
                                 host_id: target.clone(),
-                                ok: true,
-                                error: None,
+                                ok: !outcome.partial,
+                                error: outcome.partial_error,
                             }],
-                            false,
+                            outcome.partial,
                             outcome.truncated,
                         ))
                     } else {

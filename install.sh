@@ -35,7 +35,26 @@ tar -xzf "$tmp/$asset" -C "$tmp"
 
 install -d "$prefix/bin" "$config_dir"
 install -m 0755 "$tmp/grepmesh-mcp" "$prefix/bin/grepmesh-mcp"
-install -m 0755 "$tmp/rg" "$prefix/bin/rg"
+if [[ -x "$tmp/rg" ]]; then
+  install -m 0755 "$tmp/rg" "$prefix/bin/rg"
+elif command -v rg >/dev/null; then
+  printf 'Using existing rg at %s\n' "$(command -v rg)"
+elif command -v brew >/dev/null; then
+  brew install ripgrep
+elif command -v apt-get >/dev/null; then
+  sudo apt-get update && sudo apt-get install -y ripgrep
+elif command -v dnf >/dev/null; then
+  sudo dnf install -y ripgrep
+elif command -v pacman >/dev/null; then
+  sudo pacman -Sy --noconfirm ripgrep
+else
+  echo 'ripgrep (rg) is required for path search and is unavailable. Install ripgrep, then rerun this installer. GrepMesh text search can use its explicit grep fallback when rg is absent.' >&2
+  exit 1
+fi
+if [[ ! -x "$prefix/bin/rg" ]] && ! command -v rg >/dev/null; then
+  echo 'ripgrep installation did not provide rg. GrepMesh text search can use its explicit grep fallback, but this installer cannot complete without rg.' >&2
+  exit 1
+fi
 if [[ ! -e "$config_dir/config.json" ]]; then
   sed "s|/home/user/projects|$HOME|g" "$tmp/config.example.json" > "$config_dir/config.json"
 fi

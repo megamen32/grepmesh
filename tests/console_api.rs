@@ -111,13 +111,13 @@ async fn local_console_ui_and_catalog_have_a_browser_safe_success_shape() {
     assert!(ui.contains("class=\"results finder-list\""));
     assert!(ui.contains("No file selected."));
     assert!(ui.contains("Choose a root or directory to browse metadata"));
-    assert!(ui.contains("<script src=\"/ui/console.js?v=20260820-host-failures\" defer></script>"));
+    assert!(ui.contains("<script src=\"/ui/console.js?v=20260820-reliability\" defer></script>"));
     assert!(!ui.contains("Directory browsing is not available yet."));
     assert!(ui.contains("id=\"host-failures\""));
 
     let script = client
         .get(format!(
-            "{}/ui/console.js?v=20260820-host-failures",
+            "{}/ui/console.js?v=20260820-reliability",
             harness.local_base
         ))
         .send()
@@ -129,6 +129,8 @@ async fn local_console_ui_and_catalog_have_a_browser_safe_success_shape() {
     assert!(script.contains("browseDirectory(root)"));
     assert!(script.contains("renderHostFailures(details.failures)"));
     assert!(script.contains("Host ${failure.host} reported an error"));
+    assert!(script.contains("/api/search/status"));
+    assert!(script.contains("pollSearch"));
 
     let catalog = client
         .get(format!("{}/api/catalog", harness.local_base))
@@ -265,7 +267,28 @@ async fn preview_requires_an_opaque_search_result_handle_not_an_arbitrary_path()
         .await
         .unwrap();
     assert_eq!(search.status(), StatusCode::OK);
-    let search: Value = search.json().await.unwrap();
+    let mut search: Value = search.json().await.unwrap();
+    for _ in 0..40 {
+        if search["results"]
+            .as_array()
+            .is_some_and(|results| !results.is_empty())
+        {
+            break;
+        }
+        let job_id = search["job_id"]
+            .as_str()
+            .expect("running search has a job id");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        search = client
+            .post(format!("{}/api/search/status", harness.local_base))
+            .json(&json!({"job_id": job_id}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    }
     let preview_id = search["results"]
         .as_array()
         .and_then(|results| results.first())

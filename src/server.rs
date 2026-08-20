@@ -161,6 +161,7 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
         });
     }
     let console_service = Arc::clone(&service);
+    let console_jobs = jobs.clone();
     let remote_app = build_app(AppState {
         service: Arc::clone(&service),
         jobs: jobs.clone(),
@@ -176,7 +177,11 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
             peer_auth_token,
             require_peer_auth: false,
         })
-        .merge(crate::console::router(console_service, backup_catalog));
+        .merge(crate::console::router(
+            console_service,
+            console_jobs,
+            backup_catalog,
+        ));
         tokio::try_join!(
             axum::serve(listener, remote_app),
             axum::serve(local_listener, local_app)

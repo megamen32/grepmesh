@@ -6,6 +6,7 @@
 
 use crate::{
     backup_catalog::{read_fixture_availability, BackupCatalogConfig},
+    jobs::SearchJobs,
     mcp::{ListDirectoryArgs, ListLocationsArgs, MeshService, ReadTextArgs, SearchArgs},
 };
 use axum::{
@@ -35,6 +36,7 @@ static PREVIEW_COUNTER: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone)]
 struct ConsoleState {
     service: Arc<MeshService>,
+    jobs: SearchJobs,
     backup_catalog: Option<BackupCatalogConfig>,
     previews: Arc<Mutex<BTreeMap<String, PreviewTarget>>>,
 }
@@ -49,9 +51,14 @@ struct PreviewTarget {
 
 /// Browser-only routes. The caller deliberately mounts this router exclusively
 /// on the loopback listener rather than adding it to the MCP app.
-pub fn router(service: Arc<MeshService>, backup_catalog: Option<BackupCatalogConfig>) -> Router {
+pub fn router(
+    service: Arc<MeshService>,
+    jobs: SearchJobs,
+    backup_catalog: Option<BackupCatalogConfig>,
+) -> Router {
     let state = ConsoleState {
         service,
+        jobs,
         backup_catalog,
         previews: Arc::new(Mutex::new(BTreeMap::new())),
     };
@@ -63,6 +70,7 @@ pub fn router(service: Arc<MeshService>, backup_catalog: Option<BackupCatalogCon
         .route("/api/catalog", get(catalog))
         .route("/api/browse", post(browse))
         .route("/api/search", post(search))
+        .route("/api/search/status", post(search_status))
         .route("/api/preview", post(preview))
         .route("/api/backup/availability", get(backup_availability))
         .with_state(state)
@@ -140,9 +148,40 @@ async fn catalog(State(state): State<ConsoleState>) -> Response {
                 .flatten()
                 .cloned()
                 .collect::<Vec<_>>();
+            let statuses = result
+                .host_status
+                .iter()
+                .map(|status| {
+                    (
+                        status.host_id.clone(),
+                        (status.ok, safe_host_error(status.error.as_deref())),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
             let hosts = roots_by_host
                 .into_iter()
-                .map(|(id, roots)| json!({"id": id, "roots": roots}))
+                .map(|(id, roots)| {
+                    let (healthy, last_error) = statuses.get(&id).cloned().unwrap_or((
+                        false,
+                        Some("Device did not report its catalog status.".to_string()),
+                    ));
+                    let health = if healthy {
+                        "healthy"
+                    } else if last_error
+                        .as_deref()
+                        .is_some_and(|error| error.starts_with("Some configured paths"))
+                    {
+                        "degraded"
+                    } else {
+                        "offline"
+                    };
+                    json!({
+                        "id": id,
+                        "roots": roots,
+                        "health": health,
+                        "last_error": last_error,
+                    })
+                })
                 .collect::<Vec<_>>();
             Json(json!({
                 "hosts": hosts,
@@ -184,15 +223,51 @@ async fn search(State(state): State<ConsoleState>, Json(mut args): Json<SearchAr
         return bad_request("query must not be empty");
     }
     args.verbose = true;
-    match state.service.call_search(args).await {
-        Ok(result) => {
-            let mut data = result.data;
+    match state.jobs.start((*state.service).clone(), args) {
+        Ok(job_id) => match state.jobs.status(&job_id, None, None) {
+            Ok(mut data) => {
+                issue_preview_handles(&state, &mut data);
+                Json(data).into_response()
+            }
+            Err(err) => bad_request(err.to_string()),
+        },
+        Err(err) => bad_request(err.to_string()),
+    }
+}
+
+async fn search_status(State(state): State<ConsoleState>, Json(request): Json<Value>) -> Response {
+    let Some(job_id) = request.get("job_id").and_then(Value::as_str) else {
+        return bad_request("job_id is required");
+    };
+    match state.jobs.status(
+        job_id,
+        request.get("cursor").and_then(Value::as_str),
+        request
+            .get("page_size")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize),
+    ) {
+        Ok(mut data) => {
             issue_preview_handles(&state, &mut data);
-            data["state"] = Value::String("complete".to_string());
             Json(data).into_response()
         }
         Err(err) => bad_request(err.to_string()),
     }
+}
+
+fn safe_host_error(error: Option<&str>) -> Option<String> {
+    error.map(|error| {
+        let lower = error.to_ascii_lowercase();
+        if lower.contains("timeout") {
+            "Device did not respond before the request deadline.".to_string()
+        } else if lower.contains("unauthorized") || lower.contains("401") {
+            "Device rejected the peer request.".to_string()
+        } else if lower.contains("not readable") || lower.contains("permission") {
+            "Some configured paths are not readable.".to_string()
+        } else {
+            "Device is unavailable or returned an incomplete result.".to_string()
+        }
+    })
 }
 
 async fn preview(State(state): State<ConsoleState>, Json(request): Json<Value>) -> Response {

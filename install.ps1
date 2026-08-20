@@ -25,7 +25,23 @@ try {
 
     New-Item -ItemType Directory -Force -Path $prefix, $configDir | Out-Null
     Copy-Item -LiteralPath (Join-Path $temp 'grepmesh-mcp.exe') -Destination (Join-Path $prefix 'grepmesh-mcp.exe') -Force
-    Copy-Item -LiteralPath (Join-Path $temp 'rg.exe') -Destination (Join-Path $prefix 'rg.exe') -Force
+    $bundledRg = Join-Path $temp 'rg.exe'
+    if (Test-Path -LiteralPath $bundledRg) {
+        Copy-Item -LiteralPath $bundledRg -Destination (Join-Path $prefix 'rg.exe') -Force
+    } elseif (Get-Command rg.exe -ErrorAction SilentlyContinue) {
+        Write-Host 'Using existing rg.exe from PATH.'
+    } elseif (Get-Command winget.exe -ErrorAction SilentlyContinue) {
+        & winget.exe install --id BurntSushi.ripgrep.MSVC --exact --accept-package-agreements --accept-source-agreements
+        if ($LASTEXITCODE -ne 0) { throw 'Failed to install ripgrep with winget.' }
+    } elseif (Get-Command choco.exe -ErrorAction SilentlyContinue) {
+        & choco.exe install ripgrep -y
+        if ($LASTEXITCODE -ne 0) { throw 'Failed to install ripgrep with Chocolatey.' }
+    } else {
+        throw 'ripgrep (rg.exe) is required for path search and is unavailable. Install ripgrep, then rerun this installer. GrepMesh text search can use its explicit grep fallback when rg is absent.'
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $prefix 'rg.exe')) -and -not (Get-Command rg.exe -ErrorAction SilentlyContinue)) {
+        throw 'ripgrep installation did not provide rg.exe. GrepMesh text search can use its explicit grep fallback, but this installer cannot complete without rg.exe.'
+    }
 
     $configPath = Join-Path $configDir 'config.json'
     if (-not (Test-Path -LiteralPath $configPath)) {
