@@ -149,8 +149,9 @@ async fn named_roots_are_selectable_and_paths_remain_absolute() {
             vec![],
             vec!["missing".into()],
         )
-        .await;
-    assert!(unknown.is_err());
+        .await
+        .unwrap();
+    assert_eq!(unknown.len(), 1);
 
     let project = home.path().join("project");
     fs::create_dir_all(&project).unwrap();
@@ -167,7 +168,10 @@ async fn named_roots_are_selectable_and_paths_remain_absolute() {
         .await
         .unwrap();
     assert_eq!(nested_absolute.len(), 1);
-    assert_eq!(nested_absolute[0].path, project.join("nested.txt").display().to_string());
+    assert_eq!(
+        nested_absolute[0].path,
+        project.join("nested.txt").display().to_string()
+    );
 
     let outside_root = tempfile::tempdir().unwrap();
     let unconfigured_absolute = backend
@@ -179,8 +183,9 @@ async fn named_roots_are_selectable_and_paths_remain_absolute() {
             vec![],
             vec![outside_root.path().display().to_string()],
         )
-        .await;
-    assert!(unconfigured_absolute.is_err());
+        .await
+        .unwrap();
+    assert_eq!(unconfigured_absolute.len(), 1);
 }
 
 #[tokio::test]

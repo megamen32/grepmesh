@@ -360,21 +360,17 @@ impl LocalBackend {
     }
 
     fn selected_roots(&self, names: &[String]) -> Result<Vec<PathBuf>> {
-        let mut roots = Vec::new();
-        if names.is_empty() {
-            for (name, paths) in &self.root_paths {
-                if name != "local" {
-                    roots.extend(paths.iter().cloned());
-                }
-            }
-        } else {
+        let mut roots = self.default_search_roots();
+        if !names.is_empty() {
+            roots.clear();
             for name in names {
                 let paths = if let Some(paths) = self.root_paths.get(name) {
                     paths.clone()
                 } else {
                     let requested = Path::new(name);
-                    let requested = fs::canonicalize(requested)
-                        .with_context(|| format!("resolve requested root {name}"))?;
+                    let Ok(requested) = fs::canonicalize(requested) else {
+                        return Ok(self.default_search_roots());
+                    };
                     let allowed = self
                         .root_paths
                         .values()
@@ -382,7 +378,7 @@ impl LocalBackend {
                         .filter_map(|path| fs::canonicalize(path).ok())
                         .any(|path| requested.starts_with(path));
                     if !allowed {
-                        return Err(anyhow!("unknown root {}", name));
+                        return Ok(self.default_search_roots());
                     }
                     vec![requested]
                 };
@@ -395,6 +391,21 @@ impl LocalBackend {
             roots.push(self.root.clone());
         }
         Ok(roots)
+    }
+
+    fn default_search_roots(&self) -> Vec<PathBuf> {
+        let mut roots = self
+            .root_paths
+            .iter()
+            .filter(|(name, _)| name.as_str() != "local")
+            .flat_map(|(_, paths)| paths.iter().cloned())
+            .collect::<Vec<_>>();
+        roots.sort();
+        roots.dedup();
+        if roots.is_empty() {
+            roots.push(self.root.clone());
+        }
+        roots
     }
 
     pub async fn search_text(
