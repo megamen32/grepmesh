@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import tarfile
 import tempfile
@@ -45,7 +46,13 @@ def main() -> int:
         config.update({"host_id": args.target, "bind": "127.0.0.1:19419", "root": str(canary), "roots": {"canary": [str(canary)]}, "peers": []})
         config_path = root / "smoke-config.json"
         config_path.write_text(json.dumps(config), encoding="utf-8")
-        process = subprocess.Popen([str(binary), "--config", str(config_path)])
+        environment = os.environ.copy()
+        environment["PATH"] = os.pathsep.join((str(root), environment.get("PATH", "")))
+        process = subprocess.Popen(
+            [str(binary), "--config", str(config_path)],
+            cwd=root,
+            env=environment,
+        )
         try:
             url = "http://127.0.0.1:19419/mcp"
             for _ in range(50):
