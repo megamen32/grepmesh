@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "grepmesh-search",
+  "version": "1.0.0",
+  "description": "Bounded GrepMesh search for unknown locations and cross-host scopes, with rg preferred for known local paths.",
+  "author": {"name": "megamen32", "url": "https://github.com/megamen32"},
+  "homepage": "https://github.com/megamen32/grepmesh/tree/main/plugins/grepmesh-search",
+  "repository": "https://github.com/megamen32/grepmesh",
+  "license": "MIT",
+  "keywords": ["grepmesh", "search", "mcp", "codex", "zcode", "rg"]
+}

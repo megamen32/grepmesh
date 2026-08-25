@@ -1,0 +1,19 @@
+{
+  "name": "grepmesh-search",
+  "version": "1.0.0",
+  "description": "Bounded mesh search for Codex and ZCode, with an explicit rg-first rule for known local paths.",
+  "author": {
+    "name": "megamen32",
+    "url": "https://github.com/megamen32"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "GrepMesh Search",
+    "shortDescription": "Bounded mesh search, with rg-first local routing.",
+    "longDescription": "Use GrepMesh for unknown locations and cross-host search. For a known local checkout or path, use rg because it is usually more context-efficient.",
+    "developerName": "megamen32",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Use rg for known local paths; use GrepMesh only for unknown locations, cross-host search, or configured mesh scopes."
+  }
+}
