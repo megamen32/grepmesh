@@ -59,14 +59,17 @@ jobs:
           Invoke-WebRequest -UseBasicParsing $asset.browser_download_url -OutFile rg.zip
           Expand-Archive rg.zip rg-release
           $rg = Get-ChildItem rg-release -Recurse -Filter rg.exe | Select-Object -First 1
-          Copy-Item $rg.FullName "$env:USERPROFILE\.cargo\bin\rg.exe"
+          $rgPath = "$env:USERPROFILE\.cargo\bin\rg.exe"
+          Copy-Item $rg.FullName $rgPath
+          if (-not (Test-Path -LiteralPath $rgPath)) { throw 'ripgrep installation did not provide rg.exe' }
+          "RG_BIN=$rgPath" >> $env:GITHUB_ENV
       - name: Package platform bundle
         shell: bash
         run: |
           python3 scripts/package-release.py \
             --target "${{ matrix.target }}" \
             --binary "target/${{ matrix.rust_target }}/release/$(basename '${{ matrix.binary }}')" \
-            --rg "$(command -v rg.exe || command -v rg)" \
+            --rg "${RG_BIN:-$(command -v rg)}" \
             --output dist
       - name: Smoke packaged MCP and search
         shell: bash
