@@ -688,9 +688,8 @@ mod tests {
 }
 
 fn fresh_handle(prefix: &str) -> Result<String> {
-    use std::io::Read;
     let mut bytes = [0u8; 24];
-    fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    getrandom::fill(&mut bytes)?;
     Ok(format!(
         "{prefix}-{}",
         bytes

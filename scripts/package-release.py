@@ -45,11 +45,6 @@ def main() -> int:
         stage = Path(temp_dir)
         shutil.copy2(args.binary, stage / binary_name)
         shutil.copy2(args.rg, stage / rg_name)
-        if args.target.startswith("windows-"):
-            # The server's PATH fallback probes the literal `rg` name.
-            # Keep the .exe for users and add that fallback name for the
-            # packaged Windows smoke environment.
-            shutil.copy2(args.rg, stage / "rg")
         shutil.copy2(repo_root / "config.example.json", stage / "config.example.json")
         if service_template:
             shutil.copy2(repo_root / service_template, stage / service_template)
