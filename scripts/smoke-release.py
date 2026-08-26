@@ -65,6 +65,8 @@ def main() -> int:
                 raise SystemExit("packaged GrepMesh did not start")
             assert initialized["result"]["serverInfo"]["name"] == "grepmesh"
             searched = rpc(url, "tools/call", {"name": "search_text", "arguments": {"query": "release canary", "hosts": "local"}})
+            if "error" in searched:
+                raise SystemExit(f"packaged search returned RPC error: {searched['error']}")
             payload = json.loads(searched["result"]["content"][0]["text"])
             assert payload["results"], payload
         finally:
