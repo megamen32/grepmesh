@@ -1,5 +1,5 @@
 use crate::{
-    backend::{PerHostStatus, SearchHit},
+    backend::{HostSearchState, PerHostStatus, SearchHit},
     config::LimitsConfig,
     mcp::{HostsInput, MeshService, SearchArgs},
 };
@@ -155,11 +155,7 @@ impl SearchJobs {
                         Err(error) => {
                             job.host_status.insert(
                                 target.clone(),
-                                PerHostStatus {
-                                    host_id: target,
-                                    ok: false,
-                                    error: Some(error.to_string()),
-                                },
+                                PerHostStatus::failed(target, error.to_string()),
                             );
                         }
                     }
@@ -213,11 +209,7 @@ impl SearchJobs {
                     for host_id in std::mem::take(&mut restored.pending_hosts) {
                         restored.host_status.insert(
                             host_id.clone(),
-                            PerHostStatus {
-                                host_id,
-                                ok: false,
-                                error: Some("search interrupted by service restart".into()),
-                            },
+                            PerHostStatus::failed(host_id, "search interrupted by service restart"),
                         );
                     }
                 }
@@ -262,10 +254,25 @@ impl SearchJobs {
                 }
             }
         }
-        let host_status = job.host_status.values().cloned().collect::<Vec<_>>();
-        let partial = running || host_status.iter().any(|status| !status.ok);
+        let host_status = job
+            .host_status
+            .values()
+            .cloned()
+            .map(|status| {
+                let host_has_results = job.results.iter().any(|hit| hit.host_id == status.host_id);
+                status.normalize_legacy(host_has_results)
+            })
+            .collect::<Vec<_>>();
+        let partial = running
+            || host_status
+                .iter()
+                .any(|status| status.state != Some(HostSearchState::Ok));
         let failed = job.durability_error.is_some()
-            || !running && !host_status.is_empty() && host_status.iter().all(|status| !status.ok);
+            || !running
+                && !host_status.is_empty()
+                && host_status
+                    .iter()
+                    .all(|status| status.state == Some(HostSearchState::Failed));
         let mut data = json!({
             "state": if running { "running" } else if job.lost { "lost" } else if failed { "failed" } else { "complete" },
             "job_id": job_id,
@@ -643,6 +650,45 @@ mod tests {
         assert_eq!(final_delta["state"], "complete");
         assert!(final_delta["results"].as_array().unwrap().is_empty());
         assert_eq!(jobs.inner.lock().unwrap()[job_id].results.len(), 1);
+    }
+
+    #[test]
+    fn terminal_partial_host_completes_job_with_partial_results() {
+        let jobs = SearchJobs::default();
+        let job_id = "job-partial-state";
+        jobs.inner.lock().unwrap().insert(
+            job_id.into(),
+            SearchJob {
+                created_ms: now_ms(),
+                host_id: "A".into(),
+                verbose: true,
+                limit: 10,
+                pending_hosts: BTreeSet::new(),
+                host_status: BTreeMap::from([(
+                    "A".into(),
+                    PerHostStatus::partial("A", "one root failed"),
+                )]),
+                results: vec![SearchHit {
+                    host_id: "A".into(),
+                    path: "/readable/result.txt".into(),
+                    line_number: 1,
+                    context: Vec::new(),
+                    text: "partial result".into(),
+                    column: 1,
+                }],
+                seen_results: BTreeSet::from([("A".into(), "/readable/result.txt".into(), 1)]),
+                truncated: false,
+                cursors: BTreeMap::new(),
+                lost: false,
+                durability_error: None,
+            },
+        );
+
+        let status = jobs.status(job_id, None, None).unwrap();
+        assert_eq!(status["state"], "complete");
+        assert_eq!(status["partial"], true);
+        assert_eq!(status["host_status"][0]["state"], "partial");
+        assert_eq!(status["results"].as_array().unwrap().len(), 1);
     }
 
     #[cfg(unix)]

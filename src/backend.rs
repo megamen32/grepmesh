@@ -122,11 +122,63 @@ pub struct HostStatus {
     pub index_last_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostSearchState {
+    Ok,
+    Partial,
+    Failed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerHostStatus {
     pub host_id: String,
     pub ok: bool,
+    #[serde(default)]
+    pub state: Option<HostSearchState>,
     pub error: Option<String>,
+}
+
+impl PerHostStatus {
+    pub fn complete(host_id: impl Into<String>) -> Self {
+        Self {
+            host_id: host_id.into(),
+            ok: true,
+            state: Some(HostSearchState::Ok),
+            error: None,
+        }
+    }
+
+    pub fn partial(host_id: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            host_id: host_id.into(),
+            ok: false,
+            state: Some(HostSearchState::Partial),
+            error: Some(error.into()),
+        }
+    }
+
+    pub fn failed(host_id: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            host_id: host_id.into(),
+            ok: false,
+            state: Some(HostSearchState::Failed),
+            error: Some(error.into()),
+        }
+    }
+
+    pub fn normalize_legacy(mut self, response_partial: bool) -> Self {
+        if self.state.is_none() {
+            self.state = Some(if self.ok {
+                HostSearchState::Ok
+            } else if response_partial {
+                HostSearchState::Partial
+            } else {
+                HostSearchState::Failed
+            });
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -452,10 +504,14 @@ impl LocalBackend {
         let max_file_bytes = self.limits.max_file_bytes;
         let max_response_bytes = self.limits.max_response_bytes;
         let deadline = Instant::now() + Duration::from_millis(self.limits.overall_timeout_ms);
+        let total_roots = roots.len();
         let mut hits = Vec::new();
         let mut truncated = false;
         let mut partial = false;
         let mut partial_error = None;
+        let mut successful_roots = 0usize;
+        let mut failed_roots = 0usize;
+        let mut first_root_error = None;
         for root in roots {
             let remaining = limit.saturating_sub(hits.len());
             if remaining == 0 {
@@ -464,7 +520,10 @@ impl LocalBackend {
             }
             let remaining_time = deadline.saturating_duration_since(Instant::now());
             if remaining_time.is_zero() {
-                return Err(anyhow!("local rg search timed out"));
+                failed_roots += 1;
+                first_root_error.get_or_insert_with(|| "local rg search timed out".to_string());
+                partial = true;
+                break;
             }
             let candidate_paths = if path_globs.is_empty()
                 && matches!(
@@ -489,7 +548,19 @@ impl LocalBackend {
                 deadline,
                 candidate_paths,
             )
-            .await?;
+            .await;
+            let outcome = match outcome {
+                Ok(outcome) => {
+                    successful_roots += 1;
+                    outcome
+                }
+                Err(err) => {
+                    failed_roots += 1;
+                    first_root_error.get_or_insert_with(|| err.to_string());
+                    partial = true;
+                    continue;
+                }
+            };
             hits.extend(outcome.hits);
             partial |= outcome.partial;
             if partial_error.is_none() {
@@ -499,6 +570,17 @@ impl LocalBackend {
                 truncated = true;
                 break;
             }
+        }
+        if successful_roots == 0 && failed_roots > 0 {
+            return Err(anyhow!(
+                "all selected search roots failed: {}",
+                first_root_error.unwrap_or_else(|| "unknown root error".to_string())
+            ));
+        }
+        if failed_roots > 0 && partial_error.is_none() {
+            partial_error = Some(format!(
+                "{failed_roots} of {total_roots} selected search roots failed"
+            ));
         }
         hits.sort_by(|a, b| a.path.cmp(&b.path).then(a.line_number.cmp(&b.line_number)));
         hits.truncate(limit);
@@ -534,10 +616,14 @@ impl LocalBackend {
         let exclude_globs = self.exclude_globs.clone();
         let max_response_bytes = self.limits.max_response_bytes;
         let deadline = Instant::now() + Duration::from_millis(self.limits.overall_timeout_ms);
+        let total_roots = roots.len();
         let mut hits = Vec::new();
         let mut truncated = false;
         let mut partial = false;
         let mut partial_error = None;
+        let mut successful_roots = 0usize;
+        let mut failed_roots = 0usize;
+        let mut first_root_error = None;
         for root in roots {
             let remaining = limit.saturating_sub(hits.len());
             if remaining == 0 {
@@ -545,7 +631,11 @@ impl LocalBackend {
                 break;
             }
             if deadline.saturating_duration_since(Instant::now()).is_zero() {
-                return Err(anyhow!("local rg path search timed out"));
+                failed_roots += 1;
+                first_root_error
+                    .get_or_insert_with(|| "local rg path search timed out".to_string());
+                partial = true;
+                break;
             }
             let outcome = find_paths_impl(
                 &host_id,
@@ -556,7 +646,19 @@ impl LocalBackend {
                 max_response_bytes,
                 deadline,
             )
-            .await?;
+            .await;
+            let outcome = match outcome {
+                Ok(outcome) => {
+                    successful_roots += 1;
+                    outcome
+                }
+                Err(err) => {
+                    failed_roots += 1;
+                    first_root_error.get_or_insert_with(|| err.to_string());
+                    partial = true;
+                    continue;
+                }
+            };
             hits.extend(outcome.hits);
             partial |= outcome.partial;
             if partial_error.is_none() {
@@ -566,6 +668,17 @@ impl LocalBackend {
                 truncated = true;
                 break;
             }
+        }
+        if successful_roots == 0 && failed_roots > 0 {
+            return Err(anyhow!(
+                "all selected search roots failed: {}",
+                first_root_error.unwrap_or_else(|| "unknown root error".to_string())
+            ));
+        }
+        if failed_roots > 0 && partial_error.is_none() {
+            partial_error = Some(format!(
+                "{failed_roots} of {total_roots} selected search roots failed"
+            ));
         }
         hits.sort_by(|a, b| a.path.cmp(&b.path));
         hits.truncate(limit);

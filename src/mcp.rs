@@ -677,11 +677,7 @@ impl MeshService {
                 start_line: start_line.unwrap_or(1),
                 end_line: end_line.unwrap_or(usize::MAX),
                 chunks,
-                host_status: vec![PerHostStatus {
-                    host_id: self.local.host_id.clone(),
-                    ok: true,
-                    error: None,
-                }],
+                host_status: vec![PerHostStatus::complete(self.local.host_id.clone())],
             }
         } else {
             let peer = self
@@ -703,6 +699,7 @@ impl MeshService {
                 )
                 .await?;
             let mut response = decode_tool_result::<ReadResponse>(value)?;
+            normalize_host_statuses(&mut response.host_status, response.partial);
             response.host_id = self.local.host_id.clone();
             response.target_host_id = target.clone();
             response
@@ -738,11 +735,7 @@ impl MeshService {
         for target in unique_hosts(&normalized.hosts) {
             if target == self.local.host_id {
                 locations.extend(self.local.list_locations());
-                host_status.push(PerHostStatus {
-                    host_id: target,
-                    ok: true,
-                    error: None,
-                });
+                host_status.push(PerHostStatus::complete(target));
                 continue;
             }
             let result = async {
@@ -761,32 +754,33 @@ impl MeshService {
                         }),
                     )
                     .await?;
-                decode_tool_result::<BrowseResponse<Location>>(value)
+                let mut response = decode_tool_result::<BrowseResponse<Location>>(value)?;
+                normalize_host_statuses(&mut response.host_status, response.partial);
+                Ok::<_, anyhow::Error>(response)
             }
             .await;
             match result {
                 Ok(response) => {
                     locations.extend(response.items);
                     if response.host_status.is_empty() {
-                        host_status.push(PerHostStatus {
-                            host_id: target,
-                            ok: !response.partial,
-                            error: response
-                                .partial
-                                .then(|| "remote response was partial".to_string()),
+                        host_status.push(if response.partial {
+                            PerHostStatus::partial(target, "remote response was partial")
+                        } else {
+                            PerHostStatus::complete(target)
                         });
                     } else {
-                        host_status.extend(response.host_status);
+                        host_status.extend(
+                            response
+                                .host_status
+                                .into_iter()
+                                .map(|status| status.normalize_legacy(response.partial)),
+                        );
                     }
                     partial |= response.partial;
                 }
                 Err(err) => {
                     partial = true;
-                    host_status.push(PerHostStatus {
-                        host_id: target,
-                        ok: false,
-                        error: Some(err.to_string()),
-                    });
+                    host_status.push(PerHostStatus::failed(target, err.to_string()));
                 }
             }
         }
@@ -837,11 +831,7 @@ impl MeshService {
                 target_host_id: self.local.host_id.clone(),
                 partial: false,
                 truncated: false,
-                host_status: vec![PerHostStatus {
-                    host_id: self.local.host_id.clone(),
-                    ok: true,
-                    error: None,
-                }],
+                host_status: vec![PerHostStatus::complete(self.local.host_id.clone())],
                 items: self.local.list_directory(&args.path)?,
             }
         } else {
@@ -862,6 +852,7 @@ impl MeshService {
                 )
                 .await?;
             let mut response = decode_tool_result::<BrowseResponse<DirectoryEntry>>(value)?;
+            normalize_host_statuses(&mut response.host_status, response.partial);
             response.host_id = self.local.host_id.clone();
             response.target_host_id = target;
             response
@@ -896,11 +887,7 @@ impl MeshService {
         self.claim_request(&normalized.request_id)?;
         let local = self.local.status()?;
         let mut nodes = vec![local.clone()];
-        let mut host_status = vec![PerHostStatus {
-            host_id: self.local.host_id.clone(),
-            ok: true,
-            error: None,
-        }];
+        let mut host_status = vec![PerHostStatus::complete(self.local.host_id.clone())];
         let mut partial = false;
 
         if normalized.hop_count == 0 {
@@ -920,11 +907,7 @@ impl MeshService {
                     }
                     Err(err) => {
                         partial = true;
-                        host_status.push(PerHostStatus {
-                            host_id: target.clone(),
-                            ok: false,
-                            error: Some(err.to_string()),
-                        });
+                        host_status.push(PerHostStatus::failed(target.clone(), err.to_string()));
                     }
                 }
             }
@@ -984,82 +967,86 @@ impl MeshService {
             let roots = roots.clone();
             let hop_count = hop_count_for(&service.local.host_id, &target, normalized.hop_count)?;
             futures.push((target.clone(), async move {
-                let result: Result<(Vec<SearchHit>, Vec<PerHostStatus>, bool, bool)> =
-                    if target == service.local.host_id {
-                        let outcome = service
-                            .local
-                            .search_text_bounded(
-                                &query,
-                                limit,
-                                context_lines,
-                                mode.clone(),
-                                path_globs.clone(),
-                                roots.clone(),
-                            )
-                            .await?;
-                        let truncated = outcome.truncated;
-                        let partial = outcome.partial;
-                        Ok((
-                            outcome.hits,
-                            vec![PerHostStatus {
-                                host_id: target.clone(),
-                                ok: !partial,
-                                error: outcome.partial_error,
-                            }],
-                            partial,
-                            truncated,
-                        ))
-                    } else {
-                        let peer = service
-                            .peer_config(&target)
-                            .ok_or_else(|| anyhow!("unknown peer {}", target))?;
-                        let value = service
-                            .call_remote(
-                                &peer,
-                                "search_text",
-                                json!({
-                                    "query": query,
-                                    "verbose": true,
-                                    "hosts": ["local"],
-                                    "request_id": request_id,
-                                    "origin_host": origin_host,
-                                    "hop_count": hop_count,
-                                    "limit": limit,
-                                    "context_lines": context_lines,
-                                    "mode": mode,
-                                    "path_globs": path_globs,
-                                    "roots": roots,
+                let result: Result<(Vec<SearchHit>, Vec<PerHostStatus>, bool, bool)> = if target
+                    == service.local.host_id
+                {
+                    let outcome = service
+                        .local
+                        .search_text_bounded(
+                            &query,
+                            limit,
+                            context_lines,
+                            mode.clone(),
+                            path_globs.clone(),
+                            roots.clone(),
+                        )
+                        .await?;
+                    let truncated = outcome.truncated;
+                    let partial = outcome.partial;
+                    Ok((
+                        outcome.hits,
+                        vec![if partial {
+                            PerHostStatus::partial(
+                                target.clone(),
+                                outcome.partial_error.unwrap_or_else(|| {
+                                    "host returned a partial result".to_string()
                                 }),
                             )
-                            .await?;
-                        let response = decode_tool_result::<SearchResponse<SearchHit>>(value)?;
-                        let remote_status = if response.host_status.is_empty() {
-                            vec![PerHostStatus {
-                                host_id: target.clone(),
-                                ok: !response.partial,
-                                error: response
-                                    .partial
-                                    .then(|| "remote response was partial".to_string()),
-                            }]
                         } else {
-                            response.host_status.clone()
-                        };
-                        Ok((
-                            response.results,
-                            remote_status,
-                            response.partial,
-                            response.truncated,
-                        ))
+                            PerHostStatus::complete(target.clone())
+                        }],
+                        partial,
+                        truncated,
+                    ))
+                } else {
+                    let peer = service
+                        .peer_config(&target)
+                        .ok_or_else(|| anyhow!("unknown peer {}", target))?;
+                    let value = service
+                        .call_remote(
+                            &peer,
+                            "search_text",
+                            json!({
+                                "query": query,
+                                "verbose": true,
+                                "hosts": ["local"],
+                                "request_id": request_id,
+                                "origin_host": origin_host,
+                                "hop_count": hop_count,
+                                "limit": limit,
+                                "context_lines": context_lines,
+                                "mode": mode,
+                                "path_globs": path_globs,
+                                "roots": roots,
+                            }),
+                        )
+                        .await?;
+                    let response = decode_tool_result::<SearchResponse<SearchHit>>(value)?;
+                    let remote_status = if response.host_status.is_empty() {
+                        vec![if response.partial {
+                            PerHostStatus::partial(target.clone(), "remote response was partial")
+                        } else {
+                            PerHostStatus::complete(target.clone())
+                        }]
+                    } else {
+                        response
+                            .host_status
+                            .into_iter()
+                            .map(|status| status.normalize_legacy(response.partial))
+                            .collect()
                     };
+                    Ok((
+                        response.results,
+                        remote_status,
+                        response.partial,
+                        response.truncated,
+                    ))
+                };
                 match result {
                     Ok(value) => Ok(value),
                     Err(err) => Ok((
                         Vec::new(),
-                        vec![PerHostStatus {
-                            host_id: target_for_error,
-                            ok: false,
-                            error: Some(err.to_string()),
-                        }],
+                        vec![PerHostStatus::failed(target_for_error, err.to_string())],
                         true,
                         false,
                     )),
@@ -1086,69 +1073,73 @@ impl MeshService {
             let roots = roots.clone();
             let hop_count = hop_count_for(&service.local.host_id, &target, normalized.hop_count)?;
             futures.push((target.clone(), async move {
-                let result: Result<(Vec<SearchHit>, Vec<PerHostStatus>, bool, bool)> =
-                    if target == service.local.host_id {
-                        let outcome = service
-                            .local
-                            .find_paths_bounded(&query, limit, roots.clone())
-                            .await?;
-                        Ok((
-                            outcome.hits,
-                            vec![PerHostStatus {
-                                host_id: target.clone(),
-                                ok: !outcome.partial,
-                                error: outcome.partial_error,
-                            }],
-                            outcome.partial,
-                            outcome.truncated,
-                        ))
-                    } else {
-                        let peer = service
-                            .peer_config(&target)
-                            .ok_or_else(|| anyhow!("unknown peer {}", target))?;
-                        let value = service
-                            .call_remote(
-                                &peer,
-                                "find_paths",
-                                json!({
-                                    "query": query,
-                                    "hosts": ["local"],
-                                    "request_id": request_id,
-                                    "origin_host": origin_host,
-                                    "hop_count": hop_count,
-                                    "limit": limit,
-                                    "roots": roots,
+                let result: Result<(Vec<SearchHit>, Vec<PerHostStatus>, bool, bool)> = if target
+                    == service.local.host_id
+                {
+                    let outcome = service
+                        .local
+                        .find_paths_bounded(&query, limit, roots.clone())
+                        .await?;
+                    Ok((
+                        outcome.hits,
+                        vec![if outcome.partial {
+                            PerHostStatus::partial(
+                                target.clone(),
+                                outcome.partial_error.unwrap_or_else(|| {
+                                    "host returned a partial result".to_string()
                                 }),
                             )
-                            .await?;
-                        let response = decode_tool_result::<SearchResponse<SearchHit>>(value)?;
-                        let remote_status = if response.host_status.is_empty() {
-                            vec![PerHostStatus {
-                                host_id: target.clone(),
-                                ok: !response.partial,
-                                error: response
-                                    .partial
-                                    .then(|| "remote response was partial".to_string()),
-                            }]
                         } else {
-                            response.host_status.clone()
-                        };
-                        Ok((
-                            response.results,
-                            remote_status,
-                            response.partial,
-                            response.truncated,
-                        ))
+                            PerHostStatus::complete(target.clone())
+                        }],
+                        outcome.partial,
+                        outcome.truncated,
+                    ))
+                } else {
+                    let peer = service
+                        .peer_config(&target)
+                        .ok_or_else(|| anyhow!("unknown peer {}", target))?;
+                    let value = service
+                        .call_remote(
+                            &peer,
+                            "find_paths",
+                            json!({
+                                "query": query,
+                                "hosts": ["local"],
+                                "request_id": request_id,
+                                "origin_host": origin_host,
+                                "hop_count": hop_count,
+                                "limit": limit,
+                                "roots": roots,
+                            }),
+                        )
+                        .await?;
+                    let response = decode_tool_result::<SearchResponse<SearchHit>>(value)?;
+                    let remote_status = if response.host_status.is_empty() {
+                        vec![if response.partial {
+                            PerHostStatus::partial(target.clone(), "remote response was partial")
+                        } else {
+                            PerHostStatus::complete(target.clone())
+                        }]
+                    } else {
+                        response
+                            .host_status
+                            .into_iter()
+                            .map(|status| status.normalize_legacy(response.partial))
+                            .collect()
                     };
+                    Ok((
+                        response.results,
+                        remote_status,
+                        response.partial,
+                        response.truncated,
+                    ))
+                };
                 match result {
                     Ok(value) => Ok(value),
                     Err(err) => Ok((
                         Vec::new(),
-                        vec![PerHostStatus {
-                            host_id: target_for_error,
-                            ok: false,
-                            error: Some(err.to_string()),
-                        }],
+                        vec![PerHostStatus::failed(target_for_error, err.to_string())],
                         true,
                         false,
                     )),
@@ -1178,7 +1169,9 @@ impl MeshService {
                 }),
             )
             .await?;
-        decode_tool_result::<StatusResponse>(value)
+        let mut response = decode_tool_result::<StatusResponse>(value)?;
+        normalize_host_statuses(&mut response.host_status, response.partial);
+        Ok(response)
     }
 
     async fn join_hosts<F>(
@@ -1221,11 +1214,7 @@ impl MeshService {
             if remaining.is_zero() {
                 partial = true;
                 for host_id in pending_hosts {
-                    statuses.push(PerHostStatus {
-                        host_id,
-                        ok: false,
-                        error: Some("overall timeout".to_string()),
-                    });
+                    statuses.push(PerHostStatus::failed(host_id, "overall timeout"));
                 }
                 break;
             }
@@ -1238,22 +1227,20 @@ impl MeshService {
                             truncated |= host_truncated;
                             merged.append(&mut items);
                             if host_status.is_empty() {
-                                host_status.push(PerHostStatus {
-                                    host_id,
-                                    ok: !host_partial,
-                                    error: host_partial
-                                        .then(|| "host returned a partial result".to_string()),
+                                host_status.push(if host_partial {
+                                    PerHostStatus::partial(
+                                        host_id,
+                                        "host returned a partial result",
+                                    )
+                                } else {
+                                    PerHostStatus::complete(host_id)
                                 });
                             }
                             statuses.append(&mut host_status);
                         }
                         Err(err) => {
                             partial = true;
-                            statuses.push(PerHostStatus {
-                                host_id,
-                                ok: false,
-                                error: Some(err.to_string()),
-                            });
+                            statuses.push(PerHostStatus::failed(host_id, err.to_string()));
                         }
                     }
                 }
@@ -1261,11 +1248,7 @@ impl MeshService {
                 Err(_) => {
                     partial = true;
                     for host_id in pending_hosts {
-                        statuses.push(PerHostStatus {
-                            host_id,
-                            ok: false,
-                            error: Some("overall timeout".to_string()),
-                        });
+                        statuses.push(PerHostStatus::failed(host_id, "overall timeout"));
                     }
                     break;
                 }
@@ -1597,9 +1580,16 @@ pub fn decode_tool_result<T: for<'de> Deserialize<'de>>(value: Value) -> Result<
     Ok(serde_json::from_value(value)?)
 }
 
+fn normalize_host_statuses(statuses: &mut [PerHostStatus], response_partial: bool) {
+    for status in statuses {
+        *status = status.clone().normalize_legacy(response_partial);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::HostSearchState;
 
     fn hit(host: &str, path: &str, lines: &[(usize, &str)]) -> SearchHit {
         SearchHit {
@@ -1628,6 +1618,72 @@ mod tests {
             truncated: false,
             results,
             host_status: vec![],
+        }
+    }
+
+    #[test]
+    fn legacy_peer_status_is_normalized_for_read_browse_and_status_responses() {
+        let legacy_status = serde_json::json!({
+            "host_id": "B",
+            "ok": false,
+            "error": "legacy partial response"
+        });
+        let mut read: ReadResponse = serde_json::from_value(serde_json::json!({
+            "request_id": "request",
+            "origin_host": "A",
+            "hop_count": 1,
+            "host_id": "B",
+            "target_host_id": "B",
+            "partial": true,
+            "truncated": false,
+            "path": "/tmp/example",
+            "start_line": 1,
+            "end_line": 1,
+            "chunks": [],
+            "host_status": [legacy_status.clone()]
+        }))
+        .unwrap();
+        let mut browse: BrowseResponse<DirectoryEntry> =
+            serde_json::from_value(serde_json::json!({
+                "request_id": "request",
+                "origin_host": "A",
+                "hop_count": 1,
+                "host_id": "B",
+                "target_host_id": "B",
+                "partial": true,
+                "truncated": false,
+                "entries": [],
+                "host_status": [legacy_status.clone()]
+            }))
+            .unwrap();
+        let mut status: StatusResponse = serde_json::from_value(serde_json::json!({
+            "request_id": "request",
+            "origin_host": "A",
+            "hop_count": 1,
+            "host_id": "B",
+            "partial": true,
+            "host_status": [legacy_status],
+            "local": {
+                "host_id": "B",
+                "root": "/tmp",
+                "backend": "rg",
+                "file_count": 0
+            },
+            "nodes": [],
+            "topology": {
+                "freshness": null,
+                "generation": 0,
+                "last_refresh_error": null
+            }
+        }))
+        .unwrap();
+
+        normalize_host_statuses(&mut read.host_status, read.partial);
+        normalize_host_statuses(&mut browse.host_status, browse.partial);
+        normalize_host_statuses(&mut status.host_status, status.partial);
+
+        for statuses in [&read.host_status, &browse.host_status, &status.host_status] {
+            assert_eq!(statuses[0].state, Some(HostSearchState::Partial));
         }
     }
 

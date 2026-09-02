@@ -1,5 +1,5 @@
 use grepmesh::{
-    backend::{LocalBackend, SearchMode},
+    backend::{HostSearchState, LocalBackend, SearchMode},
     config::AppConfig,
     jobs::SearchJobs,
     mcp::{normalize_request, FindPathsArgs, HostsInput, MeshService, SearchArgs},
@@ -323,6 +323,10 @@ async fn unreadable_root_remains_a_failed_partial_text_search() {
             result.host_status.iter().all(|status| !status.ok),
             "mode {mode:o}"
         );
+        assert!(result
+            .host_status
+            .iter()
+            .all(|status| status.state == Some(HostSearchState::Failed)));
     }
 }
 
@@ -364,7 +368,120 @@ async fn unreadable_root_remains_a_failed_partial_path_search() {
             result.host_status.iter().all(|status| !status.ok),
             "mode {mode:o}"
         );
+        assert!(result
+            .host_status
+            .iter()
+            .all(|status| status.state == Some(HostSearchState::Failed)));
     }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn one_failed_root_continues_other_roots_and_reports_partial() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let readable = tempfile::tempdir().unwrap();
+    let unreadable = tempfile::tempdir().unwrap();
+    fs::write(
+        readable.path().join("three-state-canary.txt"),
+        "GREPMESH_THREE_STATE_CANARY\n",
+    )
+    .unwrap();
+    let roots = std::collections::BTreeMap::from([
+        ("readable".to_string(), vec![readable.path().to_path_buf()]),
+        (
+            "unreadable".to_string(),
+            vec![unreadable.path().to_path_buf()],
+        ),
+    ]);
+    let service = MeshService::new(
+        LocalBackend::from_config(
+            "A",
+            readable.path(),
+            Default::default(),
+            roots,
+            vec![],
+            None,
+        ),
+        Topology::new("A", vec![]),
+    );
+    fs::set_permissions(unreadable.path(), fs::Permissions::from_mode(0o111)).unwrap();
+    let result = service
+        .call_search(SearchArgs {
+            query: "GREPMESH_THREE_STATE_CANARY".into(),
+            verbose: false,
+            hosts: Some(HostsInput::One("local".into())),
+            request_id: Some("three-state-partial".into()),
+            origin_host: None,
+            hop_count: None,
+            limit: Some(10),
+            context_lines: Some(0),
+            mode: SearchMode::Literal,
+            path_globs: vec![],
+            roots: vec!["unreadable".into(), "readable".into()],
+        })
+        .await;
+    fs::set_permissions(unreadable.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let result = result.unwrap();
+
+    assert!(result.partial);
+    assert!(result.data["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|hit| hit["data"]
+            .as_str()
+            .is_some_and(|text| text.contains("GREPMESH_THREE_STATE_CANARY"))));
+    assert_eq!(result.host_status.len(), 1);
+    assert_eq!(result.host_status[0].state, Some(HostSearchState::Partial));
+    assert_eq!(result.data["host_status"][0]["state"], "partial");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn one_failed_root_continues_other_roots_for_path_search() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let readable = tempfile::tempdir().unwrap();
+    let unreadable = tempfile::tempdir().unwrap();
+    fs::write(readable.path().join("three-state-path.txt"), "canary\n").unwrap();
+    let roots = std::collections::BTreeMap::from([
+        ("readable".to_string(), vec![readable.path().to_path_buf()]),
+        (
+            "unreadable".to_string(),
+            vec![unreadable.path().to_path_buf()],
+        ),
+    ]);
+    let service = MeshService::new(
+        LocalBackend::from_config(
+            "A",
+            readable.path(),
+            Default::default(),
+            roots,
+            vec![],
+            None,
+        ),
+        Topology::new("A", vec![]),
+    );
+    fs::set_permissions(unreadable.path(), fs::Permissions::from_mode(0o111)).unwrap();
+    let result = service
+        .call_find_paths(FindPathsArgs {
+            query: "three-state-path".into(),
+            hosts: Some(HostsInput::One("local".into())),
+            request_id: Some("three-state-path-partial".into()),
+            origin_host: None,
+            hop_count: None,
+            limit: Some(10),
+            roots: vec!["unreadable".into(), "readable".into()],
+        })
+        .await;
+    fs::set_permissions(unreadable.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let result = result.unwrap();
+
+    assert!(result.partial);
+    assert_eq!(result.data["paths"].as_array().unwrap().len(), 1);
+    assert_eq!(result.host_status[0].state, Some(HostSearchState::Partial));
+    assert_eq!(result.data["host_status"][0]["state"], "partial");
 }
 
 fn free_port() -> u16 {
@@ -740,6 +857,11 @@ async fn remote_partial_status_and_local_results_survive_fanout() {
         .unwrap()
         .iter()
         .any(|status| status["host_id"] == "B" && status["ok"] == false));
+    assert!(search_value["host_status"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|status| status["host_id"] == "B" && status["state"] == "partial"));
 
     let paths = rpc(
         &url,
@@ -763,6 +885,11 @@ async fn remote_partial_status_and_local_results_survive_fanout() {
         .unwrap()
         .iter()
         .any(|status| status["host_id"] == "B" && status["ok"] == false));
+    assert!(paths_value["host_status"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|status| status["host_id"] == "B" && status["state"] == "partial"));
 
     let _ = child.kill();
     let _ = child.wait();

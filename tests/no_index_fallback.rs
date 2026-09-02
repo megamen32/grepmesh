@@ -41,6 +41,7 @@ async fn no_index_search_uses_rg_and_returns_a_match() {
 
     assert!(!result.partial);
     assert_eq!(result.data["results"].as_array().unwrap().len(), 1);
+    assert_eq!(result.data["host_status"][0]["state"], "ok");
 }
 
 #[tokio::test]
@@ -84,6 +85,7 @@ async fn no_index_rg_spawn_failure_is_a_concrete_partial_mcp_result() {
         .find(|status| status.host_id == "A")
         .unwrap();
     assert!(!status.ok);
+    assert_eq!(result.data["host_status"][0]["state"], "failed");
     let error = status.error.as_deref().unwrap();
     assert!(error.contains("start rg search in"), "{error}");
     assert_ne!(error, "run rg search");
