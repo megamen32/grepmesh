@@ -2,7 +2,7 @@ use grepmesh::{
     backend::{LocalBackend, SearchMode},
     config::AppConfig,
     jobs::SearchJobs,
-    mcp::{normalize_request, HostsInput, MeshService, SearchArgs},
+    mcp::{normalize_request, FindPathsArgs, HostsInput, MeshService, SearchArgs},
     topology::{PeerConfig, Topology},
 };
 use std::{
@@ -184,11 +184,19 @@ async fn malformed_search_inputs_are_failed_partial_mcp_results() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn permission_denied_search_is_partial_and_keeps_readable_match() {
+async fn permission_denied_descendants_do_not_fail_a_readable_root() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("visible.txt"), "Name=canary\n").unwrap();
+    let private = root.path().join("private");
+    fs::create_dir(&private).unwrap();
+    fs::write(private.join("hidden.txt"), "Name=hidden\n").unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o000)).unwrap();
     let service = MeshService::new(
         LocalBackend::from_config(
             "A",
-            "/proc/1",
+            root.path(),
             Default::default(),
             std::collections::BTreeMap::new(),
             vec![],
@@ -207,13 +215,14 @@ async fn permission_denied_search_is_partial_and_keeps_readable_match() {
             limit: Some(10),
             context_lines: Some(0),
             mode: SearchMode::Literal,
-            path_globs: vec!["**/status".into()],
+            path_globs: vec![],
             roots: vec![],
         })
-        .await
-        .unwrap();
+        .await;
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let result = result.unwrap();
 
-    assert!(result.partial);
+    assert!(!result.partial);
     assert!(result.data["results"]
         .as_array()
         .unwrap()
@@ -226,11 +235,136 @@ async fn permission_denied_search_is_partial_and_keeps_readable_match() {
         .iter()
         .find(|status| status.host_id == "A")
         .unwrap();
-    assert!(!status.ok);
-    assert_eq!(
-        status.error.as_deref(),
-        Some("some configured paths were not readable")
+    assert!(status.ok);
+    assert_eq!(status.error, None);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn permission_denied_descendants_do_not_fail_path_search() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("visible-canary.txt"), "visible\n").unwrap();
+    let private = root.path().join("private");
+    fs::create_dir(&private).unwrap();
+    fs::write(private.join("hidden-canary.txt"), "hidden\n").unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o000)).unwrap();
+    let service = MeshService::new(
+        LocalBackend::from_config(
+            "A",
+            root.path(),
+            Default::default(),
+            std::collections::BTreeMap::new(),
+            vec![],
+            None,
+        ),
+        Topology::new("A", vec![]),
     );
+
+    let result = service
+        .call_find_paths(FindPathsArgs {
+            query: "visible-canary".into(),
+            hosts: Some(HostsInput::One("local".into())),
+            request_id: Some("permission-paths".into()),
+            origin_host: None,
+            hop_count: None,
+            limit: Some(10),
+            roots: vec![],
+        })
+        .await;
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let result = result.unwrap();
+
+    assert!(!result.partial);
+    assert_eq!(result.data["paths"].as_array().unwrap().len(), 1);
+    assert!(result.host_status.iter().all(|status| status.ok));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn unreadable_root_remains_a_failed_partial_text_search() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let service = MeshService::new(
+        LocalBackend::from_config(
+            "A",
+            root.path(),
+            Default::default(),
+            std::collections::BTreeMap::new(),
+            vec![],
+            None,
+        ),
+        Topology::new("A", vec![]),
+    );
+    for mode in [0o111, 0o400] {
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(mode)).unwrap();
+        let result = service
+            .call_search(SearchArgs {
+                query: "missing".into(),
+                verbose: false,
+                hosts: Some(HostsInput::One("local".into())),
+                request_id: Some(format!("unreadable-root-text-{mode:o}")),
+                origin_host: None,
+                hop_count: None,
+                limit: Some(10),
+                context_lines: Some(0),
+                mode: SearchMode::Literal,
+                path_globs: vec![],
+                roots: vec![],
+            })
+            .await;
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let result = result.unwrap();
+
+        assert!(result.partial, "mode {mode:o}");
+        assert!(
+            result.host_status.iter().all(|status| !status.ok),
+            "mode {mode:o}"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn unreadable_root_remains_a_failed_partial_path_search() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let service = MeshService::new(
+        LocalBackend::from_config(
+            "A",
+            root.path(),
+            Default::default(),
+            std::collections::BTreeMap::new(),
+            vec![],
+            None,
+        ),
+        Topology::new("A", vec![]),
+    );
+    for mode in [0o111, 0o400] {
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(mode)).unwrap();
+        let result = service
+            .call_find_paths(FindPathsArgs {
+                query: "missing".into(),
+                hosts: Some(HostsInput::One("local".into())),
+                request_id: Some(format!("unreadable-root-paths-{mode:o}")),
+                origin_host: None,
+                hop_count: None,
+                limit: Some(10),
+                roots: vec![],
+            })
+            .await;
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let result = result.unwrap();
+
+        assert!(result.partial, "mode {mode:o}");
+        assert!(
+            result.host_status.iter().all(|status| !status.ok),
+            "mode {mode:o}"
+        );
+    }
 }
 
 fn free_port() -> u16 {

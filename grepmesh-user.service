@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 Environment=PATH=@GREPMESH_PATH@
 ExecStart=@GREPMESH_BIN@ --config @GREPMESH_CONFIG@
-Restart=on-failure
+Restart=always
 RestartSec=2
 
 [Install]

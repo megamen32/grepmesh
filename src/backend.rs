@@ -637,6 +637,7 @@ async fn search_text_impl(
     deadline: Instant,
     candidate_paths: Option<Vec<PathBuf>>,
 ) -> Result<SearchOutcome> {
+    ensure_search_root_listable(root, "start rg search")?;
     let using_rg = rg_command().is_some();
     let mut command = rg_command().unwrap_or_else(grep_command);
     command.arg("-n");
@@ -866,15 +867,17 @@ async fn search_text_impl(
             return Err(anyhow!("rg search diagnostics exceeded 65536 bytes"));
         }
         if status.code() == Some(2) {
-            let diagnostic = non_readable_traversal_diagnostic(&stderr).ok_or_else(|| {
-                anyhow!(
-                    "rg search failed with {}: {}",
-                    status,
-                    String::from_utf8_lossy(&stderr).trim()
-                )
-            })?;
-            partial = true;
-            partial_error = Some(diagnostic);
+            if !permission_only_traversal_diagnostic(&stderr) {
+                let diagnostic = non_readable_traversal_diagnostic(&stderr).ok_or_else(|| {
+                    anyhow!(
+                        "rg search failed with {}: {}",
+                        status,
+                        String::from_utf8_lossy(&stderr).trim()
+                    )
+                })?;
+                partial = true;
+                partial_error = Some(diagnostic);
+            }
         } else if !status.success() && status.code() != Some(1) {
             return Err(anyhow!(
                 "rg search failed with {}: {}",
@@ -911,6 +914,28 @@ fn non_readable_traversal_diagnostic(stderr: &[u8]) -> Option<String> {
                 || line.contains("stale file handle")
         })
         .then_some("some configured paths were not readable".to_string())
+}
+
+fn permission_only_traversal_diagnostic(stderr: &[u8]) -> bool {
+    let diagnostic = String::from_utf8_lossy(stderr);
+    let mut lines = diagnostic
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .peekable();
+    if lines.peek().is_none() {
+        return false;
+    }
+    lines.all(|line| {
+        let line = line.to_ascii_lowercase();
+        line.contains("permission denied") || line.contains("operation not permitted")
+    })
+}
+
+fn ensure_search_root_listable(root: &Path, operation: &str) -> Result<()> {
+    fs::read_dir(root).with_context(|| format!("{operation} in {}", root.display()))?;
+    fs::canonicalize(root.join("."))
+        .with_context(|| format!("{operation} in {}", root.display()))?;
+    Ok(())
 }
 
 async fn terminate_child(child: &mut tokio::process::Child) {
@@ -965,6 +990,7 @@ async fn find_paths_impl(
     max_response_bytes: usize,
     deadline: Instant,
 ) -> Result<SearchOutcome> {
+    ensure_search_root_listable(root, "run rg --files")?;
     let Some(mut command) = rg_command() else {
         return Err(anyhow!(
             "path search requires rg; install ripgrep (text search falls back to grep)"
@@ -1074,21 +1100,22 @@ async fn find_paths_impl(
             .await
             .context("collect rg --files diagnostics")??;
         if status.code() == Some(2) {
-            let diagnostic = non_readable_traversal_diagnostic(&stderr).ok_or_else(|| {
-                anyhow!(
-                    "rg --files failed with {}: {}",
-                    status,
-                    String::from_utf8_lossy(&stderr).trim()
-                )
-            })?;
-            return Ok(SearchOutcome {
-                hits,
-                truncated: false,
-                partial: true,
-                partial_error: Some(diagnostic),
-            });
-        }
-        if !status.success() && status.code() != Some(1) {
+            if !permission_only_traversal_diagnostic(&stderr) {
+                let diagnostic = non_readable_traversal_diagnostic(&stderr).ok_or_else(|| {
+                    anyhow!(
+                        "rg --files failed with {}: {}",
+                        status,
+                        String::from_utf8_lossy(&stderr).trim()
+                    )
+                })?;
+                return Ok(SearchOutcome {
+                    hits,
+                    truncated: false,
+                    partial: true,
+                    partial_error: Some(diagnostic),
+                });
+            }
+        } else if !status.success() && status.code() != Some(1) {
             return Err(anyhow!("rg --files failed with {}", status));
         }
     }
@@ -1219,7 +1246,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::non_readable_traversal_diagnostic;
+    use super::{non_readable_traversal_diagnostic, permission_only_traversal_diagnostic};
 
     #[test]
     fn non_readable_traversal_errors_have_one_safe_diagnostic_for_text_and_paths() {
@@ -1239,5 +1266,15 @@ mod tests {
     #[test]
     fn malformed_queries_are_not_misclassified_as_traversal_errors() {
         assert!(non_readable_traversal_diagnostic(b"regex parse error:\n    (\n").is_none());
+    }
+
+    #[test]
+    fn only_permission_diagnostics_are_safe_to_ignore() {
+        assert!(permission_only_traversal_diagnostic(
+            b"rg: ./private: Permission denied (os error 13)\n"
+        ));
+        assert!(!permission_only_traversal_diagnostic(
+            b"rg: ./volume: Input/output error (os error 5)\n"
+        ));
     }
 }
