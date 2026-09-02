@@ -1,6 +1,6 @@
 # Three-state GrepMesh host status
 
-Status: reviewed; rollout pending
+Status: complete
 
 Started at 2026-09-02T15:06:54+03:00 (host `date --iso-8601=seconds`).
 Estimate: 10 / 25 active minutes.
@@ -23,3 +23,9 @@ Evidence:
 - Terra reviewer: APPROVED after two repair rounds covering async partial jobs,
   legacy peer normalization across every remote response type, and mixed-root
   text/path continuation.
+- Public `main`: commit `d22ad67` pushed to `megamen32/grepmesh`.
+- Rollout: the same commit deployed to server-100, server-88, server-44,
+  mac-m1, and mac-mini; all five services report `state: ok` after cleanup.
+- Real canary on deployed server-100: readable plus inaccessible roots returned
+  one real hit with `state: partial`; inaccessible-only returned `state: failed`.
+  The original config was restored byte-for-byte and canary paths were removed.
