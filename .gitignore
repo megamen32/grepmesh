@@ -8,3 +8,6 @@ __pycache__/
 /dist/
 /trash/
 /.tmp/
+/.agents/shared-session/
+/.agents/tasks/
+/.fast-agent/
