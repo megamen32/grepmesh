@@ -25,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--rg", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--runtime-dir", type=Path, help="Linux companion lib/, licenses/ and ONNX manifest")
     return parser.parse_args()
 
 
@@ -41,10 +42,18 @@ def main() -> int:
 
     args.output.mkdir(parents=True, exist_ok=True)
     archive_path = args.output / archive_name
-    with tempfile.TemporaryDirectory(prefix="grepmesh-package-") as temp_dir:
+    temp_root = repo_root / ".tmp"
+    temp_root.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="grepmesh-package-", dir=temp_root) as temp_dir:
         stage = Path(temp_dir)
         shutil.copy2(args.binary, stage / binary_name)
         shutil.copy2(args.rg, stage / rg_name)
+        if args.runtime_dir:
+            if args.target != "linux-x86_64":
+                raise SystemExit("--runtime-dir currently supports Linux x86_64 only")
+            for name in ("lib", "licenses"):
+                shutil.copytree(args.runtime_dir / name, stage / name, symlinks=True)
+            shutil.copy2(args.runtime_dir / "onnxruntime-manifest.txt", stage / "onnxruntime-manifest.txt")
         shutil.copy2(repo_root / "config.example.json", stage / "config.example.json")
         if service_template:
             shutil.copy2(repo_root / service_template, stage / service_template)
