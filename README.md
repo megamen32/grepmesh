@@ -11,6 +11,7 @@ GrepMesh gives an MCP client one local endpoint for searching configured files a
 - Uses one `search` tool for file names and indexed content across configured local roots and mesh peers (`search_text` remains a compatibility alias).
 - Builds a local persistent FTS index on every node by default; `hosts: "*"` is the logical cross-machine index.
 - Uses Firecrawl AnyDoc locally to index Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and text-based PDF files as Markdown.
+- Uses native Rust OAR-OCR locally for images and scanned-PDF fallback. JPEG/JPG, PNG, WebP, TIFF/TIF and every image format supported by the Rust `image` decoder are eligible; the default bilingual pipeline uses a PP-OCRv6 tiny detector with a PP-OCRv5 Eastern-Slavic recognizer for Russian + English.
 - Finds files by path with `find_paths`.
 - Reads a selected file with `read_text`.
 - Returns ready matches immediately and lets clients poll a longer search with `search_status`.
@@ -49,6 +50,14 @@ See [project philosophy](docs/PHILOSOPHY.md).
 GrepMesh is optimized for a comfortable local-first default. It does not silently hide files such as SSH configuration, key files, credential files, or other user data from search. If a path is inside a configured root and the GrepMesh process can read it, it is searchable.
 
 The built-in exclusions are operational rather than security policy: dependency/build/cache trees and dynamic pseudo-filesystems such as `/proc`, `/sys`, `/dev`, and `/run` are skipped because indexing them is noisy, expensive, or unstable. Add any organization-specific exclusions explicitly with `exclude_globs`. Peer bearer authentication is also opt-in through `peer_auth_token_env`.
+
+## Image OCR
+
+Image OCR is enabled by default because the bilingual model set is small. GrepMesh uses OAR-OCR with automatic model download and caches models under OAR-OCR's normal cache (`~/.oar` unless `OAR_HOME` is set). The default pipeline is `pp-ocrv6_tiny_det.onnx` + `eslav_pp-ocrv5_mobile_rec.onnx` + `ppocrv5_eslav_dict.txt`; the Eastern-Slavic dictionary contains both Latin and Cyrillic characters.
+
+For PDFs, AnyDoc remains the fast first path. If the extracted text layer contains fewer than 64 alphanumeric characters, GrepMesh renders pages with `pdftoppm` and runs OCR instead. The default cap is 200 pages at 180 DPI and can be changed under `ocr` settings.
+
+Extracted document, OCR, and STT bodies are cached persistently by file size and modification time. Watcher reconciliations reuse unchanged content instead of rerunning AnyDoc, OCR, or remote transcription.
 
 ## Optional media transcription
 

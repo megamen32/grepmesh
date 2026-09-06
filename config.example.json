@@ -36,5 +36,16 @@
     "max_media_bytes": 4294967296,
     "remote_base_url": null,
     "api_key_env": "GREPMESH_STT_API_KEY"
+  },
+  "ocr": {
+    "enabled": true,
+    "det_model": "pp-ocrv6_tiny_det.onnx",
+    "rec_model": "eslav_pp-ocrv5_mobile_rec.onnx",
+    "dict": "ppocrv5_eslav_dict.txt",
+    "pdf_fallback": true,
+    "min_pdf_text_chars": 64,
+    "pdf_dpi": 180,
+    "max_pdf_pages": 200,
+    "max_image_bytes": 268435456
   }
 }

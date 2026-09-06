@@ -33,7 +33,7 @@ fn free_port() -> u16 {
 }
 
 async fn wait_until_ready(client: &Client, base: &str) {
-    for _ in 0..40 {
+    for _ in 0..160 {
         if client.get(base).send().await.is_ok() {
             return;
         }

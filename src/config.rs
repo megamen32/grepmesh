@@ -161,6 +161,66 @@ impl BackupCatalogConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct OcrConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_ocr_det_model")]
+    pub det_model: String,
+    #[serde(default = "default_ocr_rec_model")]
+    pub rec_model: String,
+    #[serde(default = "default_ocr_dict")]
+    pub dict: String,
+    #[serde(default = "default_true")]
+    pub pdf_fallback: bool,
+    #[serde(default = "default_ocr_min_pdf_text_chars")]
+    pub min_pdf_text_chars: usize,
+    #[serde(default = "default_ocr_pdf_dpi")]
+    pub pdf_dpi: u32,
+    #[serde(default = "default_ocr_max_pdf_pages")]
+    pub max_pdf_pages: usize,
+    #[serde(default = "default_ocr_max_image_bytes")]
+    pub max_image_bytes: u64,
+}
+
+impl Default for OcrConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            det_model: default_ocr_det_model(),
+            rec_model: default_ocr_rec_model(),
+            dict: default_ocr_dict(),
+            pdf_fallback: true,
+            min_pdf_text_chars: default_ocr_min_pdf_text_chars(),
+            pdf_dpi: default_ocr_pdf_dpi(),
+            max_pdf_pages: default_ocr_max_pdf_pages(),
+            max_image_bytes: default_ocr_max_image_bytes(),
+        }
+    }
+}
+
+fn default_ocr_det_model() -> String {
+    "pp-ocrv6_tiny_det.onnx".to_string()
+}
+fn default_ocr_rec_model() -> String {
+    "eslav_pp-ocrv5_mobile_rec.onnx".to_string()
+}
+fn default_ocr_dict() -> String {
+    "ppocrv5_eslav_dict.txt".to_string()
+}
+fn default_ocr_min_pdf_text_chars() -> usize {
+    64
+}
+fn default_ocr_pdf_dpi() -> u32 {
+    180
+}
+fn default_ocr_max_pdf_pages() -> usize {
+    200
+}
+fn default_ocr_max_image_bytes() -> u64 {
+    256 * 1024 * 1024
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SttConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -244,6 +304,8 @@ pub struct AppConfig {
     pub backup_catalog: Option<BackupCatalogConfig>,
     #[serde(default)]
     pub stt: SttConfig,
+    #[serde(default)]
+    pub ocr: OcrConfig,
     #[serde(default = "default_topology_ttl_ms")]
     pub topology_ttl_ms: u64,
     #[serde(skip)]

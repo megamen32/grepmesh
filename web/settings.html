@@ -28,6 +28,15 @@
         </form>
       </section>
       <section class="panel settings-card">
+        <div class="panel-heading"><div><p class="eyebrow">LOCAL INDEX</p><h2>Image OCR</h2></div></div>
+        <p class="settings-copy">Local OCR for images and scanned PDFs. Models are downloaded automatically on first use and cached by OAR-OCR.</p>
+        <label class="setting-row"><span><strong>Enable OCR</strong><small>Index text from JPEG, PNG, WebP, TIFF and other supported image formats.</small></span><input id="ocr-enabled" type="checkbox" /></label>
+        <label class="setting-row"><span><strong>Scanned PDF fallback</strong><small>OCR PDF pages only when AnyDoc finds little or no text layer.</small></span><input id="ocr-pdf-fallback" type="checkbox" /></label>
+        <label class="setting-field"><span>Detector</span><input id="ocr-det-model" type="text" /></label>
+        <label class="setting-field"><span>Recognizer</span><input id="ocr-rec-model" type="text" /></label>
+        <label class="setting-field"><span>Dictionary</span><input id="ocr-dict" type="text" /></label>
+      </section>
+      <section class="panel settings-card">
         <div class="panel-heading"><div><p class="eyebrow">EFFECTIVE CONFIG</p><h2>Current node</h2></div></div>
         <dl class="settings-list" id="effective-settings"><dt>Status</dt><dd>Loading…</dd></dl>
         <p class="settings-copy">GrepMesh uses comfortable defaults. Extra exclusions and peer authentication are optional; dynamic pseudo-filesystems remain excluded from indexing for operational reasons.</p>

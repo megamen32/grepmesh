@@ -6,6 +6,7 @@ pub mod gptadmin;
 pub mod index;
 pub mod jobs;
 pub mod mcp;
+pub mod ocr;
 pub mod server;
 pub mod stt;
 pub mod topology;

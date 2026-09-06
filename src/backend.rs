@@ -245,6 +245,7 @@ impl LocalBackend {
             limits.max_file_bytes,
             None,
             crate::config::SttConfig::default(),
+            crate::config::OcrConfig::default(),
         );
         Self {
             host_id: host_id.into(),
@@ -264,7 +265,7 @@ impl LocalBackend {
         exclude_globs: Vec<String>,
         index_path: Option<PathBuf>,
     ) -> Self {
-        Self::from_config_with_stt(
+        Self::from_config_with_ingestion(
             host_id,
             root,
             limits,
@@ -272,10 +273,11 @@ impl LocalBackend {
             exclude_globs,
             index_path,
             crate::config::SttConfig::default(),
+            crate::config::OcrConfig::default(),
         )
     }
 
-    pub fn from_config_with_stt(
+    pub fn from_config_with_ingestion(
         host_id: impl Into<String>,
         root: impl Into<PathBuf>,
         limits: LimitsConfig,
@@ -283,6 +285,7 @@ impl LocalBackend {
         exclude_globs: Vec<String>,
         index_path: Option<PathBuf>,
         stt: crate::config::SttConfig,
+        ocr: crate::config::OcrConfig,
     ) -> Self {
         let root = root.into();
         let mut root_paths = roots
@@ -301,6 +304,7 @@ impl LocalBackend {
                 limits.max_file_bytes,
                 Some(index_path),
                 stt,
+                ocr,
             ),
             None => IndexManager::disabled(),
         };
@@ -324,6 +328,7 @@ impl LocalBackend {
             self.limits.max_file_bytes,
             None,
             crate::config::SttConfig::default(),
+            crate::config::OcrConfig::default(),
         );
         self
     }
@@ -347,6 +352,7 @@ impl LocalBackend {
             self.limits.max_file_bytes,
             None,
             crate::config::SttConfig::default(),
+            crate::config::OcrConfig::default(),
         );
         self
     }

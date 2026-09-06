@@ -554,6 +554,7 @@ async fn black_box_two_process_peer_fanout_and_partial_results() {
         peer_auth_token_env: None,
         backup_catalog: None,
         stt: Default::default(),
+        ocr: Default::default(),
         topology_ttl_ms: 30_000,
         config_path: None,
     };
@@ -578,6 +579,7 @@ async fn black_box_two_process_peer_fanout_and_partial_results() {
         peer_auth_token_env: None,
         backup_catalog: None,
         stt: Default::default(),
+        ocr: Default::default(),
         topology_ttl_ms: 30_000,
         config_path: None,
     };
@@ -596,7 +598,7 @@ async fn black_box_two_process_peer_fanout_and_partial_results() {
     }
     let mut child_b = spawn_server(&path_b);
     let mut child_a = spawn_server(&path_a);
-    tokio::time::sleep(Duration::from_millis(700)).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
 
     let init = rpc(&url_a, "initialize", serde_json::json!({})).await;
     assert_eq!(init["jsonrpc"], "2.0");
@@ -833,13 +835,14 @@ async fn remote_partial_status_and_local_results_survive_fanout() {
         peer_auth_token_env: None,
         backup_catalog: None,
         stt: Default::default(),
+        ocr: Default::default(),
         topology_ttl_ms: 30_000,
         config_path: None,
     };
     let path = temp.path().join("config.json");
     write_config(&path, &cfg);
     let mut child = spawn_server(&path);
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
 
     let search = rpc(
         &url,
@@ -951,13 +954,14 @@ async fn stalled_peer_body_keeps_completed_local_results() {
         peer_auth_token_env: None,
         backup_catalog: None,
         stt: Default::default(),
+        ocr: Default::default(),
         topology_ttl_ms: 30_000,
         config_path: None,
     };
     let path = temp.path().join("config.json");
     write_config(&path, &cfg);
     let mut child = spawn_server(&path);
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
 
     let search = rpc(
         &url,
@@ -1064,13 +1068,14 @@ async fn async_search_status_returns_a_bounded_final_page() {
         peer_auth_token_env: None,
         backup_catalog: None,
         stt: Default::default(),
+        ocr: Default::default(),
         topology_ttl_ms: 30_000,
         config_path: None,
     };
     let path = temp.path().join("config.json");
     write_config(&path, &cfg);
     let mut child = spawn_server(&path);
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
 
     let search = rpc(
         &url,
@@ -1147,7 +1152,7 @@ async fn async_search_status_returns_a_bounded_final_page() {
     let _ = child.kill();
     let _ = child.wait();
     child = spawn_server(&path);
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
     let restored = rpc(
         &url,
         "tools/call",
@@ -1209,13 +1214,14 @@ async fn search_with_sufficient_wait_returns_the_complete_result_directly() {
         peer_auth_token_env: None,
         backup_catalog: None,
         stt: Default::default(),
+        ocr: Default::default(),
         topology_ttl_ms: 30_000,
         config_path: None,
     };
     let path = temp.path().join("config.json");
     write_config(&path, &cfg);
     let mut child = spawn_server(&path);
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
 
     let search = rpc(
         &url,
@@ -1266,13 +1272,14 @@ async fn search_tool_defaults_to_compact_ranges_with_search_text_compat_alias() 
         peer_auth_token_env: None,
         backup_catalog: None,
         stt: Default::default(),
+        ocr: Default::default(),
         topology_ttl_ms: 30_000,
         config_path: None,
     };
     let path = temp.path().join("config.json");
     write_config(&path, &config);
     let mut child = spawn_server(&path);
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
 
     let tools = rpc(&url, "tools/list", serde_json::json!({})).await;
     let search_schema = tools["result"]["tools"]

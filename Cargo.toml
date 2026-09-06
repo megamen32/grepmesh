@@ -29,6 +29,8 @@ ureq = "2"
 bzip2 = "0.4"
 tar = "0.4"
 tempfile = "3"
+oar-ocr = { version = "0.9.1", features = ["auto-download"] }
+image = "0.25.10"
 
 [dev-dependencies]
 tempfile = "3"

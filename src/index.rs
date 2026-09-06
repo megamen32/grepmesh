@@ -1,4 +1,9 @@
-use crate::{backend::IndexState, config::SttConfig, stt::SttEngine};
+use crate::{
+    backend::IndexState,
+    config::{OcrConfig, SttConfig},
+    ocr::OcrEngine,
+    stt::SttEngine,
+};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::{params, Connection};
@@ -9,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{mpsc, Arc, RwLock},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 type IndexMap = BTreeMap<String, BTreeSet<PathBuf>>;
@@ -19,6 +24,8 @@ type DirectoryScan = (usize, IndexMap, Vec<IndexedDocument>, Vec<PathBuf>);
 struct IndexedDocument {
     path: PathBuf,
     body: String,
+    size: u64,
+    mtime_ns: u128,
 }
 
 #[derive(Clone, Debug)]
@@ -43,6 +50,8 @@ struct ScanContext<'a> {
     max_file_bytes: u64,
     build_candidates: bool,
     stt: Option<&'a SttEngine>,
+    ocr: Option<&'a OcrEngine>,
+    persistent: Option<&'a PersistentIndex>,
 }
 
 #[cfg(unix)]
@@ -68,6 +77,7 @@ impl PersistentIndex {
         }
         let store = Self { path };
         store.connection()?;
+        store.backfill_cache_from_fts()?;
         Ok(store)
     }
 
@@ -77,34 +87,146 @@ impl PersistentIndex {
             .execute_batch(
                 "PRAGMA journal_mode=WAL;\
                  CREATE VIRTUAL TABLE IF NOT EXISTS grepmesh_documents \
-                 USING fts5(path UNINDEXED, body, tokenize='trigram');",
+                 USING fts5(path UNINDEXED, body, tokenize='trigram');                 CREATE TABLE IF NOT EXISTS grepmesh_extraction_cache (                   path TEXT PRIMARY KEY,                   size INTEGER NOT NULL,                   mtime_ns TEXT NOT NULL,                   body TEXT NOT NULL                 );",
             )
             .map_err(|error| error.to_string())?;
         Ok(connection)
     }
 
-    pub fn replace_document(&self, path: &Path, body: &str) -> Result<(), String> {
-        let connection = self.connection()?;
-        let path = path.display().to_string();
-        connection
+    fn replace_indexed_document(&self, document: &IndexedDocument) -> Result<(), String> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        let path = document.path.display().to_string();
+        transaction
             .execute(
                 "DELETE FROM grepmesh_documents WHERE path = ?1",
                 params![path],
             )
             .map_err(|error| error.to_string())?;
-        connection
+        transaction
             .execute(
                 "INSERT INTO grepmesh_documents(path, body) VALUES (?1, ?2)",
-                params![path, body],
+                params![path, document.body],
             )
             .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO grepmesh_extraction_cache(path, size, mtime_ns, body) VALUES (?1, ?2, ?3, ?4)                  ON CONFLICT(path) DO UPDATE SET size=excluded.size, mtime_ns=excluded.mtime_ns, body=excluded.body",
+                params![path, document.size as i64, document.mtime_ns.to_string(), document.body],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn replace_document(&self, path: &Path, body: &str) -> Result<(), String> {
+        let metadata = fs::metadata(path).ok();
+        let document = IndexedDocument {
+            path: path.to_path_buf(),
+            body: body.to_string(),
+            size: metadata.as_ref().map(|m| m.len()).unwrap_or(0),
+            mtime_ns: metadata.as_ref().map(metadata_mtime_ns).unwrap_or(0),
+        };
+        self.replace_indexed_document(&document)
+    }
+
+    fn cached_body(
+        &self,
+        path: &Path,
+        size: u64,
+        mtime_ns: u128,
+    ) -> Result<Option<String>, String> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare("SELECT body FROM grepmesh_extraction_cache WHERE path=?1 AND size=?2 AND mtime_ns=?3")
+            .map_err(|error| error.to_string())?;
+        let mut rows = statement
+            .query(params![
+                path.display().to_string(),
+                size as i64,
+                mtime_ns.to_string()
+            ])
+            .map_err(|error| error.to_string())?;
+        match rows.next().map_err(|error| error.to_string())? {
+            Some(row) => row
+                .get::<_, String>(0)
+                .map(Some)
+                .map_err(|error| error.to_string()),
+            None => Ok(None),
+        }
+    }
+
+    fn prune_except(&self, seen: &BTreeSet<PathBuf>) -> Result<(), String> {
+        let mut connection = self.connection()?;
+        let paths = {
+            let mut statement = connection
+                .prepare("SELECT path FROM grepmesh_documents")
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| error.to_string())?;
+            rows.filter_map(Result::ok)
+                .map(PathBuf::from)
+                .collect::<Vec<_>>()
+        };
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        for path in paths.into_iter().filter(|path| !seen.contains(path)) {
+            let path = path.display().to_string();
+            transaction
+                .execute(
+                    "DELETE FROM grepmesh_documents WHERE path=?1",
+                    params![path.clone()],
+                )
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    "DELETE FROM grepmesh_extraction_cache WHERE path=?1",
+                    params![path],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn backfill_cache_from_fts(&self) -> Result<(), String> {
+        let mut connection = self.connection()?;
+        let existing = {
+            let mut statement = connection
+                .prepare("SELECT path, body FROM grepmesh_documents WHERE path NOT IN (SELECT path FROM grepmesh_extraction_cache)")
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|error| error.to_string())?;
+            rows.filter_map(Result::ok).collect::<Vec<_>>()
+        };
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        for (path, body) in existing {
+            let metadata = match fs::metadata(&path) {
+                Ok(metadata) if metadata.is_file() => metadata,
+                _ => continue,
+            };
+            transaction.execute(
+                "INSERT OR IGNORE INTO grepmesh_extraction_cache(path, size, mtime_ns, body) VALUES (?1, ?2, ?3, ?4)",
+                params![path, metadata.len() as i64, metadata_mtime_ns(&metadata).to_string(), body],
+            ).map_err(|error| error.to_string())?;
+        }
+        transaction.commit().map_err(|error| error.to_string())?;
         Ok(())
     }
 
     pub fn clear(&self) -> Result<(), String> {
         let connection = self.connection()?;
         connection
-            .execute("DELETE FROM grepmesh_documents", [])
+            .execute_batch("DELETE FROM grepmesh_documents; DELETE FROM grepmesh_extraction_cache;")
             .map_err(|error| error.to_string())?;
         Ok(())
     }
@@ -215,6 +337,7 @@ impl IndexManager {
         max_file_bytes: u64,
         persistent_path: Option<PathBuf>,
         stt_config: SttConfig,
+        ocr_config: OcrConfig,
     ) -> Self {
         let snapshot = Arc::new(RwLock::new(IndexSnapshot {
             state: IndexState::Building,
@@ -239,6 +362,7 @@ impl IndexManager {
             });
         let persistent_state = persistent.clone();
         let stt = SttEngine::new(stt_config);
+        let ocr = OcrEngine::new(ocr_config);
         thread::spawn(move || {
             let (events, rx) = mpsc::channel();
             let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |_| {
@@ -255,6 +379,7 @@ impl IndexManager {
                     &excludes,
                     max_file_bytes,
                     stt.as_ref(),
+                    ocr.as_ref(),
                     RebuildState {
                         snapshot: &state,
                         candidates: &candidate_state,
@@ -427,6 +552,7 @@ fn rebuild_index(
     excludes: &[String],
     max_file_bytes: u64,
     stt: Option<&SttEngine>,
+    ocr: Option<&OcrEngine>,
     rebuild: RebuildState<'_>,
     generation: &mut u64,
 ) {
@@ -442,6 +568,7 @@ fn rebuild_index(
         }
     };
     let mut count = 0;
+    let mut seen_paths = BTreeSet::new();
     if let Ok(mut current) = rebuild.snapshot.write() {
         current.state = IndexState::Building;
         current.indexed_files = 0;
@@ -452,16 +579,6 @@ fn rebuild_index(
     }
     if let Ok(mut ready) = rebuild.ready_roots.write() {
         ready.clear();
-    }
-    if let Some(persistent) = rebuild.persistent {
-        if let Err(error) = persistent.clear() {
-            if let Ok(mut current) = rebuild.snapshot.write() {
-                current.state = IndexState::Degraded;
-                current.last_error = Some(error);
-                current.generation = generation.saturating_add(1);
-            }
-            return;
-        }
     }
     for root in ordered_roots(roots) {
         let mut units: VecDeque<_> = match root_units(&root) {
@@ -483,6 +600,8 @@ fn rebuild_index(
                 max_file_bytes,
                 rebuild.persistent.is_none(),
                 stt,
+                ocr,
+                rebuild.persistent,
             );
             let (unit_count, next, documents, children) = match result {
                 Ok(result) => result,
@@ -504,8 +623,8 @@ fn rebuild_index(
             }
             if let Some(persistent) = rebuild.persistent {
                 for document in documents {
-                    if let Err(error) = persistent.replace_document(&document.path, &document.body)
-                    {
+                    seen_paths.insert(document.path.clone());
+                    if let Err(error) = persistent.replace_indexed_document(&document) {
                         if let Ok(mut current) = rebuild.snapshot.write() {
                             current.state = IndexState::Degraded;
                             current.last_error =
@@ -526,6 +645,16 @@ fn rebuild_index(
         }
         if let Ok(mut ready) = rebuild.ready_roots.write() {
             ready.insert(root);
+        }
+    }
+    if let Some(persistent) = rebuild.persistent {
+        if let Err(error) = persistent.prune_except(&seen_paths) {
+            if let Ok(mut current) = rebuild.snapshot.write() {
+                current.state = IndexState::Degraded;
+                current.last_error = Some(error);
+                current.generation = generation.saturating_add(1);
+            }
+            return;
         }
     }
     if let Ok(mut current) = rebuild.snapshot.write() {
@@ -553,6 +682,8 @@ fn build_root_index(
         max_file_bytes,
         build_candidates: true,
         stt: None,
+        ocr: None,
+        persistent: None,
     };
     let count = walk(&root.to_path_buf(), &context, &mut map, &mut documents)?;
     Ok((count, map))
@@ -565,6 +696,8 @@ fn scan_directory_unit(
     max_file_bytes: u64,
     build_candidates: bool,
     stt: Option<&SttEngine>,
+    ocr: Option<&OcrEngine>,
+    persistent: Option<&PersistentIndex>,
 ) -> Result<DirectoryScan, String> {
     let root_device = device_id(
         &fs::symlink_metadata(root).map_err(|error| format!("{}: {error}", root.display()))?,
@@ -592,6 +725,8 @@ fn scan_directory_unit(
             max_file_bytes,
             build_candidates,
             stt,
+            ocr,
+            persistent,
         };
         let count = walk(&unit.to_path_buf(), &context, &mut map, &mut documents)?;
         return Ok((count, map, documents, Vec::new()));
@@ -667,6 +802,24 @@ fn walk(
         return Ok(0);
     }
     if metadata.is_file() {
+        let size = metadata.len();
+        let mtime_ns = metadata_mtime_ns(&metadata);
+        if let Some(persistent) = context.persistent {
+            if let Ok(Some(body)) = persistent.cached_body(path, size, mtime_ns) {
+                if context.build_candidates {
+                    for gram in trigrams(&body.to_ascii_lowercase()) {
+                        map.entry(gram).or_default().insert(path.clone());
+                    }
+                }
+                documents.push(IndexedDocument {
+                    path: path.clone(),
+                    body,
+                    size,
+                    mtime_ns,
+                });
+                return Ok(1);
+            }
+        }
         let text = if let Some(stt) = context.stt.filter(|stt| stt.is_media(path)) {
             if stt.max_media_bytes() != 0 && metadata.len() > stt.max_media_bytes() {
                 return Ok(0);
@@ -679,8 +832,24 @@ fn walk(
                     return Ok(0);
                 }
             }
+        } else if let Some(ocr) = context.ocr.filter(|ocr| ocr.is_image(path)) {
+            if ocr.max_image_bytes() != 0 && metadata.len() > ocr.max_image_bytes() {
+                return Ok(0);
+            }
+            match ocr.extract_image(path) {
+                Ok(text) if !text.trim().is_empty() => text,
+                Ok(_) => return Ok(0),
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), error = %error, "OCR skipped image file");
+                    return Ok(0);
+                }
+            }
         } else {
-            if context.max_file_bytes != 0 && metadata.len() > context.max_file_bytes {
+            let pdf_ocr = context.ocr.filter(|ocr| ocr.is_pdf(path));
+            let read_limit = pdf_ocr
+                .map(OcrEngine::max_image_bytes)
+                .unwrap_or(context.max_file_bytes);
+            if read_limit != 0 && metadata.len() > read_limit {
                 return Ok(0);
             }
             let bytes = match fs::read(path) {
@@ -688,10 +857,31 @@ fn walk(
                 Err(error) if error.kind() == ErrorKind::PermissionDenied => return Ok(0),
                 Err(error) => return Err(format!("{}: {error}", path.display())),
             };
-            let Some(text) = extract_index_text(path, bytes) else {
-                return Ok(0);
-            };
-            text
+            let extracted = extract_index_text(path, bytes);
+            if let Some(ocr) = context
+                .ocr
+                .filter(|ocr| ocr.is_pdf(path) && ocr.should_ocr_pdf(extracted.as_deref()))
+            {
+                match ocr.extract_pdf(path) {
+                    Ok(text) if !text.trim().is_empty() => text,
+                    Ok(_) => match extracted {
+                        Some(text) => text,
+                        None => return Ok(0),
+                    },
+                    Err(error) => {
+                        tracing::warn!(path = %path.display(), error = %error, "OCR PDF fallback failed");
+                        match extracted {
+                            Some(text) => text,
+                            None => return Ok(0),
+                        }
+                    }
+                }
+            } else {
+                let Some(text) = extracted else {
+                    return Ok(0);
+                };
+                text
+            }
         };
         if context.build_candidates {
             for gram in trigrams(&text.to_ascii_lowercase()) {
@@ -701,6 +891,8 @@ fn walk(
         documents.push(IndexedDocument {
             path: path.clone(),
             body: text,
+            size,
+            mtime_ns,
         });
         return Ok(1);
     }
@@ -722,6 +914,15 @@ fn walk(
         count += walk(&entry.path(), context, map, documents)?;
     }
     Ok(count)
+}
+
+fn metadata_mtime_ns(metadata: &fs::Metadata) -> u128 {
+    metadata
+        .modified()
+        .unwrap_or(SystemTime::UNIX_EPOCH)
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
 }
 
 fn extract_index_text(path: &Path, bytes: Vec<u8>) -> Option<String> {
@@ -874,6 +1075,36 @@ mod tests {
         let matches = index.matching_documents("roadmap").unwrap();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].0, document);
+    }
+
+    #[test]
+    fn extraction_cache_reuses_only_unchanged_file_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.sqlite");
+        let document = dir.path().join("cached.txt");
+        fs::write(&document, "cached extraction body").unwrap();
+        let metadata = fs::metadata(&document).unwrap();
+        let size = metadata.len();
+        let mtime_ns = metadata_mtime_ns(&metadata);
+        let index = PersistentIndex::open(db).unwrap();
+        index
+            .replace_document(&document, "cached extraction body")
+            .unwrap();
+        assert_eq!(
+            index
+                .cached_body(&document, size, mtime_ns)
+                .unwrap()
+                .as_deref(),
+            Some("cached extraction body")
+        );
+        assert!(index
+            .cached_body(&document, size + 1, mtime_ns)
+            .unwrap()
+            .is_none());
+        assert!(index
+            .cached_body(&document, size, mtime_ns + 1)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

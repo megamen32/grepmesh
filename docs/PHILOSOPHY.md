@@ -8,6 +8,6 @@ Operational exclusions are different from security policy. GrepMesh skips depend
 
 The same principle applies to the mesh. The default listener is loopback-only and works naturally behind an existing trusted tunnel. Additional peer authentication is available when a deployment explicitly wants it, but GrepMesh should not force duplicate protection layers onto an already protected transport.
 
-Features with substantial local cost are opt-in, not hidden. Document indexing is local-first. Media transcription is disabled by default because it downloads a model and consumes CPU/GPU time; when enabled, GrepMesh should choose a sensible backend automatically and manage the model cache itself.
+Features with substantial local cost are opt-in, not hidden. Document indexing is local-first. Small, cheap ingestion helpers such as OCR may be enabled by default when they make common files searchable without meaningful operational cost. Media transcription is different: it can consume substantial CPU/GPU or remote capacity, so its backend and deployment policy should remain explicit.
 
 In short: make the common path easy, make expensive or granular controls explicit, and avoid surprising denials.

@@ -89,7 +89,7 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
     } else {
         Topology::new(config.host_id.clone(), config.peers.clone())
     };
-    let local = LocalBackend::from_config_with_stt(
+    let local = LocalBackend::from_config_with_ingestion(
         config.host_id.clone(),
         config.root.clone(),
         config.limits.clone(),
@@ -97,6 +97,7 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
         config.exclude_globs.clone(),
         config.index_path.clone(),
         config.stt.clone(),
+        config.ocr.clone(),
     );
     let peer_auth_token = config
         .peer_auth_token_env

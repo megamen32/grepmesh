@@ -116,6 +116,7 @@ async fn settings(State(state): State<ConsoleState>) -> Response {
         "exclude_globs": config.exclude_globs,
         "index_path": config.index_path,
         "stt": config.stt,
+        "ocr": config.ocr,
         "config_path": config.config_path,
         "restart_required_for_changes": true
     }))
@@ -123,12 +124,25 @@ async fn settings(State(state): State<ConsoleState>) -> Response {
 }
 
 async fn save_settings(State(state): State<ConsoleState>, Json(request): Json<Value>) -> Response {
-    let Some(stt_value) = request.get("stt") else {
-        return bad_request("stt settings are required");
+    let stt: SttConfig = match request.get("stt") {
+        Some(value) => match serde_json::from_value(value.clone()) {
+            Ok(stt) => stt,
+            Err(error) => return bad_request(format!("invalid stt settings: {error}")),
+        },
+        None => match state.config.lock() {
+            Ok(config) => config.stt.clone(),
+            Err(_) => return bad_request("settings lock is unavailable"),
+        },
     };
-    let stt: SttConfig = match serde_json::from_value(stt_value.clone()) {
-        Ok(stt) => stt,
-        Err(error) => return bad_request(format!("invalid stt settings: {error}")),
+    let ocr = match request.get("ocr") {
+        Some(value) => match serde_json::from_value(value.clone()) {
+            Ok(ocr) => ocr,
+            Err(error) => return bad_request(format!("invalid OCR settings: {error}")),
+        },
+        None => match state.config.lock() {
+            Ok(config) => config.ocr.clone(),
+            Err(_) => return bad_request("settings lock is unavailable"),
+        },
     };
     let mut config = match state.config.lock() {
         Ok(config) => config,
@@ -138,6 +152,7 @@ async fn save_settings(State(state): State<ConsoleState>, Json(request): Json<Va
         return bad_request("this GrepMesh instance was not started from a writable config file");
     };
     config.stt = stt;
+    config.ocr = ocr;
     let bytes = match serde_json::to_vec_pretty(&*config) {
         Ok(bytes) => bytes,
         Err(error) => return bad_request(format!("serialize settings: {error}")),
