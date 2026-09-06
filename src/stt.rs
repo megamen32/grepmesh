@@ -1,16 +1,18 @@
 use crate::config::SttConfig;
 use anyhow::{anyhow, Context, Result};
+#[cfg(feature = "local-stt")]
 use bzip2::read::BzDecoder;
+#[cfg(feature = "local-stt")]
 use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineTransducerModelConfig, Wave};
-use std::{
-    fs, io,
-    path::{Path, PathBuf},
-    process::Command,
-    sync::Mutex,
-};
+use std::path::Path;
+#[cfg(feature = "local-stt")]
+use std::{fs, io, path::PathBuf, process::Command, sync::Mutex};
+#[cfg(feature = "local-stt")]
 use tar::Archive;
 
+#[cfg(feature = "local-stt")]
 const PARAKEET_PACKAGE: &str = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8";
+#[cfg(feature = "local-stt")]
 const PARAKEET_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2";
 const MEDIA_EXTENSIONS: &[&str] = &[
     "wav", "mp3", "m4a", "aac", "flac", "ogg", "opus", "wma", "mp4", "mkv", "mov", "webm", "avi",
@@ -19,6 +21,7 @@ const MEDIA_EXTENSIONS: &[&str] = &[
 
 pub struct SttEngine {
     config: SttConfig,
+    #[cfg(feature = "local-stt")]
     recognizer: Mutex<Option<OfflineRecognizer>>,
 }
 
@@ -26,6 +29,7 @@ impl SttEngine {
     pub fn new(config: SttConfig) -> Option<Self> {
         config.enabled.then_some(Self {
             config,
+            #[cfg(feature = "local-stt")]
             recognizer: Mutex::new(None),
         })
     }
@@ -45,6 +49,20 @@ impl SttEngine {
         if self.config.backend == "remote" {
             return self.transcribe_remote(path);
         }
+        #[cfg(feature = "local-stt")]
+        {
+            return self.transcribe_local(path);
+        }
+        #[cfg(not(feature = "local-stt"))]
+        {
+            Err(anyhow!(
+                "local STT backend is unavailable in this build; configure backend=remote"
+            ))
+        }
+    }
+
+    #[cfg(feature = "local-stt")]
+    fn transcribe_local(&self, path: &Path) -> Result<String> {
         let model_dir = self.ensure_model()?;
         let wav = self.prepare_wav(path)?;
         let wave_path = wav.as_deref().unwrap_or(path);
@@ -128,6 +146,7 @@ impl SttEngine {
         Ok(format!("# Transcript\n\n{text}\n"))
     }
 
+    #[cfg(feature = "local-stt")]
     fn effective_model_dir(&self) -> Result<PathBuf> {
         if !matches!(self.config.backend.as_str(), "auto" | "parakeet") {
             return Err(anyhow!("unsupported STT backend {}", self.config.backend));
@@ -147,6 +166,7 @@ impl SttEngine {
         Ok(base.join(PARAKEET_PACKAGE))
     }
 
+    #[cfg(feature = "local-stt")]
     fn ensure_model(&self) -> Result<PathBuf> {
         let model_dir = self.effective_model_dir()?;
         if model_files_ready(&model_dir) {
@@ -184,6 +204,7 @@ impl SttEngine {
         Ok(model_dir)
     }
 
+    #[cfg(feature = "local-stt")]
     fn prepare_wav(&self, path: &Path) -> Result<Option<tempfile::TempPath>> {
         let temp = tempfile::Builder::new().suffix(".wav").tempfile()?;
         let output = Command::new("ffmpeg")
@@ -225,6 +246,7 @@ impl SttEngine {
     }
 }
 
+#[cfg(feature = "local-stt")]
 fn create_parakeet_recognizer(model_dir: &Path) -> Result<OfflineRecognizer> {
     let mut config = OfflineRecognizerConfig::default();
     config.model_config.transducer = OfflineTransducerModelConfig {
@@ -253,6 +275,7 @@ fn create_parakeet_recognizer(model_dir: &Path) -> Result<OfflineRecognizer> {
         .ok_or_else(|| anyhow!("cannot initialize Parakeet recognizer"))
 }
 
+#[cfg(feature = "local-stt")]
 fn model_files_ready(dir: &Path) -> bool {
     [
         "encoder.int8.onnx",
@@ -264,6 +287,7 @@ fn model_files_ready(dir: &Path) -> bool {
     .all(|name| dir.join(name).is_file())
 }
 
+#[cfg(feature = "local-stt")]
 fn format_timestamp(seconds: f32) -> String {
     let millis = (seconds.max(0.0) * 1000.0).round() as u64;
     let hours = millis / 3_600_000;
@@ -277,6 +301,7 @@ fn format_timestamp(seconds: f32) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "local-stt")]
     #[test]
     fn auto_selects_parakeet_and_recognizes_media_extensions_without_download() {
         let engine = SttEngine::new(SttConfig {
@@ -294,6 +319,7 @@ mod tests {
             .ends_with(PARAKEET_PACKAGE));
     }
 
+    #[cfg(feature = "local-stt")]
     #[test]
     fn timestamps_are_search_friendly_and_stable() {
         assert_eq!(format_timestamp(65.432), "00:01:05.432");

@@ -7,6 +7,10 @@ edition = "2021"
 name = "grepmesh-mcp"
 path = "src/main.rs"
 
+[features]
+default = ["local-stt"]
+local-stt = ["dep:sherpa-onnx"]
+
 [dependencies]
 anyhow = "1"
 axum = "0.7"
@@ -24,7 +28,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "ti
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anydoc = "0.2.4"
-sherpa-onnx = "1.13.7"
+sherpa-onnx = { version = "1.13.7", optional = true }
 ureq = "2"
 bzip2 = "0.4"
 tar = "0.4"

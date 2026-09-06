@@ -11,7 +11,7 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 use tokio::{
-    io::AsyncReadExt,
+    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
     process::Command as TokioCommand,
     time::{timeout, Instant},
 };
@@ -23,7 +23,10 @@ fn rg_command() -> Option<TokioCommand> {
     });
     match sibling.filter(|path| path.is_file()) {
         Some(path) => Some(TokioCommand::new(path)),
-        None => executable_on_path("rg").map(TokioCommand::new),
+        None => {
+            let name = if cfg!(windows) { "rg.exe" } else { "rg" };
+            executable_on_path(name).map(TokioCommand::new)
+        }
     }
 }
 
@@ -904,25 +907,33 @@ async fn search_text_impl(
         terminate_child(&mut child).await;
         return Err(anyhow!("rg search did not provide stdout"));
     };
-    let Some(mut stderr) = child.stderr.take() else {
+    let Some(stderr) = child.stderr.take() else {
         terminate_child(&mut child).await;
         return Err(anyhow!("rg search did not provide stderr"));
     };
     let stderr_task = tokio::spawn(async move {
+        let mut stderr = BufReader::new(stderr);
         let mut output = Vec::new();
-        let mut buffer = [0u8; 8192];
+        let mut line = Vec::new();
         let mut overflowed = false;
+        let mut saw_diagnostic = false;
+        let mut all_diagnostics_benign = true;
         loop {
-            let read = stderr.read(&mut buffer).await?;
+            line.clear();
+            let read = stderr.read_until(b'\n', &mut line).await?;
             if read == 0 {
                 break;
             }
+            if line.iter().any(|byte| !byte.is_ascii_whitespace()) {
+                saw_diagnostic = true;
+                all_diagnostics_benign &= permission_only_traversal_diagnostic(&line);
+            }
             let remaining = (64 * 1024usize).saturating_sub(output.len());
             let kept = read.min(remaining);
-            output.extend_from_slice(&buffer[..kept]);
+            output.extend_from_slice(&line[..kept]);
             overflowed |= kept != read;
         }
-        Ok::<_, std::io::Error>((output, overflowed))
+        Ok::<_, std::io::Error>((output, overflowed, saw_diagnostic && all_diagnostics_benign))
     });
     let mut hits = Vec::new();
     let mut pending = Vec::new();
@@ -1039,14 +1050,14 @@ async fn search_text_impl(
                 return Err(anyhow!("rg search timed out"));
             }
         };
-        let (stderr, stderr_overflowed) = stderr_task
+        let (stderr, stderr_overflowed, all_diagnostics_benign) = stderr_task
             .await
             .context("collect rg search diagnostics")??;
-        if stderr_overflowed {
+        if stderr_overflowed && !all_diagnostics_benign {
             return Err(anyhow!("rg search diagnostics exceeded 65536 bytes"));
         }
         if status.code() == Some(2) {
-            if !permission_only_traversal_diagnostic(&stderr) {
+            if !(all_diagnostics_benign || permission_only_traversal_diagnostic(&stderr)) {
                 let diagnostic = non_readable_traversal_diagnostic(&stderr).ok_or_else(|| {
                     anyhow!(
                         "rg search failed with {}: {}",
@@ -1106,7 +1117,10 @@ fn permission_only_traversal_diagnostic(stderr: &[u8]) -> bool {
     }
     lines.all(|line| {
         let line = line.to_ascii_lowercase();
-        line.contains("permission denied") || line.contains("operation not permitted")
+        line.contains("permission denied")
+            || line.contains("operation not permitted")
+            || line.contains("(os error 32)")
+            || line.contains("(os error 1920)")
     })
 }
 
@@ -1451,6 +1465,15 @@ mod tests {
     fn only_permission_diagnostics_are_safe_to_ignore() {
         assert!(permission_only_traversal_diagnostic(
             b"rg: ./private: Permission denied (os error 13)\n"
+        ));
+        assert!(permission_only_traversal_diagnostic(
+            b"rg: .\\ntuser.dat.LOG1: file is in use by another process (os error 32)\n"
+        ));
+        assert!(permission_only_traversal_diagnostic(
+            b"rg: .\\OneDrive\\photo.jpg: cloud placeholder unavailable (os error 1920)\n"
+        ));
+        assert!(permission_only_traversal_diagnostic(
+            b"rg: .\\ntuser.dat.LOG1: file is busy (os error 32)\nrg: .\\OneDrive\\photo.jpg: offline placeholder (os error 1920)\n"
         ));
         assert!(!permission_only_traversal_diagnostic(
             b"rg: ./volume: Input/output error (os error 5)\n"
