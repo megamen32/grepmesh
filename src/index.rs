@@ -99,6 +99,27 @@ impl PersistentIndex {
             .transaction()
             .map_err(|error| error.to_string())?;
         let path = document.path.display().to_string();
+        // Extraction cache hits still reach this writer during a full scan.
+        // Skip writes only when both persisted representations agree; checking
+        // the FTS row also preserves repair of missing, stale or duplicate rows.
+        let unchanged: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM grepmesh_extraction_cache \
+                 WHERE path=?1 AND size=?2 AND mtime_ns=?3 AND body=?4) \
+                 AND (SELECT count(*)=1 AND min(body)=?4 \
+                 FROM grepmesh_documents WHERE path=?1)",
+                params![
+                    path,
+                    document.size as i64,
+                    document.mtime_ns.to_string(),
+                    document.body
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if unchanged {
+            return Ok(());
+        }
         transaction
             .execute(
                 "DELETE FROM grepmesh_documents WHERE path = ?1",
@@ -1105,6 +1126,107 @@ mod tests {
             .cached_body(&document, size, mtime_ns + 1)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn persistent_rebuild_is_read_only_when_unchanged_and_tracks_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("files");
+        fs::create_dir(&root).unwrap();
+        let document = root.join("document.txt");
+        fs::write(&document, "original searchable token").unwrap();
+        let index = PersistentIndex::open(dir.path().join("index.sqlite")).unwrap();
+        let observer = index.connection().unwrap();
+        let version = || {
+            observer
+                .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
+                .unwrap()
+        };
+        let roots = BTreeMap::from([("test".to_string(), vec![root])]);
+        let snapshot = Arc::new(RwLock::new(IndexSnapshot::default()));
+        let candidates = Arc::new(RwLock::new(BTreeMap::new()));
+        let ready_roots = Arc::new(RwLock::new(BTreeSet::new()));
+        let mut generation = 0;
+        let mut rebuild = || {
+            rebuild_index(
+                &roots,
+                &[],
+                0,
+                None,
+                None,
+                RebuildState {
+                    snapshot: &snapshot,
+                    candidates: &candidates,
+                    ready_roots: &ready_roots,
+                    persistent: Some(&index),
+                },
+                &mut generation,
+            );
+            assert!(snapshot.read().unwrap().last_error.is_none());
+        };
+        rebuild();
+        assert_eq!(
+            index.candidates("original").unwrap(),
+            vec![document.clone()]
+        );
+        let before = version();
+        rebuild();
+        assert_eq!(
+            version(),
+            before,
+            "cached rebuild must not commit SQLite writes"
+        );
+        fs::write(&document, "replacement searchable content").unwrap();
+        rebuild();
+        assert!(index.candidates("original").unwrap().is_empty());
+        assert_eq!(
+            index.candidates("replacement").unwrap(),
+            vec![document.clone()]
+        );
+        fs::remove_file(&document).unwrap();
+        rebuild();
+        assert!(index.candidates("replacement").unwrap().is_empty());
+        let count: i64 = observer
+            .query_row(
+                "SELECT count(*) FROM grepmesh_extraction_cache",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn unchanged_document_repairs_missing_stale_or_duplicate_fts_and_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = PersistentIndex::open(dir.path().join("index.sqlite")).unwrap();
+        let document = dir.path().join("document.txt");
+        fs::write(&document, "searchable repair token").unwrap();
+        index
+            .replace_document(&document, "searchable repair token")
+            .unwrap();
+        let connection = index.connection().unwrap();
+        for corruption in [
+            "DELETE FROM grepmesh_documents",
+            "UPDATE grepmesh_documents SET body='stale content'",
+            "INSERT INTO grepmesh_documents(path, body) SELECT path, body FROM grepmesh_documents",
+            "DELETE FROM grepmesh_extraction_cache",
+        ] {
+            connection.execute(corruption, []).unwrap();
+            index
+                .replace_document(&document, "searchable repair token")
+                .unwrap();
+            assert_eq!(index.candidates("repair").unwrap(), vec![document.clone()]);
+            assert!(index.candidates("stale").unwrap().is_empty());
+            let metadata = fs::metadata(&document).unwrap();
+            assert_eq!(
+                index
+                    .cached_body(&document, metadata.len(), metadata_mtime_ns(&metadata))
+                    .unwrap()
+                    .as_deref(),
+                Some("searchable repair token")
+            );
+        }
     }
 
     #[test]
