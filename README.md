@@ -52,9 +52,9 @@ The built-in exclusions are operational rather than security policy: dependency/
 
 ## Optional media transcription
 
-Audio/video indexing is an opt-in local backend. Set `stt.enabled` to `true`; with the default `backend: "auto"` and `model: "auto"`, GrepMesh selects Parakeet-TDT-0.6B-v3 int8 and downloads the sherpa-onnx model package into `~/.cache/grepmesh/models/` on first media transcription. Nothing is downloaded while STT is disabled.
+Audio/video indexing is opt-in and supports two backends. `backend: "remote"` sends the media file to an OpenAI-compatible `/v1/audio/transcriptions` endpoint using a bearer token read from `api_key_env`; `backend: "auto"` or `"parakeet"` keeps transcription fully local with Parakeet-TDT-0.6B-v3 int8 via sherpa-onnx.
 
-The local flow is: `audio/video -> ffmpeg -> Parakeet/sherpa-onnx -> timestamped transcript -> local FTS -> search`. The model supports English, Russian, and 23 other European languages. Original media and transcripts remain on the node that owns the file. `auto_download: false` can be used when models are provisioned manually.
+For local STT, GrepMesh downloads the model into `~/.cache/grepmesh/models/` on first media transcription when `auto_download` is enabled. For remote STT, the URL belongs in `remote_base_url` and the secret stays outside JSON/config in the environment variable named by `api_key_env` (default `GREPMESH_STT_API_KEY`). In either mode the resulting transcript is indexed into the local FTS.
 
 ## Documentation
 

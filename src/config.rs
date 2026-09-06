@@ -170,6 +170,10 @@ pub struct SttConfig {
     pub model: String,
     #[serde(default)]
     pub model_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub remote_base_url: Option<String>,
+    #[serde(default = "default_stt_api_key_env")]
+    pub api_key_env: String,
     #[serde(default = "default_true")]
     pub auto_download: bool,
     #[serde(default = "default_max_media_bytes")]
@@ -183,6 +187,8 @@ impl Default for SttConfig {
             backend: default_stt_backend(),
             model: default_stt_model(),
             model_dir: None,
+            remote_base_url: None,
+            api_key_env: default_stt_api_key_env(),
             auto_download: true,
             max_media_bytes: default_max_media_bytes(),
         }
@@ -194,6 +200,9 @@ fn default_stt_backend() -> String {
 }
 fn default_stt_model() -> String {
     "auto".to_string()
+}
+fn default_stt_api_key_env() -> String {
+    "GREPMESH_STT_API_KEY".to_string()
 }
 fn default_true() -> bool {
     true

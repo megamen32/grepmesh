@@ -42,6 +42,9 @@ impl SttEngine {
     }
 
     pub fn transcribe(&self, path: &Path) -> Result<String> {
+        if self.config.backend == "remote" {
+            return self.transcribe_remote(path);
+        }
         let model_dir = self.ensure_model()?;
         let wav = self.prepare_wav(path)?;
         let wave_path = wav.as_deref().unwrap_or(path);
@@ -77,6 +80,52 @@ impl SttEngine {
             }
         }
         Ok(output)
+    }
+
+    fn transcribe_remote(&self, path: &Path) -> Result<String> {
+        let base_url = self
+            .config
+            .remote_base_url
+            .as_deref()
+            .ok_or_else(|| anyhow!("remote STT requires remote_base_url"))?
+            .trim_end_matches('/');
+        let api_key = std::env::var(&self.config.api_key_env)
+            .with_context(|| format!("missing STT API key env {}", self.config.api_key_env))?;
+        let model = if self.config.model == "auto" {
+            "whisper-1"
+        } else {
+            self.config.model.as_str()
+        };
+        let form = reqwest::blocking::multipart::Form::new()
+            .text("model", model.to_string())
+            .text("response_format", "json")
+            .part(
+                "file",
+                reqwest::blocking::multipart::Part::file(path)
+                    .with_context(|| format!("attach media {}", path.display()))?,
+            );
+        let response = reqwest::blocking::Client::new()
+            .post(format!("{base_url}/v1/audio/transcriptions"))
+            .bearer_auth(api_key)
+            .multipart(form)
+            .send()
+            .context("remote STT request")?;
+        let status = response.status();
+        let value: serde_json::Value = response
+            .json()
+            .with_context(|| format!("decode remote STT response ({status})"))?;
+        if !status.is_success() {
+            return Err(anyhow!("remote STT returned {status}: {value}"));
+        }
+        let text = value
+            .get("text")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .trim();
+        if text.is_empty() {
+            return Ok(String::new());
+        }
+        Ok(format!("# Transcript\n\n{text}\n"))
     }
 
     fn effective_model_dir(&self) -> Result<PathBuf> {

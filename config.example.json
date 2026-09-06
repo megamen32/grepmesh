@@ -33,6 +33,8 @@
     "backend": "auto",
     "model": "auto",
     "auto_download": true,
-    "max_media_bytes": 4294967296
+    "max_media_bytes": 4294967296,
+    "remote_base_url": null,
+    "api_key_env": "GREPMESH_STT_API_KEY"
   }
 }
