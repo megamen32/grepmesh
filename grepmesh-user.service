@@ -2,13 +2,14 @@
 Description=GrepMesh MCP search
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 Environment=PATH=@GREPMESH_PATH@
 ExecStart=@GREPMESH_BIN@ --config @GREPMESH_CONFIG@
 Restart=always
-RestartSec=2
+RestartSec=30s
 
 [Install]
 WantedBy=default.target
