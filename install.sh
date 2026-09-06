@@ -28,13 +28,35 @@ else
   url="https://github.com/$repo/releases/download/$version/$asset"
 fi
 
-tmp="$(mktemp -d)"
+temp_root="${GREPMESH_TMP_DIR:-$prefix/.tmp}"
+install -d "$temp_root"
+tmp="$(mktemp -d "$temp_root/grepmesh-install.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
-curl -fsSL "$url" -o "$tmp/$asset"
+if [[ -n "${GREPMESH_ARCHIVE:-}" ]]; then
+  cp "$GREPMESH_ARCHIVE" "$tmp/$asset"
+else
+  curl -fsSL "$url" -o "$tmp/$asset"
+fi
 tar -xzf "$tmp/$asset" -C "$tmp"
 
 install -d "$prefix/bin" "$config_dir"
-install -m 0755 "$tmp/grepmesh-mcp" "$prefix/bin/grepmesh-mcp"
+if [[ "$os" == Linux ]]; then
+  if [[ -d "$tmp/lib" ]]; then
+    install -d "$prefix/bin/lib" "$prefix/share/grepmesh"
+    for library in "$tmp/lib/"*; do
+      name="$(basename "$library")"
+      cp -a "$library" "$prefix/bin/lib/.$name.new"
+      mv -Tf "$prefix/bin/lib/.$name.new" "$prefix/bin/lib/$name"
+    done
+    cp -a "$tmp/licenses" "$prefix/share/grepmesh/"
+    cp "$tmp/onnxruntime-manifest.txt" "$prefix/share/grepmesh/"
+  fi
+  install -m 0755 "$tmp/grepmesh-mcp" "$prefix/bin/.grepmesh-mcp.new"
+  "$prefix/bin/.grepmesh-mcp.new" --help >/dev/null
+  mv -f "$prefix/bin/.grepmesh-mcp.new" "$prefix/bin/grepmesh-mcp"
+else
+  install -m 0755 "$tmp/grepmesh-mcp" "$prefix/bin/grepmesh-mcp"
+fi
 if [[ -x "$tmp/rg" ]]; then
   install -m 0755 "$tmp/rg" "$prefix/bin/rg"
 elif command -v rg >/dev/null; then
@@ -59,7 +81,9 @@ if [[ ! -e "$config_dir/config.json" ]]; then
   sed "s|/home/user/projects|$HOME|g" "$tmp/config.example.json" > "$config_dir/config.json"
 fi
 
-if [[ "$os" == "Linux" ]]; then
+if [[ "${GREPMESH_START_SERVICE:-1}" == 0 ]]; then
+  state="not started (GREPMESH_START_SERVICE=0)"
+elif [[ "$os" == "Linux" ]]; then
   service_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
   install -d "$service_dir"
   sed \

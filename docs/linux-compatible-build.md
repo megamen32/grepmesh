@@ -26,3 +26,11 @@ unchanged rebuilds perform no SQLite commits and that edits, deletions and
 inconsistent FTS/cache rows are handled. This does not claim OCR inference
 quality or model-download availability; no OCR models are downloaded by the
 build canary.
+
+The Linux installer stages the packaged runtime libraries before atomically
+replacing the executable. `GREPMESH_ARCHIVE=/path/to/archive` selects a local
+archive; `GREPMESH_START_SERVICE=0` installs without starting a service.
+`scripts/test-linux-package-install.sh` proves fresh and repeated installation
+into a disposable `.tmp/` prefix and launches the installed binary without
+`LD_LIBRARY_PATH`. Linux packaging checks ELF dependencies and rejects a
+dynamic ONNX executable when `--runtime-dir` is absent.

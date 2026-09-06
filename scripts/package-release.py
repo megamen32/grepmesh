@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import zipfile
@@ -39,6 +40,11 @@ def main() -> int:
     for path in (args.binary, args.rg):
         if not path.is_file():
             raise SystemExit(f"required binary is missing: {path}")
+
+    if args.target == "linux-x86_64":
+        needed = subprocess.check_output(["readelf", "-d", str(args.binary)], text=True)
+        if "libonnxruntime.so" in needed and not args.runtime_dir:
+            raise SystemExit("dynamic ONNX Runtime requires --runtime-dir; use scripts/build-release.sh")
 
     args.output.mkdir(parents=True, exist_ok=True)
     archive_path = args.output / archive_name
