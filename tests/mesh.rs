@@ -553,7 +553,9 @@ async fn black_box_two_process_peer_fanout_and_partial_results() {
         gptadmin_token_env: None,
         peer_auth_token_env: None,
         backup_catalog: None,
+        stt: Default::default(),
         topology_ttl_ms: 30_000,
+        config_path: None,
     };
     let cfg_a = AppConfig {
         host_id: "A".into(),
@@ -575,7 +577,9 @@ async fn black_box_two_process_peer_fanout_and_partial_results() {
         gptadmin_token_env: None,
         peer_auth_token_env: None,
         backup_catalog: None,
+        stt: Default::default(),
         topology_ttl_ms: 30_000,
+        config_path: None,
     };
     let path_a = temp_a.path().join("a.json");
     let path_b = temp_b.path().join("b.json");
@@ -828,7 +832,9 @@ async fn remote_partial_status_and_local_results_survive_fanout() {
         gptadmin_token_env: None,
         peer_auth_token_env: None,
         backup_catalog: None,
+        stt: Default::default(),
         topology_ttl_ms: 30_000,
+        config_path: None,
     };
     let path = temp.path().join("config.json");
     write_config(&path, &cfg);
@@ -944,7 +950,9 @@ async fn stalled_peer_body_keeps_completed_local_results() {
         gptadmin_token_env: None,
         peer_auth_token_env: None,
         backup_catalog: None,
+        stt: Default::default(),
         topology_ttl_ms: 30_000,
+        config_path: None,
     };
     let path = temp.path().join("config.json");
     write_config(&path, &cfg);
@@ -1055,7 +1063,9 @@ async fn async_search_status_returns_a_bounded_final_page() {
         gptadmin_token_env: None,
         peer_auth_token_env: None,
         backup_catalog: None,
+        stt: Default::default(),
         topology_ttl_ms: 30_000,
+        config_path: None,
     };
     let path = temp.path().join("config.json");
     write_config(&path, &cfg);
@@ -1198,7 +1208,9 @@ async fn search_with_sufficient_wait_returns_the_complete_result_directly() {
         gptadmin_token_env: None,
         peer_auth_token_env: None,
         backup_catalog: None,
+        stt: Default::default(),
         topology_ttl_ms: 30_000,
+        config_path: None,
     };
     let path = temp.path().join("config.json");
     write_config(&path, &cfg);
@@ -1231,7 +1243,7 @@ async fn search_with_sufficient_wait_returns_the_complete_result_directly() {
 }
 
 #[tokio::test]
-async fn search_text_tool_defaults_to_compact_ranges_with_verbose_raw_opt_in() {
+async fn search_tool_defaults_to_compact_ranges_with_search_text_compat_alias() {
     let temp = TempDir::new().unwrap();
     let root = temp.path().to_path_buf();
     let file = root.join("result.rs");
@@ -1253,7 +1265,9 @@ async fn search_text_tool_defaults_to_compact_ranges_with_verbose_raw_opt_in() {
         gptadmin_token_env: None,
         peer_auth_token_env: None,
         backup_catalog: None,
+        stt: Default::default(),
         topology_ttl_ms: 30_000,
+        config_path: None,
     };
     let path = temp.path().join("config.json");
     write_config(&path, &config);
@@ -1265,7 +1279,7 @@ async fn search_text_tool_defaults_to_compact_ranges_with_verbose_raw_opt_in() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|tool| tool["name"] == "search_text")
+        .find(|tool| tool["name"] == "search")
         .unwrap();
     assert_eq!(
         search_schema["inputSchema"]["properties"]["verbose"]["type"],
@@ -1280,7 +1294,7 @@ async fn search_text_tool_defaults_to_compact_ranges_with_verbose_raw_opt_in() {
         &url,
         "tools/call",
         serde_json::json!({
-            "name": "search_text",
+            "name": "search",
             "arguments": {"query": "needle", "context_lines": 0}
         }),
     )

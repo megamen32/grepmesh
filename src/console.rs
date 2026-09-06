@@ -6,13 +6,14 @@
 
 use crate::{
     backup_catalog::{read_fixture_availability, BackupCatalogConfig},
+    config::{AppConfig, SttConfig},
     jobs::SearchJobs,
     mcp::{ListDirectoryArgs, ListLocationsArgs, MeshService, ReadTextArgs, SearchArgs},
 };
 use axum::{
     extract::State,
     http::StatusCode,
-    response::{Html, IntoResponse, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -38,6 +39,7 @@ struct ConsoleState {
     service: Arc<MeshService>,
     jobs: SearchJobs,
     backup_catalog: Option<BackupCatalogConfig>,
+    config: Arc<Mutex<AppConfig>>,
     previews: Arc<Mutex<BTreeMap<String, PreviewTarget>>>,
 }
 
@@ -55,18 +57,24 @@ pub fn router(
     service: Arc<MeshService>,
     jobs: SearchJobs,
     backup_catalog: Option<BackupCatalogConfig>,
+    config: AppConfig,
 ) -> Router {
     let state = ConsoleState {
         service,
         jobs,
         backup_catalog,
+        config: Arc::new(Mutex::new(config)),
         previews: Arc::new(Mutex::new(BTreeMap::new())),
     };
     Router::new()
-        .route("/ui", get(index))
+        .route("/", get(|| async { Redirect::temporary("/ui/") }))
+        .route("/ui", get(|| async { Redirect::temporary("/ui/") }))
         .route("/ui/", get(index))
         .route("/ui/console.css", get(stylesheet))
         .route("/ui/console.js", get(script))
+        .route("/ui/settings", get(settings_page))
+        .route("/ui/settings.js", get(settings_script))
+        .route("/api/settings", get(settings).post(save_settings))
         .route("/api/catalog", get(catalog))
         .route("/api/browse", post(browse))
         .route("/api/search", post(search))
@@ -81,6 +89,65 @@ async fn index() -> Html<&'static str> {
         include_str!("../web/index.html"),
         "\n<!-- local Console API: /api/search -->\n"
     ))
+}
+
+async fn settings_page() -> Html<&'static str> {
+    Html(include_str!("../web/settings.html"))
+}
+
+async fn settings_script() -> impl IntoResponse {
+    (
+        [("content-type", "application/javascript; charset=utf-8")],
+        include_str!("../web/settings.js"),
+    )
+}
+
+async fn settings(State(state): State<ConsoleState>) -> Response {
+    let config = match state.config.lock() {
+        Ok(config) => config.clone(),
+        Err(_) => return bad_request("settings lock is unavailable"),
+    };
+    Json(json!({
+        "host_id": config.host_id,
+        "bind": config.bind.to_string(),
+        "local_bind": config.local_bind.map(|bind| bind.to_string()),
+        "root": config.root,
+        "roots": config.roots,
+        "exclude_globs": config.exclude_globs,
+        "index_path": config.index_path,
+        "stt": config.stt,
+        "config_path": config.config_path,
+        "restart_required_for_changes": true
+    }))
+    .into_response()
+}
+
+async fn save_settings(State(state): State<ConsoleState>, Json(request): Json<Value>) -> Response {
+    let Some(stt_value) = request.get("stt") else {
+        return bad_request("stt settings are required");
+    };
+    let stt: SttConfig = match serde_json::from_value(stt_value.clone()) {
+        Ok(stt) => stt,
+        Err(error) => return bad_request(format!("invalid stt settings: {error}")),
+    };
+    let mut config = match state.config.lock() {
+        Ok(config) => config,
+        Err(_) => return bad_request("settings lock is unavailable"),
+    };
+    let Some(path) = config.config_path.clone() else {
+        return bad_request("this GrepMesh instance was not started from a writable config file");
+    };
+    config.stt = stt;
+    let bytes = match serde_json::to_vec_pretty(&*config) {
+        Ok(bytes) => bytes,
+        Err(error) => return bad_request(format!("serialize settings: {error}")),
+    };
+    let tmp = path.with_extension("json.tmp");
+    if let Err(error) = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, &path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return bad_request(format!("save settings: {error}"));
+    }
+    Json(json!({"ok": true, "restart_required": true, "config_path": path})).into_response()
 }
 
 async fn stylesheet() -> impl IntoResponse {

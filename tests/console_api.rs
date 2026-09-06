@@ -151,6 +151,60 @@ async fn local_console_ui_and_catalog_have_a_browser_safe_success_shape() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn base_url_opens_webui_and_settings_are_linked_and_persisted() {
+    let fixture = tempfile::tempdir().unwrap();
+    let harness = start_console(fixture.path()).await;
+    let client = Client::new();
+
+    let base = client.get(&harness.local_base).send().await.unwrap();
+    assert_eq!(base.status(), StatusCode::OK);
+    assert_eq!(base.url().path(), "/ui/");
+    let html = base.text().await.unwrap();
+    assert!(html.contains("href=\"/ui/settings\""));
+
+    let settings_page = client
+        .get(format!("{}/ui/settings", harness.local_base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(settings_page.status(), StatusCode::OK);
+    assert!(settings_page
+        .text()
+        .await
+        .unwrap()
+        .contains("Media transcription"));
+
+    let settings: Value = client
+        .get(format!("{}/api/settings", harness.local_base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(settings["stt"]["enabled"], false);
+    assert_eq!(settings["stt"]["backend"], "auto");
+
+    let saved: Value = client
+        .post(format!("{}/api/settings", harness.local_base))
+        .json(&json!({"stt": {
+            "enabled": true,
+            "backend": "auto",
+            "model": "auto",
+            "auto_download": true,
+            "max_media_bytes": 4294967296u64
+        }}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(saved["ok"], true);
+    assert_eq!(saved["restart_required"], true);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_console_browse_lists_immediate_safe_entries_for_a_catalog_root() {
     let fixture = tempfile::tempdir().unwrap();
     fs::create_dir(fixture.path().join("nested")).unwrap();

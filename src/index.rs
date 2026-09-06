@@ -1,4 +1,4 @@
-use crate::backend::IndexState;
+use crate::{backend::IndexState, config::SttConfig, stt::SttEngine};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::{params, Connection};
@@ -21,6 +21,14 @@ struct IndexedDocument {
     body: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct IndexTextHit {
+    pub path: PathBuf,
+    pub line_number: usize,
+    pub text: String,
+    pub context: Vec<(usize, String)>,
+}
+
 struct RebuildState<'a> {
     snapshot: &'a Arc<RwLock<IndexSnapshot>>,
     candidates: &'a Arc<RwLock<BTreeMap<String, BTreeSet<PathBuf>>>>,
@@ -34,6 +42,7 @@ struct ScanContext<'a> {
     excludes: &'a GlobSet,
     max_file_bytes: u64,
     build_candidates: bool,
+    stt: Option<&'a SttEngine>,
 }
 
 #[cfg(unix)]
@@ -102,14 +111,59 @@ impl PersistentIndex {
 
     pub fn candidates(&self, query: &str) -> Result<Vec<PathBuf>, String> {
         let connection = self.connection()?;
+        let fts_query = fts_literal_query(query);
         let mut statement = connection
             .prepare("SELECT path FROM grepmesh_documents WHERE body MATCH ?1")
             .map_err(|error| error.to_string())?;
         let rows = statement
-            .query_map(params![query], |row| row.get::<_, String>(0))
+            .query_map(params![fts_query], |row| row.get::<_, String>(0))
             .map_err(|error| error.to_string())?;
         rows.map(|row| row.map(PathBuf::from).map_err(|error| error.to_string()))
             .collect()
+    }
+
+    fn matching_documents(&self, query: &str) -> Result<Vec<(PathBuf, String)>, String> {
+        let connection = self.connection()?;
+        let fts_query = fts_literal_query(query);
+        let mut documents = BTreeMap::<PathBuf, String>::new();
+        {
+            let mut statement = connection
+                .prepare(
+                    "SELECT path, body FROM grepmesh_documents WHERE body MATCH ?1 ORDER BY rank",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map(params![fts_query], |row| {
+                    Ok((
+                        PathBuf::from(row.get::<_, String>(0)?),
+                        row.get::<_, String>(1)?,
+                    ))
+                })
+                .map_err(|error| error.to_string())?;
+            for row in rows {
+                let (path, body) = row.map_err(|error| error.to_string())?;
+                documents.insert(path, body);
+            }
+        }
+        let path_pattern = format!("%{}%", query.replace('%', r"\%").replace('_', r"\_"));
+        {
+            let mut statement = connection
+                .prepare("SELECT path, body FROM grepmesh_documents WHERE path LIKE ?1 ESCAPE '\\'")
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map(params![path_pattern], |row| {
+                    Ok((
+                        PathBuf::from(row.get::<_, String>(0)?),
+                        row.get::<_, String>(1)?,
+                    ))
+                })
+                .map_err(|error| error.to_string())?;
+            for row in rows {
+                let (path, body) = row.map_err(|error| error.to_string())?;
+                documents.entry(path).or_insert(body);
+            }
+        }
+        Ok(documents.into_iter().collect())
     }
 }
 
@@ -160,6 +214,7 @@ impl IndexManager {
         excludes: Vec<String>,
         max_file_bytes: u64,
         persistent_path: Option<PathBuf>,
+        stt_config: SttConfig,
     ) -> Self {
         let snapshot = Arc::new(RwLock::new(IndexSnapshot {
             state: IndexState::Building,
@@ -183,6 +238,7 @@ impl IndexManager {
                 }
             });
         let persistent_state = persistent.clone();
+        let stt = SttEngine::new(stt_config);
         thread::spawn(move || {
             let (events, rx) = mpsc::channel();
             let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |_| {
@@ -198,6 +254,7 @@ impl IndexManager {
                     &roots,
                     &excludes,
                     max_file_bytes,
+                    stt.as_ref(),
                     RebuildState {
                         snapshot: &state,
                         candidates: &candidate_state,
@@ -249,6 +306,82 @@ impl IndexManager {
         self.enabled
     }
 
+    pub fn search_text_hits(
+        &self,
+        query: &str,
+        root: &Path,
+        limit: usize,
+        context_lines: usize,
+        case_sensitive: bool,
+    ) -> Option<Vec<IndexTextHit>> {
+        if query.as_bytes().len() < 3
+            || !self
+                .ready_roots
+                .read()
+                .ok()
+                .is_some_and(|roots| roots.iter().any(|ready| root.starts_with(ready)))
+        {
+            return None;
+        }
+        let persistent = self.persistent.as_ref()?;
+        let documents = persistent.matching_documents(query).ok()?;
+        let needle = if case_sensitive {
+            query.to_string()
+        } else {
+            query.to_lowercase()
+        };
+        let mut hits = Vec::new();
+        for (path, body) in documents {
+            if !path.starts_with(root) {
+                continue;
+            }
+            let mut content_match = false;
+            let lines: Vec<&str> = body.lines().collect();
+            for (index, line) in lines.iter().enumerate() {
+                let haystack = if case_sensitive {
+                    (*line).to_string()
+                } else {
+                    line.to_lowercase()
+                };
+                if !haystack.contains(&needle) {
+                    continue;
+                }
+                content_match = true;
+                let start = index.saturating_sub(context_lines);
+                let end = (index + context_lines + 1).min(lines.len());
+                hits.push(IndexTextHit {
+                    path: path.clone(),
+                    line_number: index + 1,
+                    text: (*line).to_string(),
+                    context: (start..end)
+                        .map(|i| (i + 1, lines[i].to_string()))
+                        .collect(),
+                });
+                if hits.len() >= limit {
+                    return Some(hits);
+                }
+            }
+            let path_text = path.to_string_lossy();
+            let path_haystack = if case_sensitive {
+                path_text.to_string()
+            } else {
+                path_text.to_lowercase()
+            };
+            if !content_match && path_haystack.contains(&needle) {
+                hits.push(IndexTextHit {
+                    path: path.clone(),
+                    line_number: 0,
+                    text: path_text.to_string(),
+                    context: Vec::new(),
+                });
+                if hits.len() >= limit {
+                    return Some(hits);
+                }
+            }
+        }
+        Some(hits)
+    }
+
     pub fn candidate_paths(&self, query: &str, root: &Path) -> Option<Vec<PathBuf>> {
         if !self
             .ready_roots
@@ -293,6 +426,7 @@ fn rebuild_index(
     roots: &BTreeMap<String, Vec<PathBuf>>,
     excludes: &[String],
     max_file_bytes: u64,
+    stt: Option<&SttEngine>,
     rebuild: RebuildState<'_>,
     generation: &mut u64,
 ) {
@@ -348,6 +482,7 @@ fn rebuild_index(
                 &matcher,
                 max_file_bytes,
                 rebuild.persistent.is_none(),
+                stt,
             );
             let (unit_count, next, documents, children) = match result {
                 Ok(result) => result,
@@ -417,6 +552,7 @@ fn build_root_index(
         excludes: &matcher,
         max_file_bytes,
         build_candidates: true,
+        stt: None,
     };
     let count = walk(&root.to_path_buf(), &context, &mut map, &mut documents)?;
     Ok((count, map))
@@ -428,6 +564,7 @@ fn scan_directory_unit(
     excludes: &GlobSet,
     max_file_bytes: u64,
     build_candidates: bool,
+    stt: Option<&SttEngine>,
 ) -> Result<DirectoryScan, String> {
     let root_device = device_id(
         &fs::symlink_metadata(root).map_err(|error| format!("{}: {error}", root.display()))?,
@@ -454,6 +591,7 @@ fn scan_directory_unit(
             excludes,
             max_file_bytes,
             build_candidates,
+            stt,
         };
         let count = walk(&unit.to_path_buf(), &context, &mut map, &mut documents)?;
         return Ok((count, map, documents, Vec::new()));
@@ -529,20 +667,31 @@ fn walk(
         return Ok(0);
     }
     if metadata.is_file() {
-        if context.max_file_bytes != 0 && metadata.len() > context.max_file_bytes {
-            return Ok(0);
-        }
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == ErrorKind::PermissionDenied => return Ok(0),
-            Err(error) => return Err(format!("{}: {error}", path.display())),
-        };
-        if bytes.contains(&0) {
-            return Ok(0);
-        }
-        let text = match String::from_utf8(bytes) {
-            Ok(text) => text,
-            Err(_) => return Ok(0),
+        let text = if let Some(stt) = context.stt.filter(|stt| stt.is_media(path)) {
+            if stt.max_media_bytes() != 0 && metadata.len() > stt.max_media_bytes() {
+                return Ok(0);
+            }
+            match stt.transcribe(path) {
+                Ok(text) if !text.trim().is_empty() => text,
+                Ok(_) => return Ok(0),
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), error = %error, "STT skipped media file");
+                    return Ok(0);
+                }
+            }
+        } else {
+            if context.max_file_bytes != 0 && metadata.len() > context.max_file_bytes {
+                return Ok(0);
+            }
+            let bytes = match fs::read(path) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == ErrorKind::PermissionDenied => return Ok(0),
+                Err(error) => return Err(format!("{}: {error}", path.display())),
+            };
+            let Some(text) = extract_index_text(path, bytes) else {
+                return Ok(0);
+            };
+            text
         };
         if context.build_candidates {
             for gram in trigrams(&text.to_ascii_lowercase()) {
@@ -573,6 +722,28 @@ fn walk(
         count += walk(&entry.path(), context, map, documents)?;
     }
     Ok(count)
+}
+
+fn extract_index_text(path: &Path, bytes: Vec<u8>) -> Option<String> {
+    if !bytes.contains(&0) {
+        if let Ok(text) = String::from_utf8(bytes) {
+            return Some(text);
+        }
+    }
+    if anydoc::Format::from_path(path).is_none() {
+        return None;
+    }
+    match anydoc::to_markdown(path) {
+        Ok(markdown) => Some(markdown),
+        Err(error) => {
+            tracing::debug!(path = %path.display(), error = %error, "AnyDoc skipped document");
+            None
+        }
+    }
+}
+
+fn fts_literal_query(query: &str) -> String {
+    format!("\"{}\"", query.replace('\"', "\"\""))
 }
 
 fn compile_excludes(excludes: &[String]) -> Result<GlobSet, String> {
@@ -679,6 +850,30 @@ mod tests {
         let root = PathBuf::from("/workspace");
         let matcher = compile_excludes(&["**/.cache/**".to_string()]).unwrap();
         assert!(excluded(&root.join(".cache"), &root, &matcher));
+    }
+
+    #[test]
+    fn anydoc_converts_rtf_for_indexing() {
+        let dir = tempfile::tempdir().unwrap();
+        let document = dir.path().join("note.rtf");
+        let bytes = br"{\rtf1\ansi GrepMesh AnyDoc document canary}".to_vec();
+        fs::write(&document, &bytes).unwrap();
+        let markdown = extract_index_text(&document, bytes).expect("RTF should be converted");
+        assert!(markdown.contains("GrepMesh AnyDoc document canary"));
+    }
+
+    #[test]
+    fn persistent_index_searches_document_path_as_well_as_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.sqlite");
+        let document = dir.path().join("quarterly-roadmap.docx");
+        let index = PersistentIndex::open(db).unwrap();
+        index
+            .replace_document(&document, "body without the filename token")
+            .unwrap();
+        let matches = index.matching_documents("roadmap").unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].0, document);
     }
 
     #[test]

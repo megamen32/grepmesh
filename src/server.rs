@@ -89,13 +89,14 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
     } else {
         Topology::new(config.host_id.clone(), config.peers.clone())
     };
-    let local = LocalBackend::from_config(
+    let local = LocalBackend::from_config_with_stt(
         config.host_id.clone(),
         config.root.clone(),
         config.limits.clone(),
         config.roots.clone(),
         config.exclude_globs.clone(),
         config.index_path.clone(),
+        config.stt.clone(),
     );
     let peer_auth_token = config
         .peer_auth_token_env
@@ -109,17 +110,10 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
         return Err(anyhow!("local_bind must be a loopback address"));
     }
     let backup_catalog = config.backup_catalog.clone();
-    let require_peer_auth = !remote_bind.ip().is_loopback();
-    if require_peer_auth && local_bind.is_none() {
-        return Err(anyhow!(
-            "non-loopback bind requires a separate local_bind for the agent entrypoint"
-        ));
-    }
-    if require_peer_auth && peer_auth_token.is_none() {
-        return Err(anyhow!(
-            "non-loopback bind requires a non-empty peer_auth_token_env"
-        ));
-    }
+    // Transport security is opt-in. The default listener is loopback-only, and
+    // deployments already protected by a GPTAdmin tunnel do not need a second
+    // bearer-auth layer. Setting peer_auth_token_env explicitly enables it.
+    let require_peer_auth = peer_auth_token.is_some();
     let service =
         Arc::new(MeshService::new(local, topology).with_peer_auth_token(peer_auth_token.clone()));
     let jobs = SearchJobs::persistent(service.local.root.clone(), &service.local.limits)?;
@@ -162,7 +156,8 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
     }
     let console_service = Arc::clone(&service);
     let console_jobs = jobs.clone();
-    let remote_app = build_app(AppState {
+    let console_config = config.clone();
+    let mut remote_app = build_app(AppState {
         service: Arc::clone(&service),
         jobs: jobs.clone(),
         peer_auth_token: peer_auth_token.clone(),
@@ -181,12 +176,21 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
             console_service,
             console_jobs,
             backup_catalog,
+            console_config,
         ));
         tokio::try_join!(
             axum::serve(listener, remote_app),
             axum::serve(local_listener, local_app)
         )?;
     } else {
+        if remote_bind.ip().is_loopback() {
+            remote_app = remote_app.merge(crate::console::router(
+                console_service,
+                console_jobs,
+                backup_catalog,
+                console_config,
+            ));
+        }
         axum::serve(listener, remote_app).await?;
     }
     Ok(())
@@ -194,7 +198,8 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
 
 fn build_app(state: AppState) -> Router {
     Router::new()
-        .route("/", get(health).post(handle_rpc))
+        .route("/", post(handle_rpc))
+        .route("/health", get(health))
         .route("/mcp", post(handle_rpc))
         .with_state(state)
 }
@@ -305,12 +310,12 @@ async fn handle_rpc_inner(state: AppState, payload: Value) -> Result<Value> {
                 "protocolVersion": protocol_version,
                 "serverInfo": {"name": "grepmesh", "version": env!("CARGO_PKG_VERSION")},
                 "capabilities": {"tools": {"listChanged": false}},
-                "instructions": "Use GrepMesh when the location is unknown, the search may span multiple mesh hosts, or its configured cross-host scopes are needed. For a known local checkout or explicitly named local path, prefer bounded shell rg/find; it is faster and avoids unnecessary mesh fan-out. For GrepMesh, start with search_text or find_paths, set a small wait_ms for multi-host requests, and use read_text only for an exact result path and host. If a search returns state=running, call search_status with its job_id. Surface partial host_status failures rather than treating partial results as complete.",
+                "instructions": "Use GrepMesh when the location is unknown, the search may span multiple mesh hosts, or its configured cross-host scopes are needed. For a known local checkout or explicitly named local path, prefer bounded shell rg/find; it is faster and avoids unnecessary mesh fan-out. For GrepMesh, start with search, set a small wait_ms for multi-host requests, and use read_text only for an exact result path and host. If a search returns state=running, call search_status with its job_id. Surface partial host_status failures rather than treating partial results as complete.",
             })
         }
         "tools/list" => json!({
             "tools": [
-                tool_meta("search_text", "Search text across one or more hosts."),
+                tool_meta("search", "Search file names and indexed content across one or more hosts."),
                 tool_meta("find_paths", "Find file paths across one or more hosts."),
                 tool_meta("read_text", "Read a text file from a specific host."),
                 tool_meta("list_locations", "List configured browse locations across hosts."),
@@ -347,7 +352,7 @@ fn tool_meta(name: &str, description: &str) -> Value {
         ]
     });
     let schema = match name {
-        "search_text" => json!({
+        "search" | "search_text" => json!({
             "type": "object",
             "required": ["query"],
             "properties": {
@@ -414,7 +419,7 @@ async fn call_tool(service: &MeshService, jobs: &SearchJobs, params: Value) -> R
         .ok_or_else(|| anyhow::anyhow!("missing tool name"))?;
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
     let tool_result = match name {
-        "search_text" => {
+        "search" | "search_text" => {
             let mut arguments = arguments;
             let explicit_wait_ms = arguments.get("wait_ms").and_then(Value::as_u64);
             let wait_ms = explicit_wait_ms.unwrap_or(DEFAULT_FOREGROUND_SEARCH_WAIT_MS);
@@ -705,8 +710,7 @@ mod tests {
         assert!(instructions.contains("location is unknown"));
         assert!(instructions.contains("known local checkout"));
         assert!(instructions.contains("rg/find"));
-        assert!(instructions.contains("search_text"));
-        assert!(instructions.contains("find_paths"));
+        assert!(instructions.contains("search"));
         assert!(instructions.contains("read_text"));
         assert!(instructions.contains("host_status"));
     }

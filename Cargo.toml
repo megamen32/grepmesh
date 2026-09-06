@@ -23,6 +23,12 @@ serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "time", "fs", "sync", "net", "io-util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anydoc = "0.2.4"
+sherpa-onnx = "1.13.7"
+ureq = "2"
+bzip2 = "0.4"
+tar = "0.4"
+tempfile = "3"
 
 [dev-dependencies]
 tempfile = "3"

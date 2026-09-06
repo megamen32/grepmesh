@@ -3,7 +3,9 @@
   "bind": "127.0.0.1:9419",
   "root": "/home/user/projects",
   "roots": {
-    "projects": ["/home/user/projects"]
+    "projects": [
+      "/home/user/projects"
+    ]
   },
   "peers": [
     {
@@ -25,5 +27,12 @@
     "**/.git/**",
     "**/node_modules/**",
     "**/target/**"
-  ]
+  ],
+  "stt": {
+    "enabled": false,
+    "backend": "auto",
+    "model": "auto",
+    "auto_download": true,
+    "max_media_bytes": 4294967296
+  }
 }

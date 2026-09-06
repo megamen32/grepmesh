@@ -244,6 +244,7 @@ impl LocalBackend {
             excludes.clone(),
             limits.max_file_bytes,
             None,
+            crate::config::SttConfig::default(),
         );
         Self {
             host_id: host_id.into(),
@@ -263,6 +264,26 @@ impl LocalBackend {
         exclude_globs: Vec<String>,
         index_path: Option<PathBuf>,
     ) -> Self {
+        Self::from_config_with_stt(
+            host_id,
+            root,
+            limits,
+            roots,
+            exclude_globs,
+            index_path,
+            crate::config::SttConfig::default(),
+        )
+    }
+
+    pub fn from_config_with_stt(
+        host_id: impl Into<String>,
+        root: impl Into<PathBuf>,
+        limits: LimitsConfig,
+        roots: BTreeMap<String, Vec<PathBuf>>,
+        exclude_globs: Vec<String>,
+        index_path: Option<PathBuf>,
+        stt: crate::config::SttConfig,
+    ) -> Self {
         let root = root.into();
         let mut root_paths = roots
             .into_iter()
@@ -279,6 +300,7 @@ impl LocalBackend {
                 excludes.clone(),
                 limits.max_file_bytes,
                 Some(index_path),
+                stt,
             ),
             None => IndexManager::disabled(),
         };
@@ -301,6 +323,7 @@ impl LocalBackend {
             self.exclude_globs.clone(),
             self.limits.max_file_bytes,
             None,
+            crate::config::SttConfig::default(),
         );
         self
     }
@@ -323,6 +346,7 @@ impl LocalBackend {
             self.exclude_globs.clone(),
             self.limits.max_file_bytes,
             None,
+            crate::config::SttConfig::default(),
         );
         self
     }
@@ -524,6 +548,42 @@ impl LocalBackend {
                 first_root_error.get_or_insert_with(|| "local rg search timed out".to_string());
                 partial = true;
                 break;
+            }
+            if path_globs.is_empty()
+                && matches!(
+                    mode,
+                    SearchMode::Literal | SearchMode::CaseInsensitiveLiteral
+                )
+            {
+                if let Some(index_hits) = self.index.search_text_hits(
+                    &query,
+                    &root,
+                    remaining,
+                    context_lines,
+                    matches!(mode, SearchMode::Literal),
+                ) {
+                    successful_roots += 1;
+                    hits.extend(index_hits.into_iter().map(|hit| {
+                        SearchHit {
+                            host_id: host_id.clone(),
+                            path: hit.path.display().to_string(),
+                            line_number: hit.line_number,
+                            text: hit
+                                .context
+                                .iter()
+                                .find(|(line, _)| *line == hit.line_number)
+                                .map(|(_, text)| text.clone())
+                                .unwrap_or_default(),
+                            context: hit
+                                .context
+                                .into_iter()
+                                .map(|(line_number, text)| MatchLine { line_number, text })
+                                .collect(),
+                            column: 0,
+                        }
+                    }));
+                    continue;
+                }
             }
             let candidate_paths = if path_globs.is_empty()
                 && matches!(

@@ -24,9 +24,12 @@ or more narrow named roots, and the routable URLs of its peers.
 }
 ```
 
-Use a private management network or VPN for peer URLs. Give every node the same
-non-empty `GREPMESH_PEER_TOKEN`. Keep named roots narrow: searching a project
-root is faster and more predictable than scanning an entire home directory.
+Each node keeps its own persistent SQLite FTS index (under `~/.cache/grepmesh/` by default). Office documents, EPUB, RTF, CSV, and text-based PDFs are converted locally with Firecrawl AnyDoc before indexing. The documents themselves stay on that node. A search with `hosts: "*"` fans out to every reachable node and merges the results, so the mesh behaves as one logical index without a central document store. Scanned-PDF OCR is not enabled by the Rust integration.
+
+GrepMesh listens on `127.0.0.1:9419` by default. For GPTAdmin Network Tunnel
+deployments, keep that loopback default and do not add a second peer token.
+`peer_auth_token_env` is optional and enables bearer authentication explicitly
+for deployments that expose GrepMesh on another transport. Named roots are a convenience and performance control, not a security boundary: choose the obvious directories you want searchable, and add narrower exclusions only when you explicitly need them.
 
 ## Optional GPTAdmin Network Tunnel fallback
 

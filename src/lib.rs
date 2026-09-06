@@ -7,5 +7,6 @@ pub mod index;
 pub mod jobs;
 pub mod mcp;
 pub mod server;
+pub mod stt;
 pub mod topology;
 pub mod topology_cache;

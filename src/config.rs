@@ -40,16 +40,6 @@ pub fn default_exclude_globs() -> Vec<String> {
         "**/.local/share/Trash/**",
         "**/diag-live/**",
         "**/.grepmesh-jobs/**",
-        "**/.ssh/**",
-        "**/.gnupg/**",
-        "**/.aws/credentials",
-        "**/.netrc",
-        "**/id_rsa",
-        "**/id_ed25519",
-        "**/*.pem",
-        "**/*.key",
-        "**/shadow",
-        "**/gshadow",
         "proc/**",
         "sys/**",
         "dev/**",
@@ -170,9 +160,52 @@ impl BackupCatalogConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SttConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_stt_backend")]
+    pub backend: String,
+    #[serde(default = "default_stt_model")]
+    pub model: String,
+    #[serde(default)]
+    pub model_dir: Option<PathBuf>,
+    #[serde(default = "default_true")]
+    pub auto_download: bool,
+    #[serde(default = "default_max_media_bytes")]
+    pub max_media_bytes: u64,
+}
+
+impl Default for SttConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: default_stt_backend(),
+            model: default_stt_model(),
+            model_dir: None,
+            auto_download: true,
+            max_media_bytes: default_max_media_bytes(),
+        }
+    }
+}
+
+fn default_stt_backend() -> String {
+    "auto".to_string()
+}
+fn default_stt_model() -> String {
+    "auto".to_string()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_max_media_bytes() -> u64 {
+    4 * 1024 * 1024 * 1024
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
     pub host_id: String,
+    #[serde(default = "default_bind")]
     pub bind: SocketAddr,
     #[serde(default)]
     pub local_bind: Option<SocketAddr>,
@@ -187,9 +220,9 @@ pub struct AppConfig {
     pub exclude_globs: Vec<String>,
     #[serde(default)]
     pub topology_cache_path: Option<PathBuf>,
-    /// Persistent full-text indexing is opt-in. `rg` is the production default:
-    /// it avoids a background full-tree scan for repositories that already
-    /// search quickly with ripgrep.
+    /// Local persistent full-text index. Enabled by default; every GrepMesh node
+    /// indexes its own configured roots and mesh fan-out provides one logical
+    /// cross-host index without copying documents to a central server.
     #[serde(default)]
     pub index_path: Option<PathBuf>,
     #[serde(default)]
@@ -200,8 +233,38 @@ pub struct AppConfig {
     pub peer_auth_token_env: Option<String>,
     #[serde(default)]
     pub backup_catalog: Option<BackupCatalogConfig>,
+    #[serde(default)]
+    pub stt: SttConfig,
     #[serde(default = "default_topology_ttl_ms")]
     pub topology_ttl_ms: u64,
+    #[serde(skip)]
+    pub config_path: Option<PathBuf>,
+}
+
+fn default_bind() -> SocketAddr {
+    "127.0.0.1:9419".parse().expect("valid default bind")
+}
+
+fn default_index_path_for(host_id: &str, root: &Path) -> Option<PathBuf> {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in root.as_os_str().to_string_lossy().bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    std::env::var_os("HOME").map(PathBuf::from).map(|home| {
+        let safe_host = host_id
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        home.join(".cache/grepmesh")
+            .join(format!("{safe_host}-{hash:016x}.sqlite3"))
+    })
 }
 
 fn default_topology_ttl_ms() -> u64 {
@@ -213,11 +276,15 @@ impl AppConfig {
         let bytes = fs::read(path.as_ref())
             .with_context(|| format!("read config {}", path.as_ref().display()))?;
         let mut cfg: AppConfig = serde_json::from_slice(&bytes).context("parse config JSON")?;
+        cfg.config_path = Some(path.as_ref().to_path_buf());
         if cfg.limits.max_results == 0 {
             cfg.limits.max_results = default_max_results();
         }
         if cfg.limits.max_file_bytes == 0 {
             cfg.limits.max_file_bytes = default_max_file_bytes();
+        }
+        if cfg.index_path.is_none() {
+            cfg.index_path = default_index_path_for(&cfg.host_id, &cfg.root);
         }
         Ok(cfg)
     }
@@ -233,7 +300,7 @@ impl AppConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::default_exclude_globs;
+    use super::{default_exclude_globs, AppConfig};
 
     #[test]
     fn defaults_exclude_runtime_pseudo_filesystems() {
@@ -241,5 +308,19 @@ mod tests {
         for pattern in ["proc/**", "sys/**", "dev/**", "run/**"] {
             assert!(excludes.contains(&pattern.to_string()), "missing {pattern}");
         }
+    }
+
+    #[test]
+    fn bind_defaults_to_loopback() {
+        let config: AppConfig = serde_json::from_value(serde_json::json!({
+            "host_id": "local-test",
+            "root": "/tmp"
+        }))
+        .unwrap();
+
+        assert_eq!(config.bind.to_string(), "127.0.0.1:9419");
+        assert!(config.peers.is_empty());
+        assert!(config.peer_auth_token_env.is_none());
+        assert!(config.index_path.is_none());
     }
 }

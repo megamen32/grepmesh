@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>GrepMesh Settings</title>
+  <link rel="stylesheet" href="/ui/console.css" />
+</head>
+<body>
+  <main class="shell settings-shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">⌁</span><div><p class="eyebrow">GREPMESH</p><h1>Settings</h1></div></div>
+      <div class="topbar-actions"><a class="quiet-button nav-link" href="/ui/">← Search</a></div>
+    </header>
+    <section class="settings-grid">
+      <section class="panel settings-card">
+        <div class="panel-heading"><div><p class="eyebrow">LOCAL INDEX</p><h2>Media transcription</h2></div><span id="settings-state" class="backup-state unknown">Loading…</span></div>
+        <p class="settings-copy">Optional local STT for audio and video. Enabling it downloads the selected model into the GrepMesh cache on first use.</p>
+        <form id="settings-form">
+          <label class="setting-row"><span><strong>Enable STT</strong><small>Index transcripts from local audio/video files.</small></span><input id="stt-enabled" type="checkbox" /></label>
+          <label class="setting-field"><span>Backend</span><select id="stt-backend"><option value="auto">Auto (recommended)</option><option value="parakeet">Parakeet</option></select></label>
+          <label class="setting-field"><span>Model</span><select id="stt-model"><option value="auto">Auto</option><option value="parakeet-tdt-0.6b-v3-int8">Parakeet TDT 0.6B v3 int8</option></select></label>
+          <label class="setting-row"><span><strong>Automatic model download</strong><small>Download the model only when STT is enabled and a media file needs transcription.</small></span><input id="stt-download" type="checkbox" /></label>
+          <div class="settings-actions"><button class="primary-button" type="submit"><span>Save settings</span></button><span id="save-note" class="settings-note"></span></div>
+        </form>
+      </section>
+      <section class="panel settings-card">
+        <div class="panel-heading"><div><p class="eyebrow">EFFECTIVE CONFIG</p><h2>Current node</h2></div></div>
+        <dl class="settings-list" id="effective-settings"><dt>Status</dt><dd>Loading…</dd></dl>
+        <p class="settings-copy">GrepMesh uses comfortable defaults. Extra exclusions and peer authentication are optional; dynamic pseudo-filesystems remain excluded from indexing for operational reasons.</p>
+      </section>
+    </section>
+  </main>
+  <script src="/ui/settings.js" defer></script>
+</body>
+</html>
