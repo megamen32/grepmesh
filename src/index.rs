@@ -13,7 +13,7 @@ use std::{
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
-    sync::{mpsc, Arc, RwLock},
+    sync::{mpsc, Arc, Mutex, RwLock},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -474,7 +474,9 @@ impl IndexManager {
         let ocr = OcrEngine::new(ocr_config);
         thread::spawn(move || {
             let index_storage_path = persistent_state.as_ref().map(|index| index.path.clone());
-            let (events, rx) = mpsc::channel();
+            let (events, rx) = mpsc::sync_channel(1);
+            let pending_event_paths = Arc::new(Mutex::new(BTreeMap::<PathBuf, u64>::new()));
+            let watcher_pending_paths = Arc::clone(&pending_event_paths);
             let watched_index_storage_path = index_storage_path.clone();
             let watch_roots = ordered_roots(&roots);
             thread::spawn(move || {
@@ -492,7 +494,12 @@ impl IndexManager {
                                     })
                                     .collect::<Vec<_>>();
                             if !paths.is_empty() {
-                                let _ = events.send(paths);
+                                if let Ok(mut pending) = watcher_pending_paths.lock() {
+                                    for path in paths {
+                                        *pending.entry(path).or_default() += 1;
+                                    }
+                                }
+                                let _ = events.try_send(());
                             }
                         }
                     },
@@ -597,8 +604,7 @@ impl IndexManager {
                 } else {
                     Duration::from_secs(30)
                 };
-                if let Ok(paths) = rx.recv_timeout(remaining) {
-                    let mut observed_paths = paths;
+                if rx.recv_timeout(remaining).is_ok() {
                     // Filesystems commonly emit a burst of events for one
                     // logical update. Wait for a quiet interval before the
                     // expensive reconciliation and never advertise Building
@@ -608,21 +614,24 @@ impl IndexManager {
                         debounce_deadline.checked_duration_since(Instant::now())
                     {
                         match rx.recv_timeout(remaining) {
-                            Ok(paths) => observed_paths.extend(paths),
+                            Ok(()) => continue,
                             Err(_) => break,
                         }
                     }
-                    observed_paths.retain(|path| {
-                        !index_storage_path
-                            .as_ref()
-                            .is_some_and(|index_path| is_index_storage_path(path, index_path))
-                    });
-                    if observed_paths.is_empty() {
+                    let event_counts = pending_event_paths
+                        .lock()
+                        .map(|mut pending| std::mem::take(&mut *pending))
+                        .unwrap_or_default();
+                    let event_counts = event_counts
+                        .into_iter()
+                        .filter(|(path, _)| {
+                            !index_storage_path
+                                .as_ref()
+                                .is_some_and(|index_path| is_index_storage_path(path, index_path))
+                        })
+                        .collect::<BTreeMap<_, _>>();
+                    if event_counts.is_empty() {
                         continue;
-                    }
-                    let mut event_counts = BTreeMap::<PathBuf, u64>::new();
-                    for path in observed_paths {
-                        *event_counts.entry(path).or_default() += 1;
                     }
                     let changed_paths = event_counts.keys().cloned().collect::<BTreeSet<_>>();
                     if let Some(index) = persistent_state.as_ref() {
