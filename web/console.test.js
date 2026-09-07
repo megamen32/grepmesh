@@ -1,155 +1,53 @@
 "use strict";
-
-const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const test = require("node:test");
-const vm = require("node:vm");
-
+const assert=require("node:assert/strict"),fs=require("node:fs"),test=require("node:test"),vm=require("node:vm");
 class Element {
-  constructor() {
-    this.children = [];
-    this.dataset = {};
-    this.events = new Map();
-    this.className = "";
-    this.textContent = "";
-    this.type = "";
-    this.classList = { add() {}, remove() {} };
-  }
-
-  get firstElementChild() { return this.children[0] || null; }
-  get lastElementChild() { return this.children.at(-1) || null; }
-  append(...children) { children.forEach((child) => { child.parentElement = this; }); this.children.push(...children); }
-  replaceChildren(...children) { this.children = children; }
-  addEventListener(type, listener) { this.events.set(type, listener); }
-  click() { this.events.get("click")?.({ preventDefault() {} }); }
-  dispatch(type, target = this) { this.events.get(type)?.({ target, preventDefault() {} }); }
-  closest(selector) {
-    for (let node = this; node; node = node.parentElement) if (selector === ".location-item" && node.className.split(/\s+/).includes("location-item")) return node;
-    return null;
-  }
-  contains(candidate) { for (let node = candidate; node; node = node.parentElement) if (node === this) return true; return false; }
-  focus() {}
+  constructor(){this.children=[];this.dataset={};this.events=new Map();this.className="";this.textContent="";this.attributes={};this.hidden=false;this.classList={add:name=>{this.className+=" "+name;},remove:name=>{this.className=this.className.split(" ").filter(x=>x!==name).join(" ");},toggle:name=>{this.className.includes(name)?this.classList.remove(name):this.classList.add(name);}};}
+  get firstElementChild(){return this.children[0];}get lastElementChild(){return this.children.at(-1);}
+  append(...children){children.forEach(child=>child.parentElement=this);this.children.push(...children);}
+  replaceChildren(...children){this.children=[];this.append(...children);}
+  addEventListener(name,listener){this.events.set(name,listener);}setAttribute(key,value){this.attributes[key]=value;}
+  dispatch(name,target=this,key){return this.events.get(name)?.({target,key,preventDefault(){}});}click(){return this.dispatch("click");}
+  closest(selector){for(let node=this;node;node=node.parentElement)if(node.className.split(" ").includes(selector.slice(1)))return node;return null;}
+  contains(candidate){for(let node=candidate;node;node=node.parentElement)if(node===this)return true;return false;}focus(){}
 }
-
-test("Locations sidebar delegates a nested Location click to its browse request", async () => {
-  const { nodes, requests } = consoleFixture({ hosts: [{ id: "server-100", roots: ["/etc"] }], roots: ["/etc"] });
-  await settle();
-
-  const location = nodes["locations-sidebar"].children.find((node) => node.className.includes("location-item"));
-  assert.ok(location, "catalog root should render as a clickable Location");
-  assert.equal(location.events.has("click"), false, "location buttons must use the stable sidebar listener rather than a listener that disappears on re-render");
-  nodes["locations-sidebar"].dispatch("click", location.children[1]);
-  await settle();
-
-  const browse = requests.find((request) => request.url === "/api/browse");
-  assert.ok(browse, "a nested Location click must dispatch the browse request");
-  assert.deepEqual(JSON.parse(browse.options.body), { host: "server-100", path: "/etc" });
-});
-
-test("delegated Locations keep the search form wired", async () => {
-  const { nodes, requests } = consoleFixture({ hosts: [{ id: "server-100", roots: ["/etc"] }], roots: ["/etc"] });
-  await settle();
-
-  nodes.query.value = "nginx";
-  nodes["search-form"].dispatch("submit");
-  await settle();
-
-  const search = requests.find((request) => request.url === "/api/search");
-  assert.ok(search, "submitting search must still call the search API");
-  assert.deepEqual(JSON.parse(search.options.body), { query: "nginx" });
-});
-
-test("device sidebar persistently renders a safe degraded device error without health polling", async () => {
-  const { nodes, requests } = consoleFixture({
-    hosts: [{
-      id: "mac-mini",
-      roots: ["/Users/operator/projects"],
-      health: "offline",
-      last_error: "Device did not respond before the request deadline.",
-    }],
-    roots: ["/Users/operator/projects"],
-  });
-  await settle();
-
-  const device = nodes["host-sidebar"].children.find((node) => node.className.includes("host-item") && node.children.some((child) => child.textContent === "mac-mini"));
-  assert.ok(device, "the catalog device should remain in the sidebar");
-  assert.ok(device.children.some((child) => child.className.includes("offline") && child.textContent === "offline"));
-  assert.ok(device.children.some((child) => child.textContent === "Device did not respond before the request deadline."));
-  assert.equal(requests.filter((request) => request.url === "/api/catalog").length, 1, "health is catalog-refresh driven, not periodically polled");
-});
-
-test("device sidebar distinguishes a readable-but-partial device from an offline device", async () => {
-  const { nodes } = consoleFixture({
-    hosts: [{
-      id: "mac-m1",
-      roots: ["/Users/user"],
-      health: "degraded",
-      last_error: "Some configured paths are not readable.",
-    }],
-  });
-  await settle();
-  const device = nodes["host-sidebar"].children.find((node) =>
-    node.className.includes("host-item") && node.children.some((child) => child.textContent === "mac-m1"));
-  assert.ok(device);
-  assert.ok(device.children.some((child) => child.className.includes("degraded") && child.textContent === "degraded"));
-});
-
-function consoleFixture(catalog, browseEntries = []) {
-  const ids = ["connection", "search-form", "query", "refresh-catalog", "search-button", "search-state", "host-sidebar", "locations-sidebar", "results", "results-count", "preview", "backup-badge", "backup-body"];
-  const nodes = Object.fromEntries(ids.map((id) => [id, new Element()]));
-  nodes.connection.append(new Element(), new Element());
-  nodes["search-state"].append(new Element(), new Element());
-  nodes["search-button"].append(new Element());
-  const requests = [];
-  const document = {
-    getElementById: (id) => nodes[id],
-    createElement: () => new Element(),
-    querySelectorAll: () => [],
-  };
-  const fetch = async (url, options = {}) => {
-    requests.push({ url, options });
-    const body = url === "/api/catalog" ? catalog : url === "/api/backup/availability" ? { state: "unconfigured" } : url === "/api/browse" ? { entries: browseEntries } : { entries: [] };
-    return { ok: true, status: 200, text: async () => JSON.stringify(body) };
-  };
-  vm.runInNewContext(fs.readFileSync("web/console.js", "utf8"), { document, fetch, Error, console });
-  return { nodes, requests };
+const entries=[{name:"zeta.txt",path:"/etc/zeta.txt",kind:"file",size:100,modified_ms:3000,created_ms:null},{name:"alpha.txt",path:"/etc/alpha.txt",kind:"file",size:3,modified_ms:1000,created_ms:2000},{name:"folder",path:"/etc/folder",kind:"directory",size:null,modified_ms:2000,created_ms:1000}];
+function fixture(options={}){
+  const ids=[...fs.readFileSync("web/index.html","utf8").matchAll(/id="([^"]+)"/g)].map(x=>x[1]);const nodes=Object.fromEntries(ids.map(id=>[id,new Element()]));
+  nodes.connection.append(new Element(),new Element());nodes["search-state"].append(new Element(),new Element());nodes["search-button"].append(new Element());
+  const sorts=["name","size","modified","created"].map(key=>{const node=new Element();node.dataset.sort=key;node.append(new Element());return node;});
+  const storage=options.storage || new Map(),requests=[],window=new Element();
+  const document={hidden:false,getElementById:id=>nodes[id],createElement:()=>new Element(),querySelector:()=>window,querySelectorAll:selector=>selector==="[data-sort]"?sorts:[]};
+  const catalog=options.catalog || {hosts:[{id:"server-100",roots:["/etc"],health:"healthy"}],roots:["/etc"]};
+  const responses={"/api/catalog":catalog,"/api/browse":{entries},"/api/host-status":{nodes:[{host_id:"server-100",roots:["/etc"],index_state:"Ready",index_db_bytes:32768,indexed_files:3}]},"/api/telemetry":{records:[{job_id:"j1",query:"needle",started_ms:1000,duration_ms:15,status:"complete",result_count:2,host_timings:[{host_id:"server-100",duration_ms:12,status:"complete",result_count:2}]}],retention:{max_records:500,max_age_days:30}},"/api/search":{state:"complete",results:[]},"/api/backup/availability":{state:"unconfigured"},...options.responses};
+  const fetch=async(url,opts={})=>{requests.push({url,options:opts});const body=typeof responses[url]==="function"?await responses[url](opts):responses[url] || {};return{ok:true,status:200,text:async()=>JSON.stringify(body)};};
+  vm.runInNewContext(fs.readFileSync("web/console.js","utf8"),{document,fetch,Error,console,setTimeout,localStorage:{getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value)}});
+  return{nodes,sorts,requests,storage};
 }
-
-async function settle() {
-  await new Promise((resolve) => setImmediate(resolve));
-  await new Promise((resolve) => setImmediate(resolve));
-}
-
-for (const [name, catalog] of [
-  ["flat roots", { hosts: [{ id: "server-100" }], roots: ["/etc"] }],
-  ["nested roots", { hosts: [{ id: "server-100", roots: ["/etc"] }], roots: ["/etc"] }],
-]) {
-  test(`Location click browses ${name} catalog and renders its entries`, async () => {
-    const { nodes, requests } = consoleFixture(catalog, [
-      { name: "nginx", path: "/etc/nginx", kind: "directory" },
-      { name: "hosts", path: "/etc/hosts", kind: "file", size: 20 },
-    ]);
-    await settle();
-
-    const location = nodes["locations-sidebar"].children.find((node) => node.className.includes("location-item"));
-    assert.ok(location, "catalog root should render as a clickable Location");
-    nodes["locations-sidebar"].dispatch("click", location);
-    await settle();
-
-    const browse = requests.find((request) => request.url === "/api/browse");
-    assert.ok(browse, "selecting a rendered root must request its directory entries");
-    assert.equal(browse.options.method, "POST");
-    assert.deepEqual(JSON.parse(browse.options.body), { host: "server-100", path: "/etc" });
-    assert.ok(nodes.results.children.some((node) => node.className.includes("browse-entry") && node.children.some((child) => child.textContent === "hosts")), "browse response should replace the central list with directory entries");
-
-    const directory = nodes.results.children.find((node) => node.children.some((child) => child.textContent === "nginx"));
-    directory.click();
-    await settle();
-    assert.ok(requests.some((request) => request.url === "/api/browse" && JSON.parse(request.options.body).path === "/etc/nginx"), "clicking a directory should browse it");
-
-    const file = nodes.results.children.find((node) => node.children.some((child) => child.textContent === "hosts"));
-    file.click();
-    assert.equal(nodes.preview.className, "preview-content");
-    assert.ok(nodes.preview.children.some((child) => child.children.some((detail) => detail.textContent === "/etc/hosts")), "clicking a file should fill Details with its metadata");
-  });
-}
+const settle=async()=>{await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));};
+function content(node){return[node.textContent,...node.children.map(content)].join(" ");}
+function rows(f){return f.nodes.results.children.filter(x=>x.className.includes("file-row"));}
+function names(f){return rows(f).map(row=>row.children[0].children[1].textContent);}
+async function browse(f){await settle();const root=f.nodes["locations-sidebar"].children[0];f.nodes["locations-sidebar"].dispatch("click",root.children[1]);await settle();}
+test("nested location click browses its host; sorting covers the full list and unknown dates stay last",async()=>{
+  const f=fixture();await browse(f);assert.deepEqual(JSON.parse(f.requests.find(x=>x.url==="/api/browse").options.body),{host:"server-100",path:"/etc"});assert.deepEqual(names(f),["alpha.txt","folder","zeta.txt"]);
+  f.sorts[1].click();assert.deepEqual(names(f),["alpha.txt","zeta.txt","folder"]);f.sorts[1].click();assert.deepEqual(names(f),["zeta.txt","alpha.txt","folder"]);
+  f.sorts[3].click();assert.deepEqual(names(f),["folder","alpha.txt","zeta.txt"]);f.sorts[3].click();assert.deepEqual(names(f),["alpha.txt","folder","zeta.txt"]);assert.equal(rows(f)[2].children[3].textContent,"—");
+  f.sorts[2].click();assert.deepEqual(names(f),["alpha.txt","folder","zeta.txt"]);
+});
+test("single click inspects; double click opens folder; breadcrumbs and back/forward navigate",async()=>{
+  const f=fixture();await browse(f);const folder=rows(f).find(row=>content(row).includes("folder"));const before=f.requests.length;folder.click();assert.equal(f.requests.length,before);assert.match(content(f.nodes.preview),/\/etc\/folder/);folder.dispatch("dblclick");await settle();assert.equal(JSON.parse(f.requests.filter(x=>x.url==="/api/browse").at(-1).options.body).path,"/etc/folder");
+  f.nodes["go-back"].click();await settle();assert.equal(JSON.parse(f.requests.filter(x=>x.url==="/api/browse").at(-1).options.body).path,"/etc");f.nodes["go-forward"].click();await settle();assert.equal(JSON.parse(f.requests.filter(x=>x.url==="/api/browse").at(-1).options.body).path,"/etc/folder");
+  f.nodes.breadcrumbs.children.find(x=>x.textContent==="etc").click();await settle();assert.equal(JSON.parse(f.requests.filter(x=>x.url==="/api/browse").at(-1).options.body).path,"/etc");
+});
+test("bookmarks preserve host and path after reload",async()=>{
+  const f=fixture();await browse(f);f.nodes["bookmark-current"].click();assert.deepEqual(JSON.parse(f.storage.get("grepmesh.bookmarks")),[{host:"server-100",path:"/etc"}]);const reload=fixture({storage:f.storage});await settle();reload.nodes["bookmarks-sidebar"].children[0].children[0].click();await settle();assert.deepEqual(JSON.parse(reload.requests.find(x=>x.url==="/api/browse").options.body),{host:"server-100",path:"/etc"});
+});
+test("host index and saved per-host timing are real API values",async()=>{const f=fixture();await browse(f);assert.match(content(f.nodes["host-sidebar"]),/Ready · 32 KB index/);assert.match(content(f.nodes["host-detail"]),/32 KB/);assert.match(content(f.nodes["host-detail"]),/12 ms/);f.nodes["show-telemetry"].click();await settle();assert.match(content(f.nodes["telemetry-records"]),/needle/);assert.match(content(f.nodes["telemetry-records"]),/15 ms/);assert.equal(f.nodes["file-table"].hidden,true);});
+test("offline hosts stay visible, unknown index metrics are not invented",async()=>{const f=fixture({catalog:{hosts:[{id:"server-44",health:"offline",last_error:"Device timed out",roots:[]}]}});await settle();assert.match(content(f.nodes["host-sidebar"]),/server-44.*offline.*Device timed out/);assert.doesNotMatch(content(f.nodes["host-sidebar"]),/32 KB/);});
+test("offline host with no roots never shows another host's locations",async()=>{const f=fixture({catalog:{hosts:[{id:"server-100",health:"healthy",roots:["/etc"]},{id:"server-44",health:"offline",roots:[]}]}});await settle();assert.match(content(f.nodes["locations-sidebar"]),/etc/);f.nodes["host-sidebar"].children.find(node=>content(node).includes("server-44")).click();assert.match(content(f.nodes["locations-sidebar"]),/No configured Locations/);assert.doesNotMatch(content(f.nodes["locations-sidebar"]),/etc|server-100/);});
+test("search narrows to the current folder using the Rust SearchArgs contract",async()=>{const f=fixture();await browse(f);f.nodes.query.value="needle";f.nodes["search-form"].dispatch("submit");await settle();assert.deepEqual(JSON.parse(f.requests.find(x=>x.url==="/api/search").options.body),{query:"needle",hosts:"server-100",roots:["/etc"]});assert.equal(f.requests.filter(x=>x.url==="/api/telemetry").length,2);});
+test("late search response cannot replace a newer directory view",async()=>{let finish;const f=fixture({responses:{"/api/search":()=>new Promise(resolve=>finish=resolve)}});await browse(f);f.nodes.query.value="needle";f.nodes["search-form"].dispatch("submit");await settle();f.nodes.breadcrumbs.children.find(x=>x.textContent==="etc").click();await settle();finish({state:"complete",results:[]});await settle();assert.deepEqual(names(f),["alpha.txt","folder","zeta.txt"]);});
+test("empty views have visible instructions, not text hidden in class names",async()=>{const f=fixture();await settle();assert.match(content(f.nodes.results),/Select a Location to browse/);await browse(f);assert.match(content(f.nodes.preview),/No file selected/);assert.match(content(f.nodes.preview),/Choose a file or folder/);});
+test("full breadcrumb remains visible but ancestors outside indexed roots cannot navigate",async()=>{const f=fixture({catalog:{hosts:[{id:"server-100",roots:["/Users/operator/projects"]}]}});await browse(f);const crumbs=f.nodes.breadcrumbs.children;assert.match(content(f.nodes.breadcrumbs),/Users.*operator.*projects/);for(const name of ["/","Users","operator"]){const crumb=crumbs.find(node=>node.textContent===name);assert.equal(crumb.disabled,true);assert.match(crumb.title,/outside indexed locations/);const before=f.requests.length;crumb.click();assert.equal(f.requests.length,before);}const root=crumbs.find(node=>node.textContent==="projects");assert.equal(root.disabled,false);root.click();await settle();assert.equal(JSON.parse(f.requests.filter(x=>x.url==="/api/browse").at(-1).options.body).path,"/Users/operator/projects");});
+test("pending search is running rather than falsely unavailable, while real failures remain visible",async()=>{const f=fixture({responses:{"/api/search":{job_id:"j",state:"running",partial:true,pending_hosts:["server-100"],host_status:[{host_id:"server-44",ok:false,error:"Timed out"}]},"/api/search/status":{state:"complete",results:[]}}});await settle();f.nodes.query.value="needle";f.nodes["search-form"].dispatch("submit");await settle();assert.match(f.nodes["search-state"].className,/running/);assert.match(content(f.nodes["search-state"]),/1 host pending/);assert.doesNotMatch(content(f.nodes["search-state"]),/unavailable/);assert.match(content(f.nodes["host-failures"]),/Timed out/);await new Promise(resolve=>setTimeout(resolve,120));});
+test("search metadata drives sorting and inspector alongside bounded preview",async()=>{const f=fixture({responses:{"/api/search":{state:"complete",results:[{path:"/etc/b.txt",preview_id:"b",host_id:"server-100",size:100,modified_ms:3000,created_ms:2000},{path:"/etc/a.txt",preview_id:"a",host_id:"server-100",size:200,modified_ms:1000,created_ms:null}]},"/api/preview":{text:"Preview text"}}});await settle();f.nodes.query.value="needle";f.nodes["search-form"].dispatch("submit");await settle();f.sorts[1].click();assert.deepEqual(names(f),["b.txt","a.txt"]);assert.equal(rows(f)[0].children[1].textContent,"100 B");assert.notEqual(rows(f)[0].children[3].textContent,"—");assert.equal(rows(f)[1].children[3].textContent,"—");rows(f)[0].click();await settle();assert.match(content(f.nodes.preview),/100 B/);assert.match(content(f.nodes.preview),/Preview text/);f.sorts[2].click();assert.deepEqual(names(f),["a.txt","b.txt"]);});

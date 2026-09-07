@@ -1034,6 +1034,7 @@ mod tests {
                     context: Vec::new(),
                     text: "partial result".into(),
                     column: 1,
+                    ..Default::default()
                 }],
                 seen_results: BTreeSet::from([("A".into(), "/readable/result.txt".into(), 1)]),
                 truncated: false,

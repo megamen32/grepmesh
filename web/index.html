@@ -1,109 +1,57 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="dark" />
-    <title>GrepMesh Console</title>
-    <link rel="stylesheet" href="/ui/console.css" />
-  </head>
-  <body>
-    <main class="shell">
-      <header class="topbar">
-        <div class="brand">
-          <span class="brand-mark" aria-hidden="true">⌁</span>
-          <div>
-            <p class="eyebrow">LOCAL OPERATOR CONSOLE</p>
-            <h1>GrepMesh</h1>
-          </div>
-        </div>
-        <div class="topbar-actions">
-          <a class="quiet-button nav-link" href="/ui/settings">Settings</a>
-          <div class="connection" id="connection" role="status" aria-live="polite">
-          <span class="pulse" aria-hidden="true"></span>
-            <span>Loading catalog…</span>
-          </div>
-        </div>
-      </header>
-
-      <section class="finder" aria-label="GrepMesh finder">
-        <aside class="finder-sidebar" aria-labelledby="devices-heading">
-          <div class="sidebar-heading">
-            <p class="eyebrow">LIVE CATALOG</p>
-            <h2 id="devices-heading">Devices</h2>
-          </div>
-          <div id="host-sidebar" class="host-sidebar" aria-live="polite">
-            <p class="sidebar-empty">Loading available hosts…</p>
-          </div>
-          <section class="sidebar-section" aria-labelledby="locations-heading">
-            <div class="sidebar-section-heading">
-              <p class="eyebrow">CONFIGURED DRIVES</p>
-              <h2 id="locations-heading">Locations</h2>
-            </div>
-            <div id="locations-sidebar" class="locations-sidebar" aria-live="polite">
-              <p class="sidebar-empty">Loading configured locations…</p>
-            </div>
-          </section>
-          <button class="quiet-button sidebar-refresh" type="button" id="refresh-catalog">Refresh catalog</button>
-          <p class="sidebar-note">Select a Location to browse its immediate entries. Selected Devices and Locations also narrow search.</p>
-        </aside>
-
-        <section class="finder-browser panel" aria-labelledby="browser-heading">
-          <div class="browser-heading">
-            <div>
-              <p class="eyebrow">FINDER</p>
-              <h2 id="browser-heading">Browse</h2>
-            </div>
-            <span id="results-count">No query yet</span>
-          </div>
-
-          <form id="search-form" novalidate>
-            <label class="search-label" for="query">Text or pattern</label>
-            <div class="query-row">
-              <input id="query" name="query" type="search" autocomplete="off" placeholder="e.g. TODO, error code, or file name" required />
-              <button class="primary-button" id="search-button" type="submit"><span>Search</span><kbd>↵</kbd></button>
-            </div>
-            <p class="input-help">The request is sent only to the local GrepMesh API. Selected Devices and Locations narrow the search scope.</p>
-          </form>
-
-          <div class="search-state idle" id="search-state" role="status" aria-live="polite">
-            <span class="state-dot" aria-hidden="true"></span>
-            <span>Choose a query to begin.</span>
-          </div>
-          <div class="host-failures" id="host-failures" aria-live="polite" hidden></div>
-
-          <div class="list-header" aria-hidden="true"><span>Name</span><span>Location</span></div>
-          <div class="results finder-list" id="results" aria-live="polite">
-            <div class="empty-results"><span class="empty-icon" aria-hidden="true">⌕</span><p>Select a Location to browse its immediate entries.</p></div>
-          </div>
-        </section>
-
-        <aside class="finder-details" aria-labelledby="preview-heading">
-          <section class="panel inspector">
-            <div class="panel-heading">
-              <div><p class="eyebrow">SELECTED ITEM</p><h2 id="preview-heading">Details</h2></div>
-              <span class="safe-label">Result-bound</span>
-            </div>
-            <div id="preview" class="preview-empty" role="status" aria-live="polite">
-              <span class="empty-icon" aria-hidden="true">▧</span>
-              <p>No file selected.</p>
-              <small>Choose a root or directory to browse metadata, or a search result to inspect its bounded preview.</small>
-            </div>
-          </section>
-
-          <section class="panel backup-card" aria-labelledby="backup-heading">
-            <div class="panel-heading">
-              <div><p class="eyebrow">SEPARATE FROM LIVE SEARCH</p><h2 id="backup-heading">Backup catalog</h2></div>
-              <span class="backup-state unknown" id="backup-badge">Checking…</span>
-            </div>
-            <div id="backup-body" class="backup-body" role="status" aria-live="polite">
-              <p>Checking backup catalog availability…</p>
-              <small>This card reports catalog coverage only; it does not restore or search backup content.</small>
-            </div>
-          </section>
-        </aside>
-      </section>
-    </main>
-    <script src="/ui/console.js?v=20260820-reliability" defer></script>
-  </body>
-</html>
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="dark">
+  <title>GrepMesh — Files</title><link rel="stylesheet" href="/ui/console.css">
+</head>
+<body class="finder-app">
+<main class="finder-window">
+  <aside class="finder-sidebar" aria-label="Sidebar">
+    <div class="sidebar-brand"><span class="brand-mark">⌘</span><strong>GrepMesh</strong></div>
+    <div class="sidebar-scroll">
+      <h2 class="section-label">Devices</h2><div id="host-sidebar" class="host-sidebar"></div>
+      <h2 class="section-label">Locations</h2><div id="locations-sidebar" class="locations-sidebar"></div>
+      <h2 class="section-label">Bookmarks</h2><div id="bookmarks-sidebar" class="locations-sidebar"></div>
+    </div>
+    <div class="sidebar-footer">
+      <button id="refresh-catalog" class="icon-button" title="Refresh hosts and index status" aria-label="Refresh hosts and index status">↻</button>
+      <button id="show-telemetry" class="sidebar-link" type="button">◷ Search history</button>
+      <a href="/ui/settings" class="icon-button" title="Settings" aria-label="Settings">⚙</a>
+    </div>
+  </aside>
+  <section class="finder-browser" aria-label="Files">
+    <header class="finder-toolbar">
+      <div class="navigation-buttons"><button id="go-back" class="icon-button" aria-label="Back" title="Back" disabled>‹</button><button id="go-forward" class="icon-button" aria-label="Forward" title="Forward" disabled>›</button></div>
+      <h1 id="browser-heading">All Devices</h1>
+      <button id="bookmark-current" class="icon-button" aria-label="Bookmark current folder" title="Bookmark current folder" disabled>☆</button>
+      <button id="toggle-inspector" class="icon-button" aria-label="Toggle details" title="Toggle details">ⓘ</button>
+    </header>
+    <nav id="breadcrumbs" class="breadcrumbs" aria-label="Current path"></nav>
+    <form id="search-form" class="toolbar-search" novalidate>
+      <label class="sr-only" for="query">Search text or pattern</label><span aria-hidden="true">⌕</span>
+      <input id="query" name="query" type="search" autocomplete="off" placeholder="Search text or pattern in this location">
+      <button id="search-button" class="quiet-button" type="submit"><span>Search</span></button>
+    </form>
+    <div id="host-failures" class="host-failures" hidden></div>
+    <div class="file-table" id="file-table">
+      <div class="list-header" role="row">
+        <button type="button" data-sort="name" aria-sort="ascending">Name <span>⌃</span></button>
+        <button type="button" data-sort="size">Size <span></span></button>
+        <button type="button" data-sort="modified">Modified <span></span></button>
+        <button type="button" data-sort="created">Created <span></span></button>
+        <span>Kind</span>
+      </div>
+      <div id="results" class="results finder-list" aria-live="polite"></div>
+    </div>
+    <section id="telemetry-panel" class="telemetry-panel" hidden aria-label="Search history"><div class="history-heading"><h2>Search history</h2><button id="close-telemetry" class="quiet-button">Back to files</button></div><p id="telemetry-retention" class="muted"></p><div id="telemetry-records"></div></section>
+    <footer class="browser-status"><span id="results-count">Choose a location</span><div id="search-state" class="search-state idle" role="status"><span class="state-dot"></span><span>Ready</span></div></footer>
+  </section>
+  <aside class="finder-details" aria-label="Details">
+    <div class="inspector-toolbar">ⓘ <span>Details</span><div id="connection" class="connection" role="status"><span class="pulse"></span><span>Connecting…</span></div></div>
+    <section class="inspector"><div id="preview" class="preview-empty"><span class="file-icon folder large"></span><p>Select a file or folder</p><small>Details appear here</small></div></section>
+    <section id="host-detail" class="host-detail" aria-label="Host index"></section>
+    <details class="backup-card"><summary>Backup catalog <span id="backup-badge" class="backup-state">Checking…</span></summary><div id="backup-body" class="backup-body"></div></details>
+  </aside>
+</main>
+<script src="/ui/console.js?v=finder-20260907" defer></script>
+</body></html>

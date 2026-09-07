@@ -109,15 +109,22 @@ async fn local_console_ui_and_catalog_have_a_browser_safe_success_shape() {
     assert!(ui.contains("/api/search"));
     assert!(ui.contains("id=\"host-sidebar\""));
     assert!(ui.contains("class=\"results finder-list\""));
-    assert!(ui.contains("No file selected."));
-    assert!(ui.contains("Choose a root or directory to browse metadata"));
-    assert!(ui.contains("<script src=\"/ui/console.js?v=20260820-reliability\" defer></script>"));
+    assert!(ui.contains("Select a file or folder"));
+    assert!(ui.contains("Details appear here"));
+    assert!(ui.contains("id=\"breadcrumbs\""));
+    assert!(ui.contains("aria-label=\"Current path\""));
+    assert!(ui.contains("id=\"bookmarks-sidebar\""));
+    assert!(ui.contains("id=\"telemetry-panel\""));
+    for column in ["name", "size", "modified", "created"] {
+        assert!(ui.contains(&format!("data-sort=\"{column}\"")));
+    }
+    assert!(ui.contains("<script src=\"/ui/console.js?v=finder-20260907\" defer></script>"));
     assert!(!ui.contains("Directory browsing is not available yet."));
     assert!(ui.contains("id=\"host-failures\""));
 
     let script = client
         .get(format!(
-            "{}/ui/console.js?v=20260820-reliability",
+            "{}/ui/console.js?v=finder-20260907",
             harness.local_base
         ))
         .send()
@@ -131,6 +138,8 @@ async fn local_console_ui_and_catalog_have_a_browser_safe_success_shape() {
     assert!(script.contains("Host ${failure.host} reported an error"));
     assert!(script.contains("/api/search/status"));
     assert!(script.contains("pollSearch"));
+    assert!(script.contains("/api/host-status"));
+    assert!(script.contains("/api/telemetry"));
 
     let catalog = client
         .get(format!("{}/api/catalog", harness.local_base))

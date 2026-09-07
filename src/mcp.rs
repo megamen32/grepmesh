@@ -1628,6 +1628,7 @@ mod tests {
                 .collect(),
             text: lines[0].1.into(),
             column: 1,
+            ..Default::default()
         }
     }
 

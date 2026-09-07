@@ -8,7 +8,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Stdio,
-    time::{Duration, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, BufReader},
@@ -49,8 +49,14 @@ pub struct MatchLine {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SearchHit {
+    #[serde(default)]
+    pub size: Option<u64>,
+    #[serde(default)]
+    pub modified_ms: Option<u64>,
+    #[serde(default)]
+    pub created_ms: Option<u64>,
     pub host_id: String,
     pub path: String,
     pub line_number: usize,
@@ -610,6 +616,7 @@ impl LocalBackend {
                                 .map(|(line_number, text)| MatchLine { line_number, text })
                                 .collect(),
                             column: 0,
+                            ..Default::default()
                         }
                     }));
                     continue;
@@ -674,6 +681,7 @@ impl LocalBackend {
         }
         hits.sort_by(|a, b| a.path.cmp(&b.path).then(a.line_number.cmp(&b.line_number)));
         hits.truncate(limit);
+        self.enrich_search_metadata(&mut hits);
         Ok(SearchOutcome {
             hits,
             truncated,
@@ -772,12 +780,33 @@ impl LocalBackend {
         }
         hits.sort_by(|a, b| a.path.cmp(&b.path));
         hits.truncate(limit);
+        self.enrich_search_metadata(&mut hits);
         Ok(SearchOutcome {
             hits,
             truncated,
             partial,
             partial_error,
         })
+    }
+
+    /// Only stat returned local paths, once per file even with many matching lines.
+    fn enrich_search_metadata(&self, hits: &mut [SearchHit]) {
+        let mut metadata = BTreeMap::new();
+        for hit in hits.iter_mut().filter(|hit| hit.host_id == self.host_id) {
+            let meta = metadata
+                .entry(hit.path.clone())
+                .or_insert_with(|| fs::metadata(&hit.path).ok());
+            if let Some(meta) = meta {
+                hit.size = meta.is_file().then_some(meta.len());
+                let millis = |time: std::io::Result<SystemTime>| {
+                    time.ok()
+                        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+                };
+                hit.modified_ms = millis(meta.modified());
+                hit.created_ms = millis(meta.created());
+            }
+        }
     }
 
     pub fn read_text(
@@ -1192,6 +1221,7 @@ async fn search_hit_from_rg_line(
                 .map(|index| index + 1)
                 .unwrap_or(1),
         },
+        ..Default::default()
     }))
 }
 
@@ -1366,6 +1396,7 @@ fn path_hit_from_rg_line(
         context: Vec::new(),
         text: String::new(),
         column: 0,
+        ..Default::default()
     })
 }
 
@@ -1460,6 +1491,66 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn local_search_results_include_real_metadata_and_preserve_remote_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("needle.txt");
+        std::fs::write(&path, b"needle\n").unwrap();
+        let backend = super::LocalBackend {
+            host_id: "test".into(),
+            root: temp.path().into(),
+            root_paths: std::collections::BTreeMap::from([(
+                "local".into(),
+                vec![temp.path().into()],
+            )]),
+            limits: Default::default(),
+            exclude_globs: Vec::new(),
+            index: crate::index::IndexManager::disabled(),
+        };
+        let expected = backend.list_directory(temp.path()).unwrap().remove(0);
+        let paths = backend
+            .find_paths_bounded("needle", 5, Vec::new())
+            .await
+            .unwrap();
+        let text = backend
+            .search_text_bounded(
+                "needle",
+                5,
+                0,
+                super::SearchMode::Literal,
+                Vec::new(),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        for result in [paths, text] {
+            assert_eq!(result.hits.len(), 1);
+            let hit = &result.hits[0];
+            assert_eq!(hit.size, Some(7));
+            assert_eq!(hit.modified_ms, expected.modified_ms);
+            assert_eq!(hit.created_ms, expected.created_ms);
+            let decoded: super::SearchHit =
+                serde_json::from_value(serde_json::to_value(hit).unwrap()).unwrap();
+            assert_eq!(decoded.size, hit.size);
+        }
+        let mut remote = vec![super::SearchHit {
+            host_id: "other".into(),
+            path: path.display().to_string(),
+            size: Some(999),
+            modified_ms: Some(10),
+            created_ms: Some(3),
+            ..Default::default()
+        }];
+        backend.enrich_search_metadata(&mut remote);
+        assert_eq!(remote[0].size, Some(999));
+        assert_eq!(remote[0].created_ms, Some(3));
+        let old: super::SearchHit = serde_json::from_value(
+            serde_json::json!({"host_id":"old", "path":"/old", "line_number":0,"context":[]}),
+        )
+        .unwrap();
+        assert_eq!(old.size, None);
+        assert_eq!(old.created_ms, None);
+    }
     #[test]
     fn browse_creation_time_matches_real_filesystem_metadata() {
         let temp = tempfile::tempdir().unwrap();
