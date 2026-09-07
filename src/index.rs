@@ -635,21 +635,19 @@ impl IndexManager {
                     }
                     let changed_paths = event_counts.keys().cloned().collect::<BTreeSet<_>>();
                     if let Some(index) = persistent_state.as_ref() {
-                        let activity = reconcile_event_paths(
+                        reconcile_event_paths(
                             &changed_paths,
                             &event_counts,
                             &roots,
                             &excludes,
                             &activity_config,
                             &mut directory_activity,
+                            &state,
                             max_file_bytes,
                             stt.as_ref(),
                             ocr.as_ref(),
                             index,
                         );
-                        if let Ok(mut current) = state.write() {
-                            current.directory_activity = activity;
-                        }
                     }
                     pending = true;
                 }
@@ -853,16 +851,17 @@ fn reconcile_event_paths(
     excludes: &[String],
     activity_config: &IndexActivityConfig,
     activity: &mut BTreeMap<PathBuf, DirectoryActivityState>,
+    snapshot: &Arc<RwLock<IndexSnapshot>>,
     max_file_bytes: u64,
     stt: Option<&SttEngine>,
     ocr: Option<&OcrEngine>,
     persistent: &PersistentIndex,
-) -> Vec<IndexDirectoryActivity> {
+) {
     let matcher = match compile_excludes(excludes) {
         Ok(matcher) => matcher,
         Err(error) => {
             tracing::warn!(error = %error, "incremental index update skipped");
-            return Vec::new();
+            return;
         }
     };
     let activity_excludes = compile_excludes(&activity_config.exclude_globs).ok();
@@ -874,8 +873,75 @@ fn reconcile_event_paths(
             (root, canonical)
         })
         .collect::<Vec<_>>();
+    // Count and classify the whole batch before doing any extraction. Status
+    // remains current even if one document converter is slow.
+    for raw_path in paths {
+        let occurrences = event_counts.get(raw_path).copied().unwrap_or(1);
+        let Some((root, canonical_root)) = configured_roots
+            .iter()
+            .filter(|(_, canonical)| raw_path.starts_with(canonical))
+            .max_by_key(|(_, canonical)| canonical.components().count())
+        else {
+            continue;
+        };
+        let path = raw_path
+            .strip_prefix(canonical_root)
+            .map(|relative| root.join(relative))
+            .unwrap_or_else(|_| raw_path.clone());
+        if path.exists() && !path.is_file() {
+            continue;
+        }
+        let relative = path.strip_prefix(root).unwrap_or(&path);
+        let bucket = if path.parent() == Some(root.as_path()) {
+            root.clone()
+        } else {
+            relative
+                .components()
+                .next()
+                .map(|component| root.join(component.as_os_str()))
+                .unwrap_or_else(|| root.clone())
+        };
+        let now = unix_time_ms();
+        let changed_bytes = fs::metadata(&path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let stats = activity.entry(bucket).or_default();
+        if stats.window_started_ms == 0
+            || now.saturating_sub(stats.window_started_ms) >= activity_config.window_ms
+        {
+            stats.window_started_ms = now;
+            stats.events = 0;
+            stats.changed_bytes = 0;
+        }
+        stats.events = stats.events.saturating_add(occurrences);
+        stats.changed_bytes = stats
+            .changed_bytes
+            .saturating_add(changed_bytes.saturating_mul(occurrences));
+        stats.last_event_ms = now;
+        if stats.events >= activity_config.hot_event_threshold
+            || stats.changed_bytes >= activity_config.hot_changed_bytes_threshold
+        {
+            stats.hot_until_ms = now.saturating_add(activity_config.hot_cooldown_ms);
+        }
+        let is_hot = now < stats.hot_until_ms;
+        stats.excluded = activity_excludes
+            .as_ref()
+            .is_some_and(|matcher| excluded(&path, root, matcher));
+        stats.metadata_only = is_hot
+            || metadata_only
+                .as_ref()
+                .is_some_and(|matcher| excluded(&path, root, matcher));
+        stats.debounce_ms = if is_hot {
+            activity_config.hot_debounce_ms
+        } else {
+            2_000
+        };
+    }
+    let activity_snapshot = directory_activity_snapshot(activity);
+    if let Ok(mut current) = snapshot.write() {
+        current.directory_activity = activity_snapshot.clone();
+    }
     for path in paths {
-        let occurrences = event_counts.get(path).copied().unwrap_or(1);
         let Some((root, canonical_root)) = configured_roots
             .iter()
             .filter(|(_, canonical)| path.starts_with(canonical))
@@ -904,27 +970,7 @@ fn reconcile_event_paths(
                 .unwrap_or_else(|| root.clone())
         };
         let now = unix_time_ms();
-        let changed_bytes = fs::metadata(path)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
         let stats = activity.entry(bucket.clone()).or_default();
-        if stats.window_started_ms == 0
-            || now.saturating_sub(stats.window_started_ms) >= activity_config.window_ms
-        {
-            stats.window_started_ms = now;
-            stats.events = 0;
-            stats.changed_bytes = 0;
-        }
-        stats.events = stats.events.saturating_add(occurrences);
-        stats.changed_bytes = stats
-            .changed_bytes
-            .saturating_add(changed_bytes.saturating_mul(occurrences));
-        stats.last_event_ms = now;
-        if stats.events >= activity_config.hot_event_threshold
-            || stats.changed_bytes >= activity_config.hot_changed_bytes_threshold
-        {
-            stats.hot_until_ms = now.saturating_add(activity_config.hot_cooldown_ms);
-        }
         let is_hot = now < stats.hot_until_ms;
         let is_activity_excluded = activity_excludes
             .as_ref()
@@ -1004,6 +1050,11 @@ fn reconcile_event_paths(
             }
         }
     }
+}
+
+fn directory_activity_snapshot(
+    activity: &BTreeMap<PathBuf, DirectoryActivityState>,
+) -> Vec<IndexDirectoryActivity> {
     let now = unix_time_ms();
     activity
         .iter()
