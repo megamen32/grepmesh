@@ -446,29 +446,42 @@ impl IndexManager {
             let index_storage_path = persistent_state.as_ref().map(|index| index.path.clone());
             let (events, rx) = mpsc::channel();
             let watched_index_storage_path = index_storage_path.clone();
-            let mut watcher: RecommendedWatcher =
-                notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                    if let Ok(event) = event {
-                        let paths = event
-                            .paths
-                            .into_iter()
-                            .filter(|path| {
-                                !watched_index_storage_path
-                                    .as_ref()
-                                    .is_some_and(|index_path| {
-                                        is_index_storage_path(path, index_path)
+            let watch_roots = ordered_roots(&roots);
+            thread::spawn(move || {
+                let mut watcher: RecommendedWatcher = match notify::recommended_watcher(
+                    move |event: notify::Result<notify::Event>| {
+                        if let Ok(event) = event {
+                            let paths =
+                                event
+                                    .paths
+                                    .into_iter()
+                                    .filter(|path| {
+                                        !watched_index_storage_path.as_ref().is_some_and(
+                                            |index_path| is_index_storage_path(path, index_path),
+                                        )
                                     })
-                            })
-                            .collect::<Vec<_>>();
-                        if !paths.is_empty() {
-                            let _ = events.send(paths);
+                                    .collect::<Vec<_>>();
+                            if !paths.is_empty() {
+                                let _ = events.send(paths);
+                            }
                         }
+                    },
+                ) {
+                    Ok(watcher) => watcher,
+                    Err(error) => {
+                        tracing::error!(error = %error, "create GrepMesh watcher failed");
+                        return;
                     }
-                })
-                .expect("create GrepMesh watcher");
-            for root in ordered_roots(&roots) {
-                let _ = watcher.watch(&root, RecursiveMode::Recursive);
-            }
+                };
+                for root in watch_roots {
+                    if let Err(error) = watcher.watch(&root, RecursiveMode::Recursive) {
+                        tracing::warn!(root = %root.display(), error = %error, "watch GrepMesh root failed");
+                    }
+                }
+                loop {
+                    thread::park();
+                }
+            });
             let configured_roots = ordered_roots(&roots).into_iter().collect::<BTreeSet<_>>();
             let now_ms = unix_time_ms();
             let mut last_full_rebuild_ms = persistent_state
