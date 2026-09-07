@@ -102,7 +102,7 @@ Image OCR is enabled by default because the bilingual model set is small. GrepMe
 
 For PDFs, AnyDoc remains the fast first path. If the extracted text layer contains fewer than 64 alphanumeric characters, GrepMesh renders pages with `pdftoppm` and runs OCR instead. The default cap is 200 pages at 180 DPI and can be changed under `ocr` settings.
 
-Extracted document, OCR, and STT bodies are cached persistently by file size and modification time. Watcher reconciliations reuse unchanged content instead of rerunning AnyDoc, OCR, or remote transcription.
+Extracted document, OCR, and STT bodies are cached persistently by file size and modification time. Watcher reconciliations reuse unchanged content instead of rerunning AnyDoc, OCR, or remote transcription. Full watcher reconciliations are coalesced per host and run at most once per `limits.full_rebuild_min_interval_ms` (one hour by default); the last successful pass is stored in the host's SQLite index, so restarts do not bypass the limit. Set a different value in each host's own config when its storage or freshness requirements differ.
 
 ## Optional media transcription
 

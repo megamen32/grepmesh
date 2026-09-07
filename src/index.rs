@@ -87,10 +87,44 @@ impl PersistentIndex {
             .execute_batch(
                 "PRAGMA journal_mode=WAL;\
                  CREATE VIRTUAL TABLE IF NOT EXISTS grepmesh_documents \
-                 USING fts5(path UNINDEXED, body, tokenize='trigram');                 CREATE TABLE IF NOT EXISTS grepmesh_extraction_cache (                   path TEXT PRIMARY KEY,                   size INTEGER NOT NULL,                   mtime_ns TEXT NOT NULL,                   body TEXT NOT NULL                 );",
+                 USING fts5(path UNINDEXED, body, tokenize='trigram');                 CREATE TABLE IF NOT EXISTS grepmesh_extraction_cache (                   path TEXT PRIMARY KEY,                   size INTEGER NOT NULL,                   mtime_ns TEXT NOT NULL,                   body TEXT NOT NULL                 );                 CREATE TABLE IF NOT EXISTS grepmesh_metadata (                   key TEXT PRIMARY KEY,                   value TEXT NOT NULL                 );",
             )
             .map_err(|error| error.to_string())?;
         Ok(connection)
+    }
+
+    fn document_count(&self) -> Result<usize, String> {
+        self.connection()?
+            .query_row("SELECT count(*) FROM grepmesh_documents", [], |row| {
+                row.get(0)
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    fn last_full_rebuild_ms(&self) -> Result<Option<u64>, String> {
+        let connection = self.connection()?;
+        match connection.query_row(
+            "SELECT value FROM grepmesh_metadata WHERE key='last_full_rebuild_ms'",
+            [],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(value) => value
+                .parse::<u64>()
+                .map(Some)
+                .map_err(|error| error.to_string()),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn mark_full_rebuild_ms(&self, now_ms: u64) -> Result<(), String> {
+        self.connection()?
+            .execute(
+                "INSERT INTO grepmesh_metadata(key, value) VALUES ('last_full_rebuild_ms', ?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![now_ms.to_string()],
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
     fn replace_indexed_document(&self, document: &IndexedDocument) -> Result<(), String> {
@@ -247,7 +281,7 @@ impl PersistentIndex {
     pub fn clear(&self) -> Result<(), String> {
         let connection = self.connection()?;
         connection
-            .execute_batch("DELETE FROM grepmesh_documents; DELETE FROM grepmesh_extraction_cache;")
+            .execute_batch("DELETE FROM grepmesh_documents; DELETE FROM grepmesh_extraction_cache; DELETE FROM grepmesh_metadata;")
             .map_err(|error| error.to_string())?;
         Ok(())
     }
@@ -358,6 +392,7 @@ impl IndexManager {
         roots: BTreeMap<String, Vec<PathBuf>>,
         excludes: Vec<String>,
         max_file_bytes: u64,
+        full_rebuild_min_interval_ms: u64,
         persistent_path: Option<PathBuf>,
         stt_config: SttConfig,
         ocr_config: OcrConfig,
@@ -395,9 +430,34 @@ impl IndexManager {
             for root in ordered_roots(&roots) {
                 let _ = watcher.watch(&root, RecursiveMode::Recursive);
             }
-            let mut generation = 0;
-            let mut rebuild = || {
-                rebuild_index(
+            let configured_roots = ordered_roots(&roots).into_iter().collect::<BTreeSet<_>>();
+            let now_ms = unix_time_ms();
+            let mut last_full_rebuild_ms = persistent_state
+                .as_ref()
+                .and_then(|index| index.last_full_rebuild_ms().ok().flatten());
+            // A populated legacy database predates the admission marker. Keep
+            // serving it and schedule its first reconciliation after the host
+            // interval instead of forcing another expensive startup walk.
+            if last_full_rebuild_ms.is_none()
+                && persistent_state
+                    .as_ref()
+                    .and_then(|index| index.document_count().ok())
+                    .is_some_and(|count| count > 0)
+            {
+                if let Some(index) = persistent_state.as_ref() {
+                    if index.mark_full_rebuild_ms(now_ms).is_ok() {
+                        last_full_rebuild_ms = Some(now_ms);
+                    }
+                }
+            }
+            let rebuild_due = |last: Option<u64>| {
+                let now = unix_time_ms();
+                last.is_none_or(|last| {
+                    now < last || now.saturating_sub(last) >= full_rebuild_min_interval_ms
+                })
+            };
+            let run_rebuild = |last: &mut Option<u64>, generation: &mut u64| {
+                let succeeded = rebuild_index(
                     &roots,
                     &excludes,
                     max_file_bytes,
@@ -409,12 +469,44 @@ impl IndexManager {
                         ready_roots: &ready_root_state,
                         persistent: persistent_state.as_ref(),
                     },
-                    &mut generation,
-                )
+                    generation,
+                );
+                if succeeded {
+                    let completed_ms = unix_time_ms();
+                    if let Some(index) = persistent_state.as_ref() {
+                        let _ = index.mark_full_rebuild_ms(completed_ms);
+                    }
+                    *last = Some(completed_ms);
+                }
             };
-            rebuild();
+            let mut generation = 0;
+            if rebuild_due(last_full_rebuild_ms) || persistent_state.is_none() {
+                run_rebuild(&mut last_full_rebuild_ms, &mut generation);
+            } else {
+                if let Ok(mut ready) = ready_root_state.write() {
+                    *ready = configured_roots;
+                }
+                if let Ok(mut current) = state.write() {
+                    current.state = IndexState::Ready;
+                    current.indexed_files = persistent_state
+                        .as_ref()
+                        .and_then(|index| index.document_count().ok())
+                        .unwrap_or(0);
+                }
+            }
+            let mut pending = false;
             loop {
-                if rx.recv_timeout(Duration::from_secs(30)).is_ok() {
+                let remaining = if pending {
+                    last_full_rebuild_ms
+                        .map(|last| {
+                            let due = last.saturating_add(full_rebuild_min_interval_ms);
+                            Duration::from_millis(due.saturating_sub(unix_time_ms()).min(30_000))
+                        })
+                        .unwrap_or(Duration::from_secs(30))
+                } else {
+                    Duration::from_secs(30)
+                };
+                if rx.recv_timeout(remaining).is_ok() {
                     // Filesystems commonly emit a burst of events for one
                     // logical update. Wait for a quiet interval before the
                     // expensive reconciliation and never advertise Building
@@ -427,7 +519,11 @@ impl IndexManager {
                             break;
                         }
                     }
-                    rebuild();
+                    pending = true;
+                }
+                if pending && (persistent_state.is_none() || rebuild_due(last_full_rebuild_ms)) {
+                    run_rebuild(&mut last_full_rebuild_ms, &mut generation);
+                    pending = false;
                 }
             }
         });
@@ -600,7 +696,7 @@ fn rebuild_index(
     ocr: Option<&OcrEngine>,
     rebuild: RebuildState<'_>,
     generation: &mut u64,
-) {
+) -> bool {
     let matcher = match compile_excludes(excludes) {
         Ok(matcher) => matcher,
         Err(error) => {
@@ -609,7 +705,7 @@ fn rebuild_index(
                 current.last_error = Some(error);
                 current.generation = generation.saturating_add(1);
             }
-            return;
+            return false;
         }
     };
     let mut count = 0;
@@ -634,7 +730,7 @@ fn rebuild_index(
                     current.last_error = Some(error);
                     current.generation = generation.saturating_add(1);
                 }
-                return;
+                return false;
             }
         };
         while let Some(unit) = units.pop_front() {
@@ -659,7 +755,7 @@ fn rebuild_index(
                         current.last_error = Some(error);
                         current.generation = generation.saturating_add(1);
                     }
-                    return;
+                    return false;
                 }
             };
             if rebuild.persistent.is_none() {
@@ -679,7 +775,7 @@ fn rebuild_index(
                                 Some(format!("{}: {error}", document.path.display()));
                             current.generation = generation.saturating_add(1);
                         }
-                        return;
+                        return false;
                     }
                 }
             }
@@ -702,13 +798,22 @@ fn rebuild_index(
                 current.last_error = Some(error);
                 current.generation = generation.saturating_add(1);
             }
-            return;
+            return false;
         }
     }
     if let Ok(mut current) = rebuild.snapshot.write() {
         current.state = IndexState::Ready;
         current.last_error = None;
     }
+    true
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
 }
 
 #[cfg(test)]

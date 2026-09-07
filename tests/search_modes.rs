@@ -265,10 +265,14 @@ fn configured_index_path_receives_scanned_documents_and_reconciles_deletes() {
     let document = root.path().join("persistent.txt");
     fs::write(&document, "PERSISTENT_INDEX_TOKEN\n").unwrap();
 
+    let limits = LimitsConfig {
+        full_rebuild_min_interval_ms: 0,
+        ..Default::default()
+    };
     let backend = LocalBackend::from_config(
         "A",
         root.path(),
-        Default::default(),
+        limits,
         BTreeMap::new(),
         vec![],
         Some(db.clone()),
@@ -289,6 +293,55 @@ fn configured_index_path_receives_scanned_documents_and_reconciles_deletes() {
     assert!(PersistentIndex::open(db)
         .unwrap()
         .candidates("PERSISTENT_INDEX_TOKEN")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn watcher_events_are_coalesced_until_the_configured_full_rebuild_interval() {
+    let root = tempfile::tempdir().unwrap();
+    let db = root.path().join("grepmesh-index.sqlite");
+    fs::write(
+        root.path().join("existing.txt"),
+        "EXISTING_INTERVAL_TOKEN\n",
+    )
+    .unwrap();
+    let limits = LimitsConfig {
+        full_rebuild_min_interval_ms: 60 * 60 * 1_000,
+        ..Default::default()
+    };
+    let backend = LocalBackend::from_config(
+        "A",
+        root.path(),
+        limits,
+        BTreeMap::new(),
+        vec![],
+        Some(db.clone()),
+    );
+    wait_until_ready(&backend);
+    let generation = backend.index.status().generation;
+    let restarted = LocalBackend::from_config(
+        "A-restarted",
+        root.path(),
+        LimitsConfig {
+            full_rebuild_min_interval_ms: 60 * 60 * 1_000,
+            ..Default::default()
+        },
+        BTreeMap::new(),
+        vec![],
+        Some(db.clone()),
+    );
+    wait_until_ready(&restarted);
+    assert_eq!(restarted.index.status().generation, 0);
+
+    fs::write(root.path().join("later.txt"), "DEFERRED_INTERVAL_TOKEN\n").unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+
+    assert_eq!(backend.index.status().generation, generation);
+    assert_eq!(restarted.index.status().generation, 0);
+    assert!(PersistentIndex::open(db)
+        .unwrap()
+        .candidates("DEFERRED_INTERVAL_TOKEN")
         .unwrap()
         .is_empty());
 }

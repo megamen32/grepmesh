@@ -78,6 +78,10 @@ pub struct LimitsConfig {
     pub search_job_max_bytes: u64,
     #[serde(default = "default_search_job_store_max_bytes")]
     pub search_job_store_max_bytes: u64,
+    /// Minimum delay between automatic full index reconciliations. Watcher
+    /// events during the delay are coalesced into one later pass.
+    #[serde(default = "default_full_rebuild_min_interval_ms")]
+    pub full_rebuild_min_interval_ms: u64,
 }
 
 fn default_max_results() -> usize {
@@ -110,6 +114,9 @@ fn default_search_job_max_bytes() -> u64 {
 fn default_search_job_store_max_bytes() -> u64 {
     64 * 1024 * 1024
 }
+fn default_full_rebuild_min_interval_ms() -> u64 {
+    60 * 60 * 1_000
+}
 
 impl Default for LimitsConfig {
     fn default() -> Self {
@@ -124,6 +131,7 @@ impl Default for LimitsConfig {
             search_job_ttl_ms: default_search_job_ttl_ms(),
             search_job_max_bytes: default_search_job_max_bytes(),
             search_job_store_max_bytes: default_search_job_store_max_bytes(),
+            full_rebuild_min_interval_ms: default_full_rebuild_min_interval_ms(),
         }
     }
 }
