@@ -1469,14 +1469,8 @@ fn trigrams(value: &str) -> BTreeSet<String> {
 }
 
 fn excluded(path: &Path, root: &Path, excludes: &GlobSet) -> bool {
-    let matches = |candidate: &Path| {
-        excludes.is_match(candidate)
-            || candidate
-                .strip_prefix(root)
-                .map(|relative| excludes.is_match(relative))
-                .unwrap_or(false)
-    };
-    matches(path) || matches(&path.join(".grepmesh-directory-probe"))
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    excludes.is_match(relative) || excludes.is_match(relative.join(".grepmesh-directory-probe"))
 }
 
 #[cfg(test)]
