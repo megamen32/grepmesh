@@ -810,6 +810,9 @@ fn reconcile_event_paths(
             .map(|relative| root.join(relative))
             .unwrap_or_else(|_| path.clone());
         let path = logical_path.as_path();
+        if excluded(path, root, &matcher) {
+            continue;
+        }
         if !path.is_file() {
             if !path.exists() {
                 let _ = persistent.remove_document(path);
