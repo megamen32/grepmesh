@@ -815,7 +815,11 @@ impl LocalBackend {
         start_line: Option<usize>,
         end_line: Option<usize>,
     ) -> Result<Vec<ReadChunk>> {
-        let roots = self.selected_roots(&[])?;
+        // Search defaults may omit the primary root when named roots exist.
+        // Reading a selected result is authorized against every configured root.
+        let roots = std::iter::once(self.root.clone())
+            .chain(self.root_paths.values().flatten().cloned())
+            .collect::<Vec<_>>();
         let abs = normalize_absolute_path_any(&roots, path)?;
         let size = fs::metadata(&abs)
             .with_context(|| format!("metadata {}", abs.display()))?
@@ -1444,13 +1448,18 @@ fn normalize_absolute_path_any(roots: &[PathBuf], path: &Path) -> Result<PathBuf
     if !path.is_absolute() {
         return Err(anyhow!("path must be absolute: {}", path.display()));
     }
-    if !roots.iter().any(|root| path.starts_with(root)) {
+    let resolved = fs::canonicalize(path).with_context(|| format!("resolve {}", path.display()))?;
+    if !roots
+        .iter()
+        .filter_map(|root| fs::canonicalize(root).ok())
+        .any(|root| resolved.starts_with(root))
+    {
         return Err(anyhow!(
             "path {} is outside configured roots",
             path.display(),
         ));
     }
-    Ok(path.to_path_buf())
+    Ok(resolved)
 }
 
 fn excluded_path(path: &Path, roots: &[PathBuf], exclude_globs: &[String]) -> bool {
@@ -1491,6 +1500,54 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn preview_reads_primary_search_result_with_named_roots_and_rejects_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let primary = temp.path().join("primary");
+        let extra = temp.path().join("extra");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&extra).unwrap();
+        let path = primary.join("needle.txt");
+        std::fs::write(&path, b"needle preview\n").unwrap();
+        std::fs::write(extra.join("extra.txt"), b"extra preview\n").unwrap();
+        let outside = temp.path().join("outside.txt");
+        std::fs::write(&outside, b"outside\n").unwrap();
+        let backend = super::LocalBackend {
+            host_id: "test".into(),
+            root: primary.clone(),
+            root_paths: std::collections::BTreeMap::from([
+                ("local".into(), vec![primary.clone()]),
+                ("extra".into(), vec![extra.clone()]),
+            ]),
+            limits: Default::default(),
+            exclude_globs: Vec::new(),
+            index: crate::index::IndexManager::disabled(),
+        };
+        assert_eq!(backend.default_search_roots(), vec![extra.clone()]);
+        let found = backend
+            .find_paths_bounded("needle", 5, vec!["local".into()])
+            .await
+            .unwrap();
+        assert_eq!(found.hits.len(), 1);
+        assert!(!backend
+            .read_text(std::path::Path::new(&found.hits[0].path), None, None)
+            .unwrap()
+            .is_empty());
+        assert!(backend
+            .read_text(&extra.join("extra.txt"), None, None)
+            .is_ok());
+        assert!(backend.read_text(&outside, None, None).is_err());
+        assert!(backend
+            .read_text(&primary.join("../outside.txt"), None, None)
+            .is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, primary.join("escape.txt")).unwrap();
+            assert!(backend
+                .read_text(&primary.join("escape.txt"), None, None)
+                .is_err());
+        }
+    }
     #[tokio::test]
     async fn local_search_results_include_real_metadata_and_preserve_remote_fields() {
         let temp = tempfile::tempdir().unwrap();
