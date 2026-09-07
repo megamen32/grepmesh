@@ -33,6 +33,15 @@ pub fn default_exclude_globs() -> Vec<String> {
         "**/.nuxt/**",
         "**/coverage/**",
         "**/.cache/**",
+        "**/cache/**",
+        "**/caches/**",
+        "**/Caches/**",
+        "**/.tmp/**",
+        "**/tmp/**",
+        "**/temp/**",
+        "**/logs/**",
+        "**/log/**",
+        "**/*.log",
         "**/.cargo/registry/**",
         "**/.cargo/git/**",
         "**/.rustup/**",
@@ -82,6 +91,56 @@ pub struct LimitsConfig {
     /// events during the delay are coalesced into one later pass.
     #[serde(default = "default_full_rebuild_min_interval_ms")]
     pub full_rebuild_min_interval_ms: u64,
+    #[serde(default)]
+    pub index_activity: IndexActivityConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct IndexActivityConfig {
+    #[serde(default = "default_activity_window_ms")]
+    pub window_ms: u64,
+    #[serde(default = "default_hot_event_threshold")]
+    pub hot_event_threshold: u64,
+    #[serde(default = "default_hot_changed_bytes_threshold")]
+    pub hot_changed_bytes_threshold: u64,
+    #[serde(default = "default_hot_debounce_ms")]
+    pub hot_debounce_ms: u64,
+    #[serde(default = "default_hot_cooldown_ms")]
+    pub hot_cooldown_ms: u64,
+    #[serde(default)]
+    pub metadata_only_globs: Vec<String>,
+    #[serde(default)]
+    pub exclude_globs: Vec<String>,
+}
+
+fn default_activity_window_ms() -> u64 {
+    60_000
+}
+fn default_hot_event_threshold() -> u64 {
+    300
+}
+fn default_hot_changed_bytes_threshold() -> u64 {
+    256 * 1024 * 1024
+}
+fn default_hot_debounce_ms() -> u64 {
+    30_000
+}
+fn default_hot_cooldown_ms() -> u64 {
+    60 * 60 * 1_000
+}
+
+impl Default for IndexActivityConfig {
+    fn default() -> Self {
+        Self {
+            window_ms: default_activity_window_ms(),
+            hot_event_threshold: default_hot_event_threshold(),
+            hot_changed_bytes_threshold: default_hot_changed_bytes_threshold(),
+            hot_debounce_ms: default_hot_debounce_ms(),
+            hot_cooldown_ms: default_hot_cooldown_ms(),
+            metadata_only_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+        }
+    }
 }
 
 fn default_max_results() -> usize {
@@ -132,6 +191,7 @@ impl Default for LimitsConfig {
             search_job_max_bytes: default_search_job_max_bytes(),
             search_job_store_max_bytes: default_search_job_store_max_bytes(),
             full_rebuild_min_interval_ms: default_full_rebuild_min_interval_ms(),
+            index_activity: IndexActivityConfig::default(),
         }
     }
 }
@@ -384,7 +444,18 @@ mod tests {
     #[test]
     fn defaults_exclude_runtime_pseudo_filesystems() {
         let excludes = default_exclude_globs();
-        for pattern in ["proc/**", "sys/**", "dev/**", "run/**"] {
+        for pattern in [
+            "proc/**",
+            "sys/**",
+            "dev/**",
+            "run/**",
+            "**/.cache/**",
+            "**/logs/**",
+            "**/*.log",
+            "**/build/**",
+            "**/target/**",
+            "**/.tmp/**",
+        ] {
             assert!(excludes.contains(&pattern.to_string()), "missing {pattern}");
         }
     }

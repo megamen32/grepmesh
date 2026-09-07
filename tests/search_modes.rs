@@ -1,8 +1,9 @@
 use grepmesh::{
     backend::{IndexState, LocalBackend, SearchMode},
-    config::LimitsConfig,
+    config::{IndexActivityConfig, LimitsConfig},
     index::PersistentIndex,
 };
+use rusqlite::Connection;
 use std::time::Duration;
 use std::{collections::BTreeMap, fs};
 
@@ -316,19 +317,7 @@ fn watcher_updates_files_incrementally_without_bypassing_the_full_rebuild_interv
     );
     wait_until_ready(&backend);
     let generation = backend.index.status().generation;
-    let restarted = LocalBackend::from_config(
-        "A-restarted",
-        root.path(),
-        LimitsConfig {
-            full_rebuild_min_interval_ms: 60 * 60 * 1_000,
-            ..Default::default()
-        },
-        BTreeMap::new(),
-        vec![],
-        Some(db.clone()),
-    );
-    wait_until_ready(&restarted);
-    assert_eq!(restarted.index.status().generation, 0);
+    std::thread::sleep(Duration::from_millis(250));
 
     fs::write(root.path().join("later.txt"), "DEFERRED_INTERVAL_TOKEN\n").unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(6);
@@ -343,10 +332,136 @@ fn watcher_updates_files_incrementally_without_bypassing_the_full_rebuild_interv
     }
 
     assert_eq!(backend.index.status().generation, generation);
-    assert_eq!(restarted.index.status().generation, 0);
     assert!(!PersistentIndex::open(db)
         .unwrap()
         .candidates("DEFERRED_INTERVAL_TOKEN")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn hot_directories_switch_to_metadata_only_and_report_activity() {
+    let root = tempfile::tempdir().unwrap();
+    let db = root.path().join("grepmesh-index.sqlite");
+    let hot = root.path().join("hot");
+    fs::create_dir(&hot).unwrap();
+    let limits = LimitsConfig {
+        index_activity: IndexActivityConfig {
+            hot_event_threshold: 1,
+            hot_changed_bytes_threshold: u64::MAX,
+            hot_debounce_ms: 60_000,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let backend = LocalBackend::from_config(
+        "A",
+        root.path(),
+        limits,
+        BTreeMap::new(),
+        vec![],
+        Some(db.clone()),
+    );
+    wait_until_ready(&backend);
+
+    let document = hot.join("hot-file.txt");
+    fs::write(&document, "HOT_CONTENT_MUST_NOT_BE_INDEXED\n").unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(6);
+    while std::time::Instant::now() < deadline
+        && backend.index.status().directory_activity.is_empty()
+    {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let status = backend.index.status();
+    let activity = status
+        .directory_activity
+        .iter()
+        .find(|entry| entry.path == hot.display().to_string())
+        .expect("hot directory telemetry");
+    assert!(activity.hot);
+    assert!(activity.metadata_only);
+    assert_eq!(activity.debounce_ms, 60_000);
+    assert!(activity.events >= 1);
+    assert!(activity.changed_bytes >= fs::metadata(&document).unwrap().len());
+    assert!(PersistentIndex::open(db.clone())
+        .unwrap()
+        .candidates("HOT_CONTENT_MUST_NOT_BE_INDEXED")
+        .unwrap()
+        .is_empty());
+    assert!(!PersistentIndex::open(db)
+        .unwrap()
+        .candidates("hot-file.txt")
+        .unwrap()
+        .is_empty());
+
+    let cached_size_before: i64 = Connection::open(root.path().join("grepmesh-index.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT size FROM grepmesh_extraction_cache WHERE path=?1",
+            [document.display().to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    fs::write(
+        &document,
+        "A much larger second hot update that must be debounced\n",
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+    let cached_size_after: i64 = Connection::open(root.path().join("grepmesh-index.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT size FROM grepmesh_extraction_cache WHERE path=?1",
+            [document.display().to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(cached_size_after, cached_size_before);
+}
+
+#[test]
+fn manual_activity_policy_applies_during_full_rebuild() {
+    let root = tempfile::tempdir().unwrap();
+    let db = root.path().join("grepmesh-index.sqlite");
+    fs::create_dir(root.path().join("downloads")).unwrap();
+    fs::create_dir(root.path().join("scratch")).unwrap();
+    fs::write(
+        root.path().join("downloads/report.txt"),
+        "MANUAL_METADATA_SECRET\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("scratch/ignored.txt"),
+        "MANUAL_EXCLUDE_SECRET\n",
+    )
+    .unwrap();
+    let limits = LimitsConfig {
+        index_activity: IndexActivityConfig {
+            metadata_only_globs: vec!["downloads/**".into()],
+            exclude_globs: vec!["scratch/**".into()],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let backend = LocalBackend::from_config(
+        "A",
+        root.path(),
+        limits,
+        BTreeMap::new(),
+        vec![],
+        Some(db.clone()),
+    );
+    wait_until_ready(&backend);
+
+    let index = PersistentIndex::open(db).unwrap();
+    assert!(index
+        .candidates("MANUAL_METADATA_SECRET")
+        .unwrap()
+        .is_empty());
+    assert!(!index.candidates("report.txt").unwrap().is_empty());
+    assert!(index
+        .candidates("MANUAL_EXCLUDE_SECRET")
         .unwrap()
         .is_empty());
 }

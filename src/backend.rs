@@ -137,6 +137,8 @@ pub struct HostStatus {
     pub indexed_files: usize,
     #[serde(default)]
     pub index_last_error: Option<String>,
+    #[serde(default)]
+    pub index_directory_activity: Vec<crate::index::IndexDirectoryActivity>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,6 +263,7 @@ impl LocalBackend {
             excludes.clone(),
             limits.max_file_bytes,
             limits.full_rebuild_min_interval_ms,
+            limits.index_activity.clone(),
             None,
             crate::config::SttConfig::default(),
             crate::config::OcrConfig::default(),
@@ -313,6 +316,7 @@ impl LocalBackend {
         root_paths.insert("local".to_string(), vec![root.clone()]);
         let mut excludes = default_exclude_globs();
         excludes.extend(exclude_globs);
+        excludes.extend(limits.index_activity.exclude_globs.clone());
         excludes.sort();
         excludes.dedup();
         let index = match index_path {
@@ -321,6 +325,7 @@ impl LocalBackend {
                 excludes.clone(),
                 limits.max_file_bytes,
                 limits.full_rebuild_min_interval_ms,
+                limits.index_activity.clone(),
                 Some(index_path),
                 stt,
                 ocr,
@@ -346,6 +351,7 @@ impl LocalBackend {
             self.exclude_globs.clone(),
             self.limits.max_file_bytes,
             self.limits.full_rebuild_min_interval_ms,
+            self.limits.index_activity.clone(),
             None,
             crate::config::SttConfig::default(),
             crate::config::OcrConfig::default(),
@@ -371,6 +377,7 @@ impl LocalBackend {
             self.exclude_globs.clone(),
             self.limits.max_file_bytes,
             self.limits.full_rebuild_min_interval_ms,
+            self.limits.index_activity.clone(),
             None,
             crate::config::SttConfig::default(),
             crate::config::OcrConfig::default(),
@@ -402,6 +409,7 @@ impl LocalBackend {
             index_generation: index.generation,
             indexed_files: index.indexed_files,
             index_last_error: index.last_error,
+            index_directory_activity: index.directory_activity,
         })
     }
 

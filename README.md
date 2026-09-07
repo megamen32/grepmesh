@@ -104,6 +104,8 @@ For PDFs, AnyDoc remains the fast first path. If the extracted text layer contai
 
 Extracted document, OCR, and STT bodies are cached persistently by file size and modification time. Watcher reconciliations reuse unchanged content instead of rerunning AnyDoc, OCR, or remote transcription. Full watcher reconciliations are coalesced per host and run at most once per `limits.full_rebuild_min_interval_ms` (one hour by default); the last successful pass is stored in the host's SQLite index, so restarts do not bypass the limit. Set a different value in each host's own config when its storage or freshness requirements differ.
 
+Each host also controls hot-directory protection under `limits.index_activity`. GrepMesh counts watcher events and changed bytes per top-level directory during `window_ms`. Crossing either threshold marks that directory hot for `hot_cooldown_ms`, switches updates to filename/size/time metadata only, and suppresses repeated writes for `hot_debounce_ms`. `metadata_only_globs` and `exclude_globs` provide manual per-host policy. Cache, log, build, target, and temporary directories are excluded by default. Current counters and hot state are returned in `index_directory_activity` with host status.
+
 ## Optional media transcription
 
 Audio/video indexing is opt-in and supports two backends. `backend: "remote"` sends the media file to an OpenAI-compatible `/v1/audio/transcriptions` endpoint using a bearer token read from `api_key_env`; `backend: "auto"` or `"parakeet"` keeps transcription fully local with Parakeet-TDT-0.6B-v3 int8 via sherpa-onnx.

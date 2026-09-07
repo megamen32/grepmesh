@@ -22,7 +22,16 @@
     "peer_timeout_ms": 2000,
     "overall_timeout_ms": 5000,
     "max_file_bytes": 16777216,
-    "full_rebuild_min_interval_ms": 3600000
+    "full_rebuild_min_interval_ms": 3600000,
+    "index_activity": {
+      "window_ms": 60000,
+      "hot_event_threshold": 300,
+      "hot_changed_bytes_threshold": 268435456,
+      "hot_debounce_ms": 30000,
+      "hot_cooldown_ms": 3600000,
+      "metadata_only_globs": ["downloads/**"],
+      "exclude_globs": ["scratch/**"]
+    }
   },
   "exclude_globs": [
     "**/.git/**",

@@ -1,12 +1,13 @@
 use crate::{
     backend::IndexState,
-    config::{OcrConfig, SttConfig},
+    config::{IndexActivityConfig, OcrConfig, SttConfig},
     ocr::OcrEngine,
     stt::SttEngine,
 };
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
@@ -52,6 +53,7 @@ struct ScanContext<'a> {
     stt: Option<&'a SttEngine>,
     ocr: Option<&'a OcrEngine>,
     persistent: Option<&'a PersistentIndex>,
+    metadata_only: Option<&'a GlobSet>,
 }
 
 #[cfg(unix)]
@@ -372,6 +374,32 @@ pub struct IndexSnapshot {
     pub generation: u64,
     pub indexed_files: usize,
     pub last_error: Option<String>,
+    pub directory_activity: Vec<IndexDirectoryActivity>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IndexDirectoryActivity {
+    pub path: String,
+    pub events: u64,
+    pub changed_bytes: u64,
+    pub hot: bool,
+    pub metadata_only: bool,
+    pub excluded: bool,
+    pub debounce_ms: u64,
+    pub last_event_ms: u64,
+}
+
+#[derive(Default)]
+struct DirectoryActivityState {
+    window_started_ms: u64,
+    events: u64,
+    changed_bytes: u64,
+    hot_until_ms: u64,
+    last_indexed_ms: u64,
+    last_event_ms: u64,
+    metadata_only: bool,
+    excluded: bool,
+    debounce_ms: u64,
 }
 
 impl Default for IndexSnapshot {
@@ -382,6 +410,7 @@ impl Default for IndexSnapshot {
             indexed_files: 0,
             last_error: None,
             current_path: None,
+            directory_activity: Vec::new(),
         }
     }
 }
@@ -414,6 +443,7 @@ impl IndexManager {
         excludes: Vec<String>,
         max_file_bytes: u64,
         full_rebuild_min_interval_ms: u64,
+        activity_config: IndexActivityConfig,
         persistent_path: Option<PathBuf>,
         stt_config: SttConfig,
         ocr_config: OcrConfig,
@@ -515,6 +545,7 @@ impl IndexManager {
                     max_file_bytes,
                     stt.as_ref(),
                     ocr.as_ref(),
+                    &activity_config,
                     RebuildState {
                         snapshot: &state,
                         candidates: &candidate_state,
@@ -547,11 +578,19 @@ impl IndexManager {
                 }
             }
             let mut pending = false;
+            let mut directory_activity = BTreeMap::<PathBuf, DirectoryActivityState>::new();
             loop {
+                let activity_delay_until = directory_activity
+                    .values()
+                    .map(|stats| stats.hot_until_ms)
+                    .max()
+                    .unwrap_or(0);
                 let remaining = if pending {
                     last_full_rebuild_ms
                         .map(|last| {
-                            let due = last.saturating_add(full_rebuild_min_interval_ms);
+                            let due = last
+                                .saturating_add(full_rebuild_min_interval_ms)
+                                .max(activity_delay_until);
                             Duration::from_millis(due.saturating_sub(unix_time_ms()).min(30_000))
                         })
                         .unwrap_or(Duration::from_secs(30))
@@ -559,7 +598,7 @@ impl IndexManager {
                     Duration::from_secs(30)
                 };
                 if let Ok(paths) = rx.recv_timeout(remaining) {
-                    let mut changed_paths = paths.into_iter().collect::<BTreeSet<_>>();
+                    let mut observed_paths = paths;
                     // Filesystems commonly emit a burst of events for one
                     // logical update. Wait for a quiet interval before the
                     // expensive reconciliation and never advertise Building
@@ -569,32 +608,47 @@ impl IndexManager {
                         debounce_deadline.checked_duration_since(Instant::now())
                     {
                         match rx.recv_timeout(remaining) {
-                            Ok(paths) => changed_paths.extend(paths),
+                            Ok(paths) => observed_paths.extend(paths),
                             Err(_) => break,
                         }
                     }
-                    changed_paths.retain(|path| {
+                    observed_paths.retain(|path| {
                         !index_storage_path
                             .as_ref()
                             .is_some_and(|index_path| is_index_storage_path(path, index_path))
                     });
-                    if changed_paths.is_empty() {
+                    if observed_paths.is_empty() {
                         continue;
                     }
+                    let mut event_counts = BTreeMap::<PathBuf, u64>::new();
+                    for path in observed_paths {
+                        *event_counts.entry(path).or_default() += 1;
+                    }
+                    let changed_paths = event_counts.keys().cloned().collect::<BTreeSet<_>>();
                     if let Some(index) = persistent_state.as_ref() {
-                        reconcile_event_paths(
+                        let activity = reconcile_event_paths(
                             &changed_paths,
+                            &event_counts,
                             &roots,
                             &excludes,
+                            &activity_config,
+                            &mut directory_activity,
                             max_file_bytes,
                             stt.as_ref(),
                             ocr.as_ref(),
                             index,
                         );
+                        if let Ok(mut current) = state.write() {
+                            current.directory_activity = activity;
+                        }
                     }
                     pending = true;
                 }
-                if pending && (persistent_state.is_none() || rebuild_due(last_full_rebuild_ms)) {
+                if pending
+                    && (persistent_state.is_none()
+                        || (rebuild_due(last_full_rebuild_ms)
+                            && unix_time_ms() >= activity_delay_until))
+                {
                     run_rebuild(&mut last_full_rebuild_ms, &mut generation);
                     pending = false;
                 }
@@ -762,34 +816,48 @@ impl IndexManager {
 }
 
 fn is_index_storage_path(path: &Path, index_path: &Path) -> bool {
-    let normalized_path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let normalized_index =
-        fs::canonicalize(index_path).unwrap_or_else(|_| index_path.to_path_buf());
+    let normalize = |candidate: &Path| {
+        fs::canonicalize(candidate).unwrap_or_else(|_| {
+            candidate
+                .parent()
+                .and_then(|parent| fs::canonicalize(parent).ok())
+                .zip(candidate.file_name())
+                .map(|(parent, name)| parent.join(name))
+                .unwrap_or_else(|| candidate.to_path_buf())
+        })
+    };
+    let normalized_path = normalize(path);
+    let normalized_index = normalize(index_path);
     normalized_path == normalized_index
         || ["-wal", "-shm", "-journal"].iter().any(|suffix| {
             let mut sidecar = index_path.as_os_str().to_os_string();
             sidecar.push(suffix);
             let sidecar = PathBuf::from(sidecar);
-            normalized_path == fs::canonicalize(&sidecar).unwrap_or(sidecar)
+            normalized_path == normalize(&sidecar)
         })
 }
 
 fn reconcile_event_paths(
     paths: &BTreeSet<PathBuf>,
+    event_counts: &BTreeMap<PathBuf, u64>,
     roots: &BTreeMap<String, Vec<PathBuf>>,
     excludes: &[String],
+    activity_config: &IndexActivityConfig,
+    activity: &mut BTreeMap<PathBuf, DirectoryActivityState>,
     max_file_bytes: u64,
     stt: Option<&SttEngine>,
     ocr: Option<&OcrEngine>,
     persistent: &PersistentIndex,
-) {
+) -> Vec<IndexDirectoryActivity> {
     let matcher = match compile_excludes(excludes) {
         Ok(matcher) => matcher,
         Err(error) => {
             tracing::warn!(error = %error, "incremental index update skipped");
-            return;
+            return Vec::new();
         }
     };
+    let activity_excludes = compile_excludes(&activity_config.exclude_globs).ok();
+    let metadata_only = compile_excludes(&activity_config.metadata_only_globs).ok();
     let configured_roots = ordered_roots(roots)
         .into_iter()
         .map(|root| {
@@ -798,6 +866,7 @@ fn reconcile_event_paths(
         })
         .collect::<Vec<_>>();
     for path in paths {
+        let occurrences = event_counts.get(path).copied().unwrap_or(1);
         let Some((root, canonical_root)) = configured_roots
             .iter()
             .filter(|(_, canonical)| path.starts_with(canonical))
@@ -810,12 +879,92 @@ fn reconcile_event_paths(
             .map(|relative| root.join(relative))
             .unwrap_or_else(|_| path.clone());
         let path = logical_path.as_path();
+        // Directory metadata events are emitted for every child write. They
+        // carry no file content change and would falsely make the root hot.
+        if path.exists() && !path.is_file() {
+            continue;
+        }
+        let relative = path.strip_prefix(root).unwrap_or(path);
+        let bucket = if path.parent() == Some(root.as_path()) {
+            root.clone()
+        } else {
+            relative
+                .components()
+                .next()
+                .map(|component| root.join(component.as_os_str()))
+                .unwrap_or_else(|| root.clone())
+        };
+        let now = unix_time_ms();
+        let changed_bytes = fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let stats = activity.entry(bucket.clone()).or_default();
+        if stats.window_started_ms == 0
+            || now.saturating_sub(stats.window_started_ms) >= activity_config.window_ms
+        {
+            stats.window_started_ms = now;
+            stats.events = 0;
+            stats.changed_bytes = 0;
+        }
+        stats.events = stats.events.saturating_add(occurrences);
+        stats.changed_bytes = stats
+            .changed_bytes
+            .saturating_add(changed_bytes.saturating_mul(occurrences));
+        stats.last_event_ms = now;
+        if stats.events >= activity_config.hot_event_threshold
+            || stats.changed_bytes >= activity_config.hot_changed_bytes_threshold
+        {
+            stats.hot_until_ms = now.saturating_add(activity_config.hot_cooldown_ms);
+        }
+        let is_hot = now < stats.hot_until_ms;
+        let is_activity_excluded = activity_excludes
+            .as_ref()
+            .is_some_and(|matcher| excluded(path, root, matcher));
+        let is_metadata_only = is_hot
+            || metadata_only
+                .as_ref()
+                .is_some_and(|matcher| excluded(path, root, matcher));
+        stats.metadata_only = is_metadata_only;
+        stats.excluded = is_activity_excluded;
+        stats.debounce_ms = if is_hot {
+            activity_config.hot_debounce_ms
+        } else {
+            2_000
+        };
+        if is_activity_excluded {
+            let _ = persistent.remove_document(path);
+            continue;
+        }
         if excluded(path, root, &matcher) {
+            continue;
+        }
+        if is_hot && now.saturating_sub(stats.last_indexed_ms) < activity_config.hot_debounce_ms {
             continue;
         }
         if !path.is_file() {
             if !path.exists() {
                 let _ = persistent.remove_document(path);
+            }
+            continue;
+        }
+        if is_metadata_only {
+            if let Ok(metadata) = fs::metadata(path) {
+                let document = IndexedDocument {
+                    path: path.to_path_buf(),
+                    body: format!(
+                        "{}\npath: {}\nsize: {}\nmodified_ns: {}",
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or_default(),
+                        path.display(),
+                        metadata.len(),
+                        metadata_mtime_ns(&metadata)
+                    ),
+                    size: metadata.len(),
+                    mtime_ns: metadata_mtime_ns(&metadata),
+                };
+                let _ = persistent.replace_indexed_document(&document);
+                stats.last_indexed_ms = now;
             }
             continue;
         }
@@ -828,6 +977,7 @@ fn reconcile_event_paths(
             stt,
             ocr,
             Some(persistent),
+            metadata_only.as_ref(),
         ) {
             Ok((_, _, documents, _)) if documents.is_empty() => {
                 let _ = persistent.remove_document(path);
@@ -838,12 +988,27 @@ fn reconcile_event_paths(
                         tracing::warn!(path = %path.display(), error = %error, "incremental index update failed");
                     }
                 }
+                stats.last_indexed_ms = now;
             }
             Err(error) => {
                 tracing::warn!(path = %path.display(), error = %error, "incremental index update failed");
             }
         }
     }
+    let now = unix_time_ms();
+    activity
+        .iter()
+        .map(|(path, stats)| IndexDirectoryActivity {
+            path: path.display().to_string(),
+            events: stats.events,
+            changed_bytes: stats.changed_bytes,
+            hot: now < stats.hot_until_ms,
+            metadata_only: stats.metadata_only,
+            excluded: stats.excluded,
+            debounce_ms: stats.debounce_ms,
+            last_event_ms: stats.last_event_ms,
+        })
+        .collect()
 }
 
 fn rebuild_index(
@@ -852,6 +1017,7 @@ fn rebuild_index(
     max_file_bytes: u64,
     stt: Option<&SttEngine>,
     ocr: Option<&OcrEngine>,
+    activity_config: &IndexActivityConfig,
     rebuild: RebuildState<'_>,
     generation: &mut u64,
 ) -> bool {
@@ -866,6 +1032,7 @@ fn rebuild_index(
             return false;
         }
     };
+    let metadata_only = compile_excludes(&activity_config.metadata_only_globs).ok();
     let mut count = 0;
     let mut seen_paths = BTreeSet::new();
     if let Ok(mut current) = rebuild.snapshot.write() {
@@ -904,6 +1071,7 @@ fn rebuild_index(
                 stt,
                 ocr,
                 rebuild.persistent,
+                metadata_only.as_ref(),
             );
             let (unit_count, next, documents, children) = match result {
                 Ok(result) => result,
@@ -995,6 +1163,7 @@ fn build_root_index(
         stt: None,
         ocr: None,
         persistent: None,
+        metadata_only: None,
     };
     let count = walk(&root.to_path_buf(), &context, &mut map, &mut documents)?;
     Ok((count, map))
@@ -1009,6 +1178,7 @@ fn scan_directory_unit(
     stt: Option<&SttEngine>,
     ocr: Option<&OcrEngine>,
     persistent: Option<&PersistentIndex>,
+    metadata_only: Option<&GlobSet>,
 ) -> Result<DirectoryScan, String> {
     let root_device = device_id(
         &fs::symlink_metadata(root).map_err(|error| format!("{}: {error}", root.display()))?,
@@ -1038,6 +1208,7 @@ fn scan_directory_unit(
             stt,
             ocr,
             persistent,
+            metadata_only,
         };
         let count = walk(&unit.to_path_buf(), &context, &mut map, &mut documents)?;
         return Ok((count, map, documents, Vec::new()));
@@ -1115,6 +1286,26 @@ fn walk(
     if metadata.is_file() {
         let size = metadata.len();
         let mtime_ns = metadata_mtime_ns(&metadata);
+        if context
+            .metadata_only
+            .is_some_and(|matcher| excluded(path, context.root, matcher))
+        {
+            documents.push(IndexedDocument {
+                path: path.clone(),
+                body: format!(
+                    "{}\npath: {}\nsize: {}\nmodified_ns: {}",
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default(),
+                    path.display(),
+                    size,
+                    mtime_ns
+                ),
+                size,
+                mtime_ns,
+            });
+            return Ok(1);
+        }
         if let Some(persistent) = context.persistent {
             if let Ok(Some(body)) = persistent.cached_body(path, size, mtime_ns) {
                 if context.build_candidates {
@@ -1459,6 +1650,7 @@ mod tests {
                 0,
                 None,
                 None,
+                &IndexActivityConfig::default(),
                 RebuildState {
                     snapshot: &snapshot,
                     candidates: &candidates,
