@@ -312,6 +312,7 @@ impl PersistentIndex {
 
 #[derive(Clone, Debug)]
 pub struct IndexSnapshot {
+    pub current_path: Option<String>,
     pub state: IndexState,
     pub generation: u64,
     pub indexed_files: usize,
@@ -325,6 +326,7 @@ impl Default for IndexSnapshot {
             generation: 0,
             indexed_files: 0,
             last_error: None,
+            current_path: None,
         }
     }
 }
@@ -439,17 +441,39 @@ impl IndexManager {
     }
 
     pub fn status(&self) -> IndexSnapshot {
-        self.snapshot
+        let mut snapshot = self
+            .snapshot
             .read()
             .map(|s| s.clone())
             .unwrap_or(IndexSnapshot {
                 state: IndexState::Degraded,
                 ..Default::default()
-            })
+            });
+        if snapshot.state != IndexState::Building {
+            snapshot.current_path = None;
+        }
+        snapshot
     }
 
     pub fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// Only three metadata reads; polling never opens SQLite or walks roots.
+    pub fn database_bytes(&self) -> Option<u64> {
+        let index = self.persistent.as_ref()?;
+        Some(
+            ["", "-wal", "-shm"]
+                .iter()
+                .map(|suffix| {
+                    let mut path = index.path.as_os_str().to_os_string();
+                    path.push(suffix);
+                    fs::metadata(PathBuf::from(path))
+                        .map(|m| m.len())
+                        .unwrap_or(0)
+                })
+                .sum(),
+        )
     }
 
     pub fn search_text_hits(
@@ -614,6 +638,9 @@ fn rebuild_index(
             }
         };
         while let Some(unit) = units.pop_front() {
+            if let Ok(mut current) = rebuild.snapshot.write() {
+                current.current_path = Some(unit.display().to_string());
+            }
             let result = scan_directory_unit(
                 &unit,
                 &root,
@@ -1000,6 +1027,21 @@ fn excluded(path: &Path, root: &Path, excludes: &GlobSet) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn database_size_includes_sidecars_without_opening_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        std::fs::write(&path, [0u8; 11]).unwrap();
+        std::fs::write(dir.path().join("index.sqlite-wal"), [0u8; 7]).unwrap();
+        std::fs::write(dir.path().join("index.sqlite-shm"), [0u8; 3]).unwrap();
+        let mut manager = super::IndexManager::disabled();
+        manager.persistent = Some(super::PersistentIndex { path });
+        assert_eq!(manager.database_bytes(), Some(21));
+        std::fs::remove_file(dir.path().join("index.sqlite-wal")).unwrap();
+        assert_eq!(manager.database_bytes(), Some(14));
+        manager.snapshot.write().unwrap().current_path = Some("/stale".into());
+        assert_eq!(manager.status().current_path, None);
+    }
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 

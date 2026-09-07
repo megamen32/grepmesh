@@ -107,10 +107,18 @@ pub struct DirectoryEntry {
     pub kind: String,
     pub size: Option<u64>,
     pub modified_ms: Option<u64>,
+    #[serde(default)]
+    pub created_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostStatus {
+    #[serde(default)]
+    pub roots: Vec<String>,
+    #[serde(default)]
+    pub index_current_path: Option<String>,
+    #[serde(default)]
+    pub index_db_bytes: Option<u64>,
     pub host_id: String,
     pub root: String,
     pub backend: String,
@@ -363,6 +371,14 @@ impl LocalBackend {
     pub fn status(&self) -> Result<HostStatus> {
         let index = self.index.status();
         Ok(HostStatus {
+            roots: self
+                .root_paths
+                .values()
+                .flatten()
+                .map(|p| p.display().to_string())
+                .collect(),
+            index_current_path: index.current_path,
+            index_db_bytes: self.index.database_bytes(),
             host_id: self.host_id.clone(),
             root: self.root.display().to_string(),
             backend: if self.index.is_enabled() {
@@ -451,6 +467,11 @@ impl LocalBackend {
                 kind: kind.to_string(),
                 size: metadata.is_file().then_some(metadata.len()),
                 modified_ms,
+                created_ms: metadata
+                    .created()
+                    .ok()
+                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                    .and_then(|duration| u64::try_from(duration.as_millis()).ok()),
             });
         }
         entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1439,6 +1460,42 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn browse_creation_time_matches_real_filesystem_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("file.txt");
+        std::fs::write(&path, b"hello").unwrap();
+        let backend = super::LocalBackend {
+            host_id: "test".into(),
+            root: temp.path().into(),
+            root_paths: std::collections::BTreeMap::from([(
+                "local".into(),
+                vec![temp.path().into()],
+            )]),
+            limits: Default::default(),
+            exclude_globs: Vec::new(),
+            index: crate::index::IndexManager::disabled(),
+        };
+        let entries = backend.list_directory(temp.path()).unwrap();
+        let expected = std::fs::metadata(&path)
+            .unwrap()
+            .created()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|duration| u64::try_from(duration.as_millis()).ok());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].created_ms, expected);
+        assert_eq!(entries[0].size, Some(5));
+    }
+    #[test]
+    fn older_directory_metadata_has_unknown_created_date() {
+        let entry: super::DirectoryEntry = serde_json::from_value(serde_json::json!({
+            "name":"old.txt", "path":"/old.txt", "kind":"file", "size":3, "modified_ms":42
+        }))
+        .unwrap();
+        assert_eq!(entry.created_ms, None);
+        assert_eq!(entry.modified_ms, Some(42));
+    }
     use super::{non_readable_traversal_diagnostic, permission_only_traversal_diagnostic};
 
     #[test]

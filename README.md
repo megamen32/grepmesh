@@ -43,6 +43,29 @@ for the checked-in installer and release checks.
 2. Add that URL to your MCP client using the exact [OpenCode, Codex, or Hermes configuration](docs/CLIENTS.md).
 3. Ask the client to search; GrepMesh indexes the configured roots locally and searches them immediately. To search more machines, install it on each node; `hosts: "*"` fans the same query across every reachable node without centralizing the documents.
 
+## Browse in the local console
+
+Open `http://127.0.0.1:9419/ui/` in a browser on the machine running GrepMesh.
+The console is available only on its loopback listener. Its Finder-style list
+shows configured hosts and roots, with bookmarks stored in your browser.
+The visible path segments navigate between folders; column headings sort by
+name, size, modification date, or creation date. Unsupported creation dates
+remain empty rather than being substituted with modification dates. Directory
+sizes are not recursively calculated.
+
+Host information includes indexing state, configured roots, the current scan
+directory when available, and the combined SQLite database/WAL/SHM size. Older
+peers may not provide all of these fields. Refreshing status does not rescan
+roots or write telemetry.
+
+Search history records the query, completion state, overall duration and each
+host's duration and result count. It is stored privately in
+`.grepmesh-jobs/telemetry.json` under the configured primary root, including
+failed searches, and survives restarts. History is bounded to 500 completed
+searches, 30 days, and 2 MiB; query text is capped at 512 characters. Only search
+completion writes history. The loopback APIs are `GET /api/host-status` and
+`GET /api/telemetry`; browsing continues to use `POST /api/browse`.
+
 ## Discover peers through GPTAdmin
 
 Set `gptadmin_topology_url` to your Hub's `/mcp-relay/grepmesh` URL and

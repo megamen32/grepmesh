@@ -19,11 +19,46 @@ const MAX_CURSORS_PER_JOB: usize = 256;
 const DEFAULT_PAGE_SIZE: usize = 32;
 const MAX_PAGE_SIZE: usize = 64;
 const NEXT_POLL_AFTER_MS: u64 = 30_000;
+const MAX_TELEMETRY_RECORDS: usize = 500;
+const MAX_TELEMETRY_BYTES: usize = 2 * 1024 * 1024;
+const TELEMETRY_MAX_AGE_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+#[derive(Clone, Serialize, Deserialize)]
+struct HostTiming {
+    host_id: String,
+    duration_ms: u64,
+    status: String,
+    result_count: usize,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct SearchTelemetry {
+    job_id: String,
+    query: String,
+    started_ms: u64,
+    finished_ms: u64,
+    duration_ms: u64,
+    status: String,
+    result_count: usize,
+    host_timings: Vec<HostTiming>,
+}
+
+struct PendingTelemetry {
+    started: Instant,
+    record: SearchTelemetry,
+}
+
+#[derive(Default)]
+struct TelemetryStore {
+    records: Vec<SearchTelemetry>,
+    pending: BTreeMap<String, PendingTelemetry>,
+}
 
 #[derive(Clone)]
 pub struct SearchJobs {
     inner: Arc<Mutex<BTreeMap<String, SearchJob>>>,
     persistence: Option<Arc<JobPersistence>>,
+    telemetry: Arc<Mutex<TelemetryStore>>,
 }
 
 struct JobPersistence {
@@ -68,6 +103,7 @@ impl Default for SearchJobs {
         Self {
             inner: Arc::new(Mutex::new(BTreeMap::new())),
             persistence: None,
+            telemetry: Arc::new(Mutex::new(TelemetryStore::default())),
         }
     }
 }
@@ -79,8 +115,31 @@ impl SearchJobs {
             anyhow::anyhow!("create private search job store {}: {error}", dir.display())
         })?;
         set_private_dir_permissions(&dir)?;
+        let history_path = dir.join("telemetry.json");
+        let read_history = || -> Result<Vec<SearchTelemetry>> {
+            if !history_path.exists() {
+                return Ok(Vec::new());
+            }
+            anyhow::ensure!(
+                fs::metadata(&history_path)?.len() <= MAX_TELEMETRY_BYTES as u64,
+                "search telemetry exceeds maximum size"
+            );
+            Ok(serde_json::from_slice::<Vec<SearchTelemetry>>(&fs::read(
+                &history_path,
+            )?)?)
+        };
+        let records = read_history().unwrap_or_else(|_| {
+            eprintln!("Ignoring unavailable or invalid optional search telemetry history");
+            Vec::new()
+        });
+        let mut telemetry = TelemetryStore {
+            records,
+            pending: BTreeMap::new(),
+        };
+        trim_telemetry(&mut telemetry.records)?;
         Ok(Self {
             inner: Arc::new(Mutex::new(BTreeMap::new())),
+            telemetry: Arc::new(Mutex::new(telemetry)),
             persistence: Some(Arc::new(JobPersistence {
                 dir,
                 ttl_ms: limits.search_job_ttl_ms.max(1_000),
@@ -91,6 +150,8 @@ impl SearchJobs {
     }
 
     pub fn start(&self, service: MeshService, args: SearchArgs) -> Result<String> {
+        let started = Instant::now();
+        let started_ms = now_ms();
         let job_id = fresh_handle("job")?;
         let targets = service.resolve_search_hosts(&args)?;
         let limit = args
@@ -123,6 +184,43 @@ impl SearchJobs {
             self.persist(&job_id, jobs.get_mut(&job_id).expect("inserted job"))?;
         }
 
+        {
+            let mut history = self
+                .telemetry
+                .lock()
+                .map_err(|_| anyhow::anyhow!("telemetry lock poisoned"))?;
+            history.pending.retain(|_, pending| {
+                pending.started.elapsed().as_millis() < TELEMETRY_MAX_AGE_MS as u128
+            });
+            while history.pending.len() >= MAX_JOBS {
+                let oldest = history
+                    .pending
+                    .iter()
+                    .min_by_key(|(_, p)| p.started)
+                    .map(|(id, _)| id.clone())
+                    .expect("nonempty pending history");
+                history.pending.remove(&oldest);
+            }
+            history.pending.insert(
+                job_id.clone(),
+                PendingTelemetry {
+                    started,
+                    record: SearchTelemetry {
+                        job_id: job_id.clone(),
+                        query: args.query.chars().take(512).collect(),
+                        started_ms,
+                        finished_ms: 0,
+                        duration_ms: 0,
+                        status: "running".into(),
+                        result_count: 0,
+                        host_timings: Vec::new(),
+                    },
+                },
+            );
+        }
+        if targets.is_empty() {
+            self.complete_telemetry(&job_id, None, true, 0, "complete")?;
+        }
         for target in targets {
             let jobs = self.clone();
             let completed_job_id = job_id.clone();
@@ -136,6 +234,7 @@ impl SearchJobs {
             host_args.hop_count = None;
             host_args.verbose = true;
             tokio::spawn(async move {
+                let host_started = Instant::now();
                 let timeout = Duration::from_millis(service.local.limits.search_job_timeout_ms);
                 let outcome = tokio::time::timeout(
                     timeout,
@@ -144,6 +243,41 @@ impl SearchJobs {
                 .await
                 .map_err(|_| anyhow::anyhow!("search job deadline exceeded"))
                 .and_then(|result| result);
+                let timing = HostTiming {
+                    host_id: target.clone(),
+                    duration_ms: host_started.elapsed().as_millis() as u64,
+                    status: match &outcome {
+                        Ok(result)
+                            if result
+                                .data
+                                .get("host_status")
+                                .and_then(Value::as_array)
+                                .is_some_and(|statuses| {
+                                    !statuses.is_empty()
+                                        && statuses.iter().all(|s| {
+                                            s.get("state").and_then(Value::as_str) == Some("failed")
+                                        })
+                                }) =>
+                        {
+                            "failed"
+                        }
+                        Ok(result)
+                            if result.data.get("partial").and_then(Value::as_bool)
+                                == Some(true) =>
+                        {
+                            "partial"
+                        }
+                        Ok(_) => "ok",
+                        Err(_) => "failed",
+                    }
+                    .into(),
+                    result_count: outcome
+                        .as_ref()
+                        .ok()
+                        .and_then(|r| r.data.get("results"))
+                        .and_then(Value::as_array)
+                        .map_or(0, Vec::len),
+                };
                 let job_store = jobs.clone();
                 if let Ok(mut entries) = job_store.inner.lock() {
                     let Some(job) = entries.get_mut(&completed_job_id) else {
@@ -164,6 +298,31 @@ impl SearchJobs {
                             Some(format!("search job durability failure: {error}"));
                         job.pending_hosts.clear();
                     }
+                    let failed = job.durability_error.is_some()
+                        || (!job.host_status.is_empty()
+                            && job
+                                .host_status
+                                .values()
+                                .all(|s| s.state == Some(HostSearchState::Failed)));
+                    let partial = job
+                        .host_status
+                        .values()
+                        .any(|s| s.state != Some(HostSearchState::Ok));
+                    if let Err(error) = job_store.complete_telemetry(
+                        &completed_job_id,
+                        Some(timing),
+                        job.pending_hosts.is_empty(),
+                        job.results.len(),
+                        if failed {
+                            "failed"
+                        } else if partial {
+                            "partial"
+                        } else {
+                            "complete"
+                        },
+                    ) {
+                        eprintln!("search telemetry persistence failed: {error}");
+                    }
                 };
             });
         }
@@ -178,6 +337,62 @@ impl SearchJobs {
             }
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
+    }
+
+    /// Bounded private history, written only when a search completes, never on polling.
+    pub fn telemetry(&self) -> Result<Value> {
+        let history = self
+            .telemetry
+            .lock()
+            .map_err(|_| anyhow::anyhow!("telemetry lock poisoned"))?;
+        let records = history
+            .records
+            .iter()
+            .rev()
+            .filter(|record| now_ms().saturating_sub(record.finished_ms) < TELEMETRY_MAX_AGE_MS)
+            .collect::<Vec<_>>();
+        Ok(
+            json!({"records": records, "retention": {"max_records": MAX_TELEMETRY_RECORDS, "max_age_days": 30}}),
+        )
+    }
+
+    fn complete_telemetry(
+        &self,
+        job_id: &str,
+        timing: Option<HostTiming>,
+        complete: bool,
+        result_count: usize,
+        status: &str,
+    ) -> Result<()> {
+        let mut history = self
+            .telemetry
+            .lock()
+            .map_err(|_| anyhow::anyhow!("telemetry lock poisoned"))?;
+        let Some(pending) = history.pending.get_mut(job_id) else {
+            return Ok(());
+        };
+        if let Some(timing) = timing {
+            pending.record.host_timings.push(timing);
+        }
+        if !complete {
+            return Ok(());
+        }
+        let mut pending = history.pending.remove(job_id).expect("pending telemetry");
+        pending.record.duration_ms = pending.started.elapsed().as_millis() as u64;
+        pending.record.finished_ms = now_ms();
+        pending.record.result_count = result_count;
+        pending.record.status = status.into();
+        history.records.push(pending.record);
+        trim_telemetry(&mut history.records)?;
+        if let Some(store) = &self.persistence {
+            let path = store.dir.join("telemetry.json");
+            let temp = store
+                .dir
+                .join(format!(".telemetry-{}.tmp", fresh_handle("write")?));
+            write_private_file(&temp, &serde_json::to_vec(&history.records)?)?;
+            fs::rename(temp, path)?;
+        }
+        Ok(())
     }
 
     pub fn is_verbose(&self, job_id: &str) -> Result<bool> {
@@ -441,6 +656,9 @@ impl SearchJobs {
         };
         for entry in fs::read_dir(&store.dir)? {
             let path = entry?.path();
+            if !is_job_artifact(&path) {
+                continue;
+            }
             if path.extension().and_then(|part| part.to_str()) != Some("json") {
                 continue;
             }
@@ -463,6 +681,9 @@ impl SearchJobs {
             .filter_map(|entry| entry.ok())
             .filter_map(|entry| {
                 let path = entry.path();
+                if !is_job_artifact(&path) {
+                    return None;
+                }
                 let bytes = fs::read(&path).ok()?;
                 let record = serde_json::from_slice::<PersistedSearchJob>(&bytes).ok()?;
                 Some((record.created_ms, path, bytes.len() as u64))
@@ -529,6 +750,24 @@ fn artifact_path(store: &JobPersistence, job_id: &str) -> Result<PathBuf> {
     Ok(store.dir.join(format!("{job_id}.json")))
 }
 
+fn trim_telemetry(records: &mut Vec<SearchTelemetry>) -> Result<()> {
+    let now = now_ms();
+    records.retain(|r| now.saturating_sub(r.finished_ms) < TELEMETRY_MAX_AGE_MS);
+    if records.len() > MAX_TELEMETRY_RECORDS {
+        records.drain(..records.len() - MAX_TELEMETRY_RECORDS);
+    }
+    while serde_json::to_vec(records)?.len() > MAX_TELEMETRY_BYTES {
+        records.remove(0);
+    }
+    Ok(())
+}
+
+fn is_job_artifact(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("job-") && name.ends_with(".json"))
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -539,6 +778,126 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn broken_optional_history_cannot_prevent_search_startup() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join(".grepmesh-jobs");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("telemetry.json");
+        for bytes in [
+            b"invalid JSON".to_vec(),
+            vec![b' '; MAX_TELEMETRY_BYTES + 1],
+        ] {
+            fs::write(&path, &bytes).unwrap();
+            let jobs =
+                SearchJobs::persistent(temp.path().into(), &LimitsConfig::default()).unwrap();
+            assert!(jobs.telemetry().unwrap()["records"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            jobs.cleanup_artifacts(now_ms(), 1).unwrap();
+            jobs.enforce_store_budget().unwrap();
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn completed_telemetry_survives_restart_and_polling_does_not_rewrite() {
+        let temp = tempfile::tempdir().unwrap();
+        let jobs = SearchJobs::persistent(temp.path().into(), &LimitsConfig::default()).unwrap();
+        jobs.telemetry.lock().unwrap().pending.insert(
+            "job-telemetry".into(),
+            PendingTelemetry {
+                started: Instant::now() - Duration::from_millis(30),
+                record: SearchTelemetry {
+                    job_id: "job-telemetry".into(),
+                    query: "needle".into(),
+                    started_ms: now_ms() - 30,
+                    finished_ms: 0,
+                    duration_ms: 0,
+                    status: "running".into(),
+                    result_count: 0,
+                    host_timings: Vec::new(),
+                },
+            },
+        );
+        jobs.complete_telemetry(
+            "job-telemetry",
+            Some(HostTiming {
+                host_id: "first".into(),
+                duration_ms: 10,
+                status: "ok".into(),
+                result_count: 2,
+            }),
+            false,
+            2,
+            "complete",
+        )
+        .unwrap();
+        let path = temp.path().join(".grepmesh-jobs/telemetry.json");
+        assert!(
+            !path.exists(),
+            "partial host completion must not write history"
+        );
+        jobs.complete_telemetry(
+            "job-telemetry",
+            Some(HostTiming {
+                host_id: "second".into(),
+                duration_ms: 25,
+                status: "failed".into(),
+                result_count: 0,
+            }),
+            true,
+            2,
+            "partial",
+        )
+        .unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        let restored =
+            SearchJobs::persistent(temp.path().into(), &LimitsConfig::default()).unwrap();
+        for _ in 0..4 {
+            assert_eq!(
+                restored.telemetry().unwrap()["records"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        assert_eq!(modified, fs::metadata(&path).unwrap().modified().unwrap());
+        let data = restored.telemetry().unwrap();
+        let record = &data["records"][0];
+        assert_eq!(record["query"], "needle");
+        assert_eq!(record["status"], "partial");
+        assert_eq!(record["result_count"], 2);
+        assert!(record["duration_ms"].as_u64().unwrap() >= 30);
+        assert_eq!(record["host_timings"][1]["duration_ms"], 25);
+        assert_eq!(record["host_timings"][1]["status"], "failed");
+    }
+
+    #[test]
+    fn telemetry_retention_bounds_age_count_and_bytes() {
+        let make = |finished_ms| SearchTelemetry {
+            job_id: "job-retention".into(),
+            query: "q".repeat(4096),
+            started_ms: finished_ms,
+            finished_ms,
+            duration_ms: 1,
+            status: "failed".into(),
+            result_count: 0,
+            host_timings: Vec::new(),
+        };
+        let mut records = vec![make(now_ms() - TELEMETRY_MAX_AGE_MS - 1)];
+        records.extend((0..510).map(|_| make(now_ms())));
+        trim_telemetry(&mut records).unwrap();
+        assert!(records.len() <= MAX_TELEMETRY_RECORDS);
+        assert!(serde_json::to_vec(&records).unwrap().len() <= MAX_TELEMETRY_BYTES);
+        assert!(records
+            .iter()
+            .all(|r| now_ms() - r.finished_ms < TELEMETRY_MAX_AGE_MS));
+    }
 
     #[test]
     fn cursor_bookkeeping_is_bounded_and_artifacts_expire() {

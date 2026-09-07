@@ -8,7 +8,9 @@ use crate::{
     backup_catalog::{read_fixture_availability, BackupCatalogConfig},
     config::{AppConfig, SttConfig},
     jobs::SearchJobs,
-    mcp::{ListDirectoryArgs, ListLocationsArgs, MeshService, ReadTextArgs, SearchArgs},
+    mcp::{
+        ListDirectoryArgs, ListLocationsArgs, MeshService, ReadTextArgs, SearchArgs, StatusArgs,
+    },
 };
 use axum::{
     extract::State,
@@ -76,6 +78,8 @@ pub fn router(
         .route("/ui/settings.js", get(settings_script))
         .route("/api/settings", get(settings).post(save_settings))
         .route("/api/catalog", get(catalog))
+        .route("/api/host-status", get(host_status))
+        .route("/api/telemetry", get(telemetry))
         .route("/api/browse", post(browse))
         .route("/api/search", post(search))
         .route("/api/search/status", post(search_status))
@@ -314,6 +318,29 @@ async fn search(State(state): State<ConsoleState>, Json(mut args): Json<SearchAr
             Err(err) => bad_request(err.to_string()),
         },
         Err(err) => bad_request(err.to_string()),
+    }
+}
+
+async fn host_status(State(state): State<ConsoleState>) -> Response {
+    match state
+        .service
+        .call_status(StatusArgs {
+            hosts: None,
+            request_id: None,
+            origin_host: None,
+            hop_count: None,
+        })
+        .await
+    {
+        Ok(result) => Json(result.data).into_response(),
+        Err(error) => bad_request(error.to_string()),
+    }
+}
+
+async fn telemetry(State(state): State<ConsoleState>) -> Response {
+    match state.jobs.telemetry() {
+        Ok(data) => Json(data).into_response(),
+        Err(error) => bad_request(error.to_string()),
     }
 }
 
