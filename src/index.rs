@@ -248,6 +248,27 @@ impl PersistentIndex {
         Ok(())
     }
 
+    fn remove_document(&self, path: &Path) -> Result<(), String> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        let path = path.display().to_string();
+        transaction
+            .execute(
+                "DELETE FROM grepmesh_documents WHERE path=?1",
+                params![path.clone()],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM grepmesh_extraction_cache WHERE path=?1",
+                params![path],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())
+    }
+
     fn backfill_cache_from_fts(&self) -> Result<(), String> {
         let mut connection = self.connection()?;
         let existing = {
@@ -422,11 +443,29 @@ impl IndexManager {
         let stt = SttEngine::new(stt_config);
         let ocr = OcrEngine::new(ocr_config);
         thread::spawn(move || {
+            let index_storage_path = persistent_state.as_ref().map(|index| index.path.clone());
             let (events, rx) = mpsc::channel();
-            let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |_| {
-                let _ = events.send(());
-            })
-            .expect("create GrepMesh watcher");
+            let watched_index_storage_path = index_storage_path.clone();
+            let mut watcher: RecommendedWatcher =
+                notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                    if let Ok(event) = event {
+                        let paths = event
+                            .paths
+                            .into_iter()
+                            .filter(|path| {
+                                !watched_index_storage_path
+                                    .as_ref()
+                                    .is_some_and(|index_path| {
+                                        is_index_storage_path(path, index_path)
+                                    })
+                            })
+                            .collect::<Vec<_>>();
+                        if !paths.is_empty() {
+                            let _ = events.send(paths);
+                        }
+                    }
+                })
+                .expect("create GrepMesh watcher");
             for root in ordered_roots(&roots) {
                 let _ = watcher.watch(&root, RecursiveMode::Recursive);
             }
@@ -506,7 +545,8 @@ impl IndexManager {
                 } else {
                     Duration::from_secs(30)
                 };
-                if rx.recv_timeout(remaining).is_ok() {
+                if let Ok(paths) = rx.recv_timeout(remaining) {
+                    let mut changed_paths = paths.into_iter().collect::<BTreeSet<_>>();
                     // Filesystems commonly emit a burst of events for one
                     // logical update. Wait for a quiet interval before the
                     // expensive reconciliation and never advertise Building
@@ -515,9 +555,29 @@ impl IndexManager {
                     while let Some(remaining) =
                         debounce_deadline.checked_duration_since(Instant::now())
                     {
-                        if rx.recv_timeout(remaining).is_err() {
-                            break;
+                        match rx.recv_timeout(remaining) {
+                            Ok(paths) => changed_paths.extend(paths),
+                            Err(_) => break,
                         }
+                    }
+                    changed_paths.retain(|path| {
+                        !index_storage_path
+                            .as_ref()
+                            .is_some_and(|index_path| is_index_storage_path(path, index_path))
+                    });
+                    if changed_paths.is_empty() {
+                        continue;
+                    }
+                    if let Some(index) = persistent_state.as_ref() {
+                        reconcile_event_paths(
+                            &changed_paths,
+                            &roots,
+                            &excludes,
+                            max_file_bytes,
+                            stt.as_ref(),
+                            ocr.as_ref(),
+                            index,
+                        );
                     }
                     pending = true;
                 }
@@ -685,6 +745,88 @@ impl IndexManager {
             .filter(|path| path.starts_with(root))
             .collect();
         Some(result)
+    }
+}
+
+fn is_index_storage_path(path: &Path, index_path: &Path) -> bool {
+    let normalized_path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let normalized_index =
+        fs::canonicalize(index_path).unwrap_or_else(|_| index_path.to_path_buf());
+    normalized_path == normalized_index
+        || ["-wal", "-shm", "-journal"].iter().any(|suffix| {
+            let mut sidecar = index_path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            let sidecar = PathBuf::from(sidecar);
+            normalized_path == fs::canonicalize(&sidecar).unwrap_or(sidecar)
+        })
+}
+
+fn reconcile_event_paths(
+    paths: &BTreeSet<PathBuf>,
+    roots: &BTreeMap<String, Vec<PathBuf>>,
+    excludes: &[String],
+    max_file_bytes: u64,
+    stt: Option<&SttEngine>,
+    ocr: Option<&OcrEngine>,
+    persistent: &PersistentIndex,
+) {
+    let matcher = match compile_excludes(excludes) {
+        Ok(matcher) => matcher,
+        Err(error) => {
+            tracing::warn!(error = %error, "incremental index update skipped");
+            return;
+        }
+    };
+    let configured_roots = ordered_roots(roots)
+        .into_iter()
+        .map(|root| {
+            let canonical = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+            (root, canonical)
+        })
+        .collect::<Vec<_>>();
+    for path in paths {
+        let Some((root, canonical_root)) = configured_roots
+            .iter()
+            .filter(|(_, canonical)| path.starts_with(canonical))
+            .max_by_key(|(_, canonical)| canonical.components().count())
+        else {
+            continue;
+        };
+        let logical_path = path
+            .strip_prefix(canonical_root)
+            .map(|relative| root.join(relative))
+            .unwrap_or_else(|_| path.clone());
+        let path = logical_path.as_path();
+        if !path.is_file() {
+            if !path.exists() {
+                let _ = persistent.remove_document(path);
+            }
+            continue;
+        }
+        match scan_directory_unit(
+            path,
+            root,
+            &matcher,
+            max_file_bytes,
+            false,
+            stt,
+            ocr,
+            Some(persistent),
+        ) {
+            Ok((_, _, documents, _)) if documents.is_empty() => {
+                let _ = persistent.remove_document(path);
+            }
+            Ok((_, _, documents, _)) => {
+                for document in documents {
+                    if let Err(error) = persistent.replace_indexed_document(&document) {
+                        tracing::warn!(path = %path.display(), error = %error, "incremental index update failed");
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(path = %path.display(), error = %error, "incremental index update failed");
+            }
+        }
     }
 }
 

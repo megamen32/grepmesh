@@ -265,14 +265,10 @@ fn configured_index_path_receives_scanned_documents_and_reconciles_deletes() {
     let document = root.path().join("persistent.txt");
     fs::write(&document, "PERSISTENT_INDEX_TOKEN\n").unwrap();
 
-    let limits = LimitsConfig {
-        full_rebuild_min_interval_ms: 0,
-        ..Default::default()
-    };
     let backend = LocalBackend::from_config(
         "A",
         root.path(),
-        limits,
+        Default::default(),
         BTreeMap::new(),
         vec![],
         Some(db.clone()),
@@ -298,7 +294,7 @@ fn configured_index_path_receives_scanned_documents_and_reconciles_deletes() {
 }
 
 #[test]
-fn watcher_events_are_coalesced_until_the_configured_full_rebuild_interval() {
+fn watcher_updates_files_incrementally_without_bypassing_the_full_rebuild_interval() {
     let root = tempfile::tempdir().unwrap();
     let db = root.path().join("grepmesh-index.sqlite");
     fs::write(
@@ -335,11 +331,20 @@ fn watcher_events_are_coalesced_until_the_configured_full_rebuild_interval() {
     assert_eq!(restarted.index.status().generation, 0);
 
     fs::write(root.path().join("later.txt"), "DEFERRED_INTERVAL_TOKEN\n").unwrap();
-    std::thread::sleep(Duration::from_secs(3));
+    let deadline = std::time::Instant::now() + Duration::from_secs(6);
+    while std::time::Instant::now() < deadline
+        && PersistentIndex::open(db.clone())
+            .unwrap()
+            .candidates("DEFERRED_INTERVAL_TOKEN")
+            .unwrap()
+            .is_empty()
+    {
+        std::thread::sleep(Duration::from_millis(50));
+    }
 
     assert_eq!(backend.index.status().generation, generation);
     assert_eq!(restarted.index.status().generation, 0);
-    assert!(PersistentIndex::open(db)
+    assert!(!PersistentIndex::open(db)
         .unwrap()
         .candidates("DEFERRED_INTERVAL_TOKEN")
         .unwrap()
