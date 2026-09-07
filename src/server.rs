@@ -54,7 +54,7 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
             config.topology_ttl_ms,
         )
     });
-    let topology = if let Some(client) = topology_client.as_ref() {
+    let mut topology = if let Some(client) = topology_client.as_ref() {
         let current = cached_snapshot
             .clone()
             .unwrap_or_else(|| TopologySnapshot::empty(config.host_id.clone()));
@@ -89,6 +89,7 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
     } else {
         Topology::new(config.host_id.clone(), config.peers.clone())
     };
+    topology.retain_known_peers(&config.peers);
     let local = LocalBackend::from_config_with_ingestion(
         config.host_id.clone(),
         config.root.clone(),
@@ -115,8 +116,11 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
     // deployments already protected by a GPTAdmin tunnel do not need a second
     // bearer-auth layer. Setting peer_auth_token_env explicitly enables it.
     let require_peer_auth = peer_auth_token.is_some();
-    let service =
-        Arc::new(MeshService::new(local, topology).with_peer_auth_token(peer_auth_token.clone()));
+    let service = Arc::new(
+        MeshService::new(local, topology)
+            .with_peer_auth_token(peer_auth_token.clone())
+            .with_gptadmin_client(topology_client.clone()),
+    );
     let jobs = SearchJobs::persistent(service.local.root.clone(), &service.local.limits)?;
     if let Some(client) = topology_client {
         let refresh_service = Arc::clone(&service);

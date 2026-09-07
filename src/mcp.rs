@@ -383,6 +383,7 @@ pub struct MeshService {
     pub topology: Arc<RwLock<Topology>>,
     pub client: Client,
     peer_auth_token: Option<String>,
+    gptadmin_client: Option<crate::gptadmin::GptAdminTopologyClient>,
     seen_requests: Arc<std::sync::Mutex<BTreeMap<String, Instant>>>,
 }
 
@@ -398,6 +399,7 @@ impl MeshService {
                 .build()
                 .expect("build direct peer HTTP client"),
             peer_auth_token: None,
+            gptadmin_client: None,
             seen_requests: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         }
     }
@@ -407,8 +409,17 @@ impl MeshService {
         self
     }
 
+    pub fn with_gptadmin_client(
+        mut self,
+        client: Option<crate::gptadmin::GptAdminTopologyClient>,
+    ) -> Self {
+        self.gptadmin_client = client;
+        self
+    }
+
     pub fn replace_topology(&self, mut topology: Topology) {
         if let Ok(mut current) = self.topology.write() {
+            topology.retain_known_peers(&current.peers);
             // GPTAdmin topology is intentionally a credential-free projection.
             // Retain only the local, optional loopback connector setting for a
             // known host when a refreshed projection omits it.
@@ -1263,12 +1274,24 @@ impl MeshService {
         tool: &str,
         arguments: Value,
     ) -> Result<Value> {
+        if peer.gptadmin_relay_url.as_deref() == Some(peer.routable_url.as_str()) {
+            return self
+                .gptadmin_client
+                .as_ref()
+                .ok_or_else(|| anyhow!("GPTAdmin relay credentials are not configured"))?
+                .call_relay(&peer.routable_url, tool, arguments)
+                .await;
+        }
         match self
             .call_remote_direct(&peer.routable_url, tool, arguments.clone())
             .await
         {
             Ok(value) => Ok(value),
             Err(direct_error) if is_direct_connect_error(&direct_error) => {
+                if let (Some(client), Some(url)) = (&self.gptadmin_client, &peer.gptadmin_relay_url)
+                {
+                    return client.call_relay(url, tool, arguments).await;
+                }
                 let proxy_url = peer
                     .gptadmin_proxy_url
                     .as_deref()

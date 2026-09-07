@@ -569,6 +569,7 @@ async fn black_box_two_process_peer_fanout_and_partial_results() {
             local_url: "http://127.0.0.1:1/mcp".into(),
             routable_url: url_b.clone(),
             gptadmin_proxy_url: None,
+            gptadmin_relay_url: None,
         }],
         limits: Default::default(),
         exclude_globs: vec![],
@@ -821,6 +822,7 @@ async fn remote_partial_status_and_local_results_survive_fanout() {
             local_url: "http://127.0.0.1:1/mcp".into(),
             routable_url: fake_url,
             gptadmin_proxy_url: None,
+            gptadmin_relay_url: None,
         }],
         limits: grepmesh::config::LimitsConfig {
             peer_timeout_ms: 500,
@@ -940,6 +942,7 @@ async fn stalled_peer_body_keeps_completed_local_results() {
             local_url: "http://127.0.0.1:1/mcp".into(),
             routable_url: fake_url,
             gptadmin_proxy_url: None,
+            gptadmin_relay_url: None,
         }],
         limits: grepmesh::config::LimitsConfig {
             peer_timeout_ms: 150,
@@ -1051,6 +1054,7 @@ async fn async_search_status_returns_a_bounded_final_page() {
             local_url: "http://127.0.0.1:1/mcp".into(),
             routable_url: fake_url,
             gptadmin_proxy_url: None,
+            gptadmin_relay_url: None,
         }],
         limits: grepmesh::config::LimitsConfig {
             peer_timeout_ms: 500,

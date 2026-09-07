@@ -124,6 +124,7 @@ async fn peer_dispatch_bypasses_a_poisoned_proxy_and_keeps_bearer_auth() {
                 local_url: "http://127.0.0.1:1/mcp".into(),
                 routable_url: peer_url,
                 gptadmin_proxy_url: None,
+                gptadmin_relay_url: None,
             }],
         ),
     )
@@ -233,6 +234,7 @@ async fn peer_dispatch_uses_gptadmin_connect_fallback_only_after_direct_connect_
                 local_url: "http://127.0.0.1:1/mcp".into(),
                 routable_url: "http://127.0.0.1:1/mcp".into(),
                 gptadmin_proxy_url: Some(proxy_url),
+                gptadmin_relay_url: None,
             }],
         ),
     )
@@ -316,6 +318,7 @@ async fn gptadmin_fallback_rejects_an_oversized_response_while_streaming() {
                 local_url: "http://127.0.0.1:1/mcp".into(),
                 routable_url: "http://127.0.0.1:1/mcp".into(),
                 gptadmin_proxy_url: Some(proxy_url),
+                gptadmin_relay_url: None,
             }],
         ),
     );
@@ -369,6 +372,7 @@ async fn unreachable_peer_reports_missing_gptadmin_fallback_per_host() {
                 local_url: "http://127.0.0.1:1/mcp".into(),
                 routable_url: "http://127.0.0.1:1/mcp".into(),
                 gptadmin_proxy_url: None,
+                gptadmin_relay_url: None,
             }],
         ),
     );
@@ -416,6 +420,7 @@ fn topology_refresh_retains_only_configured_loopback_fallback() {
                 local_url: "http://127.0.0.1:9419/mcp".into(),
                 routable_url: "http://192.0.2.10:9419/mcp".into(),
                 gptadmin_proxy_url: Some("http://127.0.0.1:3126".into()),
+                gptadmin_relay_url: None,
             }],
         ),
     );
@@ -427,6 +432,7 @@ fn topology_refresh_retains_only_configured_loopback_fallback() {
             local_url: "http://127.0.0.1:9419/mcp".into(),
             routable_url: "http://192.0.2.11:9419/mcp".into(),
             gptadmin_proxy_url: None,
+            gptadmin_relay_url: None,
         }],
     ));
 

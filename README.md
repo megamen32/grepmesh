@@ -43,6 +43,28 @@ for the checked-in installer and release checks.
 2. Add that URL to your MCP client using the exact [OpenCode, Codex, or Hermes configuration](docs/CLIENTS.md).
 3. Ask the client to search; GrepMesh indexes the configured roots locally and searches them immediately. To search more machines, install it on each node; `hosts: "*"` fans the same query across every reachable node without centralizing the documents.
 
+## Discover peers through GPTAdmin
+
+Set `gptadmin_topology_url` to your Hub's `/mcp-relay/grepmesh` URL and
+`gptadmin_token_env` to the environment variable containing its bearer token
+(default `GPTADMIN_GREPMESH_TOKEN`). You may also configure `/mcp-relay/agents`
+directly. The topology projection is augmented with that existing agent registry,
+including when an older projection is empty; no second registration service is
+required. A valid projection remains usable if the registry is unavailable.
+
+Online GrepMesh child MCPs are probed through their existing `/server/.../mcp`
+paths using a local-only request (`hosts: "local"`, `hop_count: 1`). The returned
+host ID deduplicates aliases and excludes this node. Offline and failed children
+are not promoted to healthy. Probes have a three-second per-child deadline and
+a ten-second total discovery budget; partial discovery retains configured peers.
+
+Known direct peer routes stay preferred. Discovered `gptadmin_relay_url` routes
+provide a fallback on connection failure, or the primary route when no direct
+address is known. Hub calls use `gptadmin_token_env`, independently of
+`peer_auth_token_env`; cached topology contains URLs, never tokens. Relay paths
+are resolved against the configured Hub origin, and Hub requests do not follow
+redirects. Registry discovery reuses `topology_ttl_ms` and `topology_cache_path`.
+
 ## Defaults and optional security controls
 
 See [project philosophy](docs/PHILOSOPHY.md).

@@ -25,6 +25,8 @@ pub struct TopologyNode {
     pub host_id: String,
     pub local_url: String,
     pub routable_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gptadmin_relay_url: Option<String>,
     #[serde(default)]
     pub capabilities: Vec<String>,
     #[serde(default)]
