@@ -1,0 +1,95 @@
+{
+  "host_id": "server-88",
+  "bind": "192.168.2.75:9419",
+  "local_bind": "127.0.0.1:9419",
+  "root": "/home/roomhacker",
+  "roots": {
+    "home": [
+      "/home/roomhacker"
+    ],
+    "opt": [
+      "/opt"
+    ],
+    "mobile-browser": [
+      "/opt/mobile-browser"
+    ],
+    "etc": [
+      "/etc"
+    ]
+  },
+  "peers": [
+    {
+      "host_id": "server-100",
+      "local_url": "http://192.168.2.100:9419/mcp",
+      "routable_url": "http://192.168.2.100:9419/mcp"
+    }
+  ],
+  "exclude_globs": [
+    "**/.git/**",
+    "**/.svn/**",
+    "**/.hg/**",
+    "**/node_modules/**",
+    "**/.pnpm-store/**",
+    "**/bower_components/**",
+    "**/venv/**",
+    "**/.venv/**",
+    "**/__pycache__/**",
+    "**/.tox/**",
+    "**/.nox/**",
+    "**/.pytest_cache/**",
+    "**/.mypy_cache/**",
+    "**/.ruff_cache/**",
+    "**/target/**",
+    "**/dist/**",
+    "**/build/**",
+    "**/out/**",
+    "**/.next/**",
+    "**/.nuxt/**",
+    "**/coverage/**",
+    "**/.cache/**",
+    "**/.cargo/registry/**",
+    "**/.cargo/git/**",
+    "**/.rustup/**",
+    "**/go/pkg/mod/**",
+    "**/.local/share/Trash/**",
+    "**/diag-live/**",
+    "**/rollback-*/**",
+    "**/rollback-*"
+  ],
+  "topology_cache_path": "/var/lib/grepmesh-mcp/topology.json",
+  "limits": {
+    "overall_timeout_ms": 20000,
+    "peer_timeout_ms": 25000,
+    "full_rebuild_min_interval_ms": 259200000,
+    "index_activity": {
+      "window_ms": 60000,
+      "hot_event_threshold": 200,
+      "hot_changed_bytes_threshold": 134217728,
+      "hot_debounce_ms": 45000,
+      "hot_cooldown_ms": 10800000,
+      "metadata_only_globs": [],
+      "exclude_globs": []
+    }
+  },
+  "stt": {
+    "enabled": true,
+    "backend": "remote",
+    "model": "whisper-1",
+    "model_dir": null,
+    "remote_base_url": "https://whisper.bezrabotnyi.com",
+    "api_key_env": "GREPMESH_STT_API_KEY",
+    "auto_download": false,
+    "max_media_bytes": 4294967296
+  },
+  "ocr": {
+    "enabled": true,
+    "det_model": "pp-ocrv6_tiny_det.onnx",
+    "rec_model": "eslav_pp-ocrv5_mobile_rec.onnx",
+    "dict": "ppocrv5_eslav_dict.txt",
+    "pdf_fallback": true,
+    "min_pdf_text_chars": 64,
+    "pdf_dpi": 180,
+    "max_pdf_pages": 200,
+    "max_image_bytes": 268435456
+  }
+}

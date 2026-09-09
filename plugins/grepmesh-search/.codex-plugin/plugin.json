@@ -1,6 +1,6 @@
 {
   "name": "grepmesh-search",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Bounded mesh search for Codex and ZCode, with an explicit rg-first rule for known local paths.",
   "author": {
     "name": "megamen32",
