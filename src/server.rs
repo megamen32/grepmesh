@@ -16,7 +16,7 @@ use axum::{
     Json, Router,
 };
 use serde_json::{json, Value};
-use std::{env, sync::Arc, time::Duration};
+use std::{env, fs, sync::Arc, time::Duration};
 
 const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
 const CURRENT_PROTOCOL_VERSION: &str = "2026-07-28";
@@ -90,6 +90,20 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
         Topology::new(config.host_id.clone(), config.peers.clone())
     };
     topology.retain_known_peers(&config.peers);
+    if config.userio.enabled {
+        // The cache root must exist before the index watcher registers its
+        // roots: notify refuses to watch a missing directory and the adapter
+        // would then populate an unindexed cache until the next full rebuild.
+        for dir in ["conversations", "attachments"] {
+            if let Err(error) = fs::create_dir_all(config.userio.cache_dir.join(dir)) {
+                tracing::warn!(
+                    dir = %config.userio.cache_dir.join(dir).display(),
+                    error = %error,
+                    "cannot prepare userio cache directory"
+                );
+            }
+        }
+    }
     let local = LocalBackend::from_config_with_ingestion(
         config.host_id.clone(),
         config.root.clone(),
