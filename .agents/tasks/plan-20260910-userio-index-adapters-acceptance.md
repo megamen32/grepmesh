@@ -2,11 +2,16 @@
 
 Task: `work-20260910-userio-index-adapters.md`
 Date: 2026-09-10 (MSK)
-Result: **PASS with documented caveats** — all cached UserIO chat text is
-live-searchable through the two-node mesh (real canaries below), opt-in
-anydoc/whisper stages proven on real paths; literal-mode coverage on
-server-100 is partial (125/411 conversations) pending an index-health
-follow-up caused by a pre-existing/onward incident, see Known issues.
+Result: **PASS** — all 411 userio conversation files carry full bodies in
+the server-100 trigram FTS index (MATCH coverage 411/411) and literal-mode
+canaries pass with real messages (cyrillic telegram transcript, newest
+whatsapp message, two-host fanout). The coverage was completed with a
+blast-radius repair — two staggered mtime-touch passes over only the
+uncovered files (20-file batches, ~25 minutes total) — instead of a full
+index rebuild; a started full rebuild was aborted and the original index
+(with its extraction cache) restored. Opt-in anydoc/whisper stages proven
+on real paths. One pre-existing non-userio issue remains recorded below
+(literal misses on some old non-userio docs).
 
 ## Delivered
 
@@ -75,15 +80,25 @@ follow-up caused by a pre-existing/onward incident, see Known issues.
    final population ran in batches; a slow aborted full rebuild was
    replaced by staggered mtime-touches (100/round).
 
+## Index-health follow-up (executed 2026-09-10, blast radius)
+
+The completion audit rejected partial FTS coverage (125/411). Remedy by
+targeted repair, not full recompute: the started full rebuild (fresh file,
+~7h for 68% — it re-extracts the whole corpus because the extraction cache
+lives inside the index DB) was aborted, the original index restored
+(warm start, no rebuild), and only the uncovered userio files were
+mtime-touched in 20-file batches every 45s (two passes; the small batches
+stay far below the hot_event_threshold). Coverage 124 → 342 → 411/411;
+literal canaries then passed (L1 cyrillic transcript 2 hits, L2 whatsapp 1
+hit, L3 two-host fanout with server-88 honestly partial for a root it does
+not have).
+
 ## Known issues (follow-up task, not this delivery)
 
-- server-100 literal-mode FTS coverage is partial for userio rows
-  (125/411 conversations with bodies; the rest still serve via the rg
-  fallback in regex/default flows) and the literal path also misses some
-  OLD non-userio docs (e.g. /etc/grepmesh-mcp.service) — pre-existing or
-  collateral of the ENOSPC window. Needs a dedicated index-health pass
-  (likely off-peak full rebuild on a fresh index file). Regex mode and
-  read_text are unaffected and verified live.
+- server-100 literal-mode misses some OLD non-userio docs (e.g.
+  /etc/grepmesh-mcp.service content) — pre-existing, unrelated to userio
+  rows (userio literal coverage is now full). Needs its own index-health
+  pass on the old corpus; regex mode and read_text unaffected.
 - Mail-attachment downloads: the UserIO MCP dispatcher has no mail channel
   adapter; gmail attachments cannot be fetched (skipped honestly).
 - Old telegram media not resolvable by the live bridge session is skipped
