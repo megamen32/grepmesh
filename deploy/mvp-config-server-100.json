@@ -63,7 +63,7 @@
   "limits": {
     "overall_timeout_ms": 20000,
     "peer_timeout_ms": 25000,
-    "full_rebuild_min_interval_ms": 604800000,
+    "full_rebuild_min_interval_ms": 259200000,
     "index_activity": {
       "window_ms": 60000,
       "hot_event_threshold": 400,
