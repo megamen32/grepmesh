@@ -339,6 +339,127 @@ fn default_max_media_bytes() -> u64 {
     4 * 1024 * 1024 * 1024
 }
 
+/// Opt-in UserIO message cache adapter. Renders cached chat messages from a
+/// local Universal UserIO SQLite store into plain-text conversation files
+/// under `cache_dir`, and (per-stage, also opt-in) materializes chat
+/// attachments there so the regular extraction pipeline indexes documents
+/// (anydoc) and audio/video (whisper STT). Disabled by default: message
+/// bodies are private and indexing them must be an explicit choice.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct UserioConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_userio_sqlite_path")]
+    pub sqlite_path: PathBuf,
+    #[serde(default = "default_userio_cache_dir")]
+    pub cache_dir: PathBuf,
+    #[serde(default = "default_userio_poll_interval_ms")]
+    pub poll_interval_ms: u64,
+    /// Restrict rendering to these UserIO user ids; empty means all users.
+    #[serde(default)]
+    pub user_ids: Vec<String>,
+    /// Cap on cache files written per sync pass. The initial population of a
+    /// large store lands in bounded batches so the index watcher's hot
+    /// directory protection never sees one giant write burst.
+    #[serde(default = "default_userio_max_writes_per_sync")]
+    pub max_writes_per_sync: usize,
+    /// Restrict rendering to these message sources (gmail, telegram,
+    /// whatsapp, sms, vk, matrix, chatgpt:*); empty means all sources.
+    #[serde(default)]
+    pub include_sources: Vec<String>,
+    #[serde(default)]
+    pub attachments: UserioAttachmentsConfig,
+    #[serde(default = "default_userio_api_base")]
+    pub api_base: String,
+    #[serde(default = "default_userio_token_env")]
+    pub token_env: String,
+    /// Attachment downloads that fail are retried at most this many times
+    /// per process before being skipped for the remainder of the run.
+    #[serde(default = "default_userio_download_attempts")]
+    pub max_download_attempts: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct UserioAttachmentsConfig {
+    /// Materialize document attachments (PDF/office/text) so anydoc
+    /// extraction indexes their text. In-DB transcripts are always inlined
+    /// into the conversation render regardless of these flags.
+    #[serde(default)]
+    pub docs: bool,
+    /// Materialize audio/video attachments so the STT stage transcribes
+    /// them. Attachments that already carry a transcript in the UserIO
+    /// store are only inlined, never downloaded, unless
+    /// `materialize_transcribed` is set.
+    #[serde(default)]
+    pub media: bool,
+    #[serde(default)]
+    pub materialize_transcribed: bool,
+    #[serde(default = "default_userio_max_attachment_bytes")]
+    pub max_bytes: u64,
+}
+
+impl Default for UserioConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sqlite_path: default_userio_sqlite_path(),
+            cache_dir: default_userio_cache_dir(),
+            poll_interval_ms: default_userio_poll_interval_ms(),
+            user_ids: Vec::new(),
+            max_writes_per_sync: default_userio_max_writes_per_sync(),
+            include_sources: Vec::new(),
+            attachments: UserioAttachmentsConfig::default(),
+            api_base: default_userio_api_base(),
+            token_env: default_userio_token_env(),
+            max_download_attempts: default_userio_download_attempts(),
+        }
+    }
+}
+
+impl Default for UserioAttachmentsConfig {
+    fn default() -> Self {
+        Self {
+            docs: false,
+            media: false,
+            materialize_transcribed: false,
+            max_bytes: default_userio_max_attachment_bytes(),
+        }
+    }
+}
+
+fn default_userio_sqlite_path() -> PathBuf {
+    PathBuf::from("/var/lib/universal-userio/userio.sqlite3")
+}
+fn default_userio_cache_dir() -> PathBuf {
+    PathBuf::from("/var/lib/grepmesh-mcp/userio-cache")
+}
+fn default_userio_poll_interval_ms() -> u64 {
+    60_000
+}
+fn default_userio_max_writes_per_sync() -> usize {
+    40
+}
+fn default_userio_api_base() -> String {
+    "http://127.0.0.1:18093".to_string()
+}
+fn default_userio_token_env() -> String {
+    "GREPMESH_USERIO_TOKEN".to_string()
+}
+fn default_userio_download_attempts() -> u32 {
+    3
+}
+fn default_userio_max_attachment_bytes() -> u64 {
+    256 * 1024 * 1024
+}
+
+impl UserioConfig {
+    /// A UserIO adapter that never contacts the UserIO API. Used when only
+    /// inline (already transcribed) attachment text is wanted.
+    pub fn downloads_enabled(&self) -> bool {
+        self.attachments.docs || self.attachments.media
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
     pub host_id: String,
@@ -374,6 +495,8 @@ pub struct AppConfig {
     pub stt: SttConfig,
     #[serde(default)]
     pub ocr: OcrConfig,
+    #[serde(default)]
+    pub userio: UserioConfig,
     #[serde(default = "default_topology_ttl_ms")]
     pub topology_ttl_ms: u64,
     #[serde(skip)]

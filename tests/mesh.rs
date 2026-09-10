@@ -555,6 +555,7 @@ async fn black_box_two_process_peer_fanout_and_partial_results() {
         backup_catalog: None,
         stt: Default::default(),
         ocr: Default::default(),
+        userio: Default::default(),
         topology_ttl_ms: 30_000,
         config_path: None,
     };
@@ -581,6 +582,7 @@ async fn black_box_two_process_peer_fanout_and_partial_results() {
         backup_catalog: None,
         stt: Default::default(),
         ocr: Default::default(),
+        userio: Default::default(),
         topology_ttl_ms: 30_000,
         config_path: None,
     };
@@ -838,6 +840,7 @@ async fn remote_partial_status_and_local_results_survive_fanout() {
         backup_catalog: None,
         stt: Default::default(),
         ocr: Default::default(),
+        userio: Default::default(),
         topology_ttl_ms: 30_000,
         config_path: None,
     };
@@ -958,6 +961,7 @@ async fn stalled_peer_body_keeps_completed_local_results() {
         backup_catalog: None,
         stt: Default::default(),
         ocr: Default::default(),
+        userio: Default::default(),
         topology_ttl_ms: 30_000,
         config_path: None,
     };
@@ -1073,6 +1077,7 @@ async fn async_search_status_returns_a_bounded_final_page() {
         backup_catalog: None,
         stt: Default::default(),
         ocr: Default::default(),
+        userio: Default::default(),
         topology_ttl_ms: 30_000,
         config_path: None,
     };
@@ -1219,6 +1224,7 @@ async fn search_with_sufficient_wait_returns_the_complete_result_directly() {
         backup_catalog: None,
         stt: Default::default(),
         ocr: Default::default(),
+        userio: Default::default(),
         topology_ttl_ms: 30_000,
         config_path: None,
     };
@@ -1277,6 +1283,7 @@ async fn search_tool_defaults_to_compact_ranges_with_search_text_compat_alias() 
         backup_catalog: None,
         stt: Default::default(),
         ocr: Default::default(),
+        userio: Default::default(),
         topology_ttl_ms: 30_000,
         config_path: None,
     };

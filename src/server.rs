@@ -162,6 +162,20 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
     let console_service = Arc::clone(&service);
     let console_jobs = jobs.clone();
     let console_config = config.clone();
+    if config.userio.enabled {
+        if !config
+            .roots
+            .values()
+            .flatten()
+            .any(|root| root == &config.userio.cache_dir)
+        {
+            tracing::warn!(
+                cache = %config.userio.cache_dir.display(),
+                "userio cache_dir is not listed in roots; rendered messages will not be indexed"
+            );
+        }
+        crate::userio::spawn_poller(config.userio.clone());
+    }
     let mut remote_app = build_app(AppState {
         service: Arc::clone(&service),
         jobs: jobs.clone(),

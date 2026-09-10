@@ -57,5 +57,22 @@
     "pdf_dpi": 180,
     "max_pdf_pages": 200,
     "max_image_bytes": 268435456
+  },
+  "userio": {
+    "enabled": false,
+    "sqlite_path": "/var/lib/universal-userio/userio.sqlite3",
+    "cache_dir": "/var/lib/grepmesh-mcp/userio-cache",
+    "poll_interval_ms": 60000,
+    "user_ids": [],
+    "include_sources": [],
+    "api_base": "http://127.0.0.1:18093",
+    "token_env": "GREPMESH_USERIO_TOKEN",
+    "max_download_attempts": 3,
+    "attachments": {
+      "docs": false,
+      "media": false,
+      "materialize_transcribed": false,
+      "max_bytes": 268435456
+    }
   }
 }
