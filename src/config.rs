@@ -358,9 +358,11 @@ pub struct UserioConfig {
     /// Restrict rendering to these UserIO user ids; empty means all users.
     #[serde(default)]
     pub user_ids: Vec<String>,
-    /// Cap on cache files written per sync pass. The initial population of a
-    /// large store lands in bounded batches so the index watcher's hot
-    /// directory protection never sees one giant write burst.
+    /// Cap on cache files written per sync pass. One atomic write emits
+    /// several inotify events, so this must stay well below the index
+    /// activity hot_event_threshold (default 120 events per window): batches
+    /// above it degrade the whole cache directory to metadata-only indexing
+    /// for the hot cooldown.
     #[serde(default = "default_userio_max_writes_per_sync")]
     pub max_writes_per_sync: usize,
     /// Restrict rendering to these message sources (gmail, telegram,
@@ -437,7 +439,7 @@ fn default_userio_poll_interval_ms() -> u64 {
     60_000
 }
 fn default_userio_max_writes_per_sync() -> usize {
-    40
+    12
 }
 fn default_userio_api_base() -> String {
     "http://127.0.0.1:18093".to_string()

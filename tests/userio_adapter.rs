@@ -80,7 +80,7 @@ fn test_config(sqlite: &Path, cache: &Path) -> UserioConfig {
         cache_dir: cache.to_path_buf(),
         poll_interval_ms: 1_000,
         user_ids: Vec::new(),
-        max_writes_per_sync: 40,
+        max_writes_per_sync: 12,
         include_sources: Vec::new(),
         attachments: UserioAttachmentsConfig::default(),
         api_base: "http://127.0.0.1:9".to_string(),

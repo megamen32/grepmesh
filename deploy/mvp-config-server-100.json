@@ -66,7 +66,7 @@
     "full_rebuild_min_interval_ms": 604800000,
     "index_activity": {
       "window_ms": 60000,
-      "hot_event_threshold": 120,
+      "hot_event_threshold": 400,
       "hot_changed_bytes_threshold": 67108864,
       "hot_debounce_ms": 60000,
       "hot_cooldown_ms": 21600000,
@@ -110,6 +110,7 @@
       "media": true,
       "materialize_transcribed": false,
       "max_bytes": 268435456
-    }
+    },
+    "max_writes_per_sync": 40
   }
 }
