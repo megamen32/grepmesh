@@ -389,6 +389,18 @@ fn hot_directories_switch_to_metadata_only_and_report_activity() {
         .candidates("HOT_CONTENT_MUST_NOT_BE_INDEXED")
         .unwrap()
         .is_empty());
+    // The metadata-only candidate lands with the event reconcile, which can
+    // lag the telemetry under suite load; wait for it deterministically.
+    let candidate_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < candidate_deadline
+        && PersistentIndex::open(db.clone())
+            .unwrap()
+            .candidates("hot-file.txt")
+            .unwrap()
+            .is_empty()
+    {
+        std::thread::sleep(Duration::from_millis(50));
+    }
     assert!(!PersistentIndex::open(db)
         .unwrap()
         .candidates("hot-file.txt")
