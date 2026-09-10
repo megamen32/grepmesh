@@ -1,6 +1,6 @@
 # UserIO index adapters — cache all chat text (and opt-in docs/media) into the mesh index
 
-Status: in progress
+Status: done (acceptance: plan-20260910-userio-index-adapters-acceptance.md — PASS with documented caveats)
 Date: 2026-09-10
 Owner session: zcode sess_4074be77 (gptadmin workspace, grepmesh project)
 
@@ -121,4 +121,23 @@ Ran the real release binary against a staging copy of the live userio DB
      (max_writes_per_sync=40, deterministic order, prune deferred until a
      complete pass). Required in production: 7-day full-rebuild interval
      means new roots populate via watcher only.
+  4. Production deploy exposed a defect staging had masked: the cache root did
+     not exist when the index watcher registered roots (adapter created it
+     seconds later), so 411 files landed unindexed (FTS 0 docs). Staging
+     missed it because each staging restart cold-rebuilt its index. Fix
+     (3cceb83): create cache dirs before LocalBackend starts the watcher;
+     remediation: wipe cache files so the adapter re-renders under a live
+     watch. Lesson: watcher-dependent deploy paths must be staged against a
+     warm index with no due rebuild, mirroring production cadence.
+  5. Second production defect (b87f725): after the rewatch, all 411 files
+     WERE indexed but with metadata-only bodies — one atomic cache write
+     emits several inotify events, so 40-file batches crossed the default
+     hot_event_threshold (120/60s) and the conversations bucket sat in the
+     6h hot cooldown, degrading every write to metadata-only. Diagnosis:
+     FTS rows existed but content MATCH returned 0 while body LIKE '%userio
+     conversation%' was empty; a probe in a cold bucket (/home/roomhacker)
+     matched fine. Fix: default max_writes_per_sync 12; server-100 deploy
+     uses 40/pass with hot_event_threshold=400 (steady-state userio churn is
+     a few files/minute). Remediation: wipe + restart (hot state is
+     in-memory) + repopulate under the raised threshold.
 
