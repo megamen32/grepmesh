@@ -1,6 +1,6 @@
 {
-  "host_id": "server-100",
-  "bind": "192.168.2.100:9419",
+  "host_id": "server-44",
+  "bind": "192.168.2.5:9419",
   "local_bind": "127.0.0.1:9419",
   "root": "/home/roomhacker",
   "roots": {
@@ -10,26 +10,20 @@
     "opt": [
       "/opt"
     ],
-    "mobile-browser": [
-      "/opt/mobile-browser"
-    ],
     "etc": [
       "/etc"
-    ],
-    "userio-cache": [
-      "/var/lib/grepmesh-mcp/userio-cache"
     ]
   },
   "peers": [
     {
-      "host_id": "server-88",
-      "local_url": "http://127.0.0.1:9419/mcp",
-      "routable_url": "http://192.168.2.75:9419/mcp"
+      "host_id": "server-100",
+      "local_url": "http://192.168.2.100:9419/mcp",
+      "routable_url": "http://192.168.2.100:9419/mcp"
     },
     {
-      "host_id": "server-44",
-      "local_url": "http://192.168.2.5:9419/mcp",
-      "routable_url": "http://192.168.2.5:9419/mcp"
+      "host_id": "server-88",
+      "local_url": "http://192.168.2.75:9419/mcp",
+      "routable_url": "http://192.168.2.75:9419/mcp"
     }
   ],
   "exclude_globs": [
@@ -65,22 +59,9 @@
     "**/rollback-*"
   ],
   "topology_cache_path": "/var/lib/grepmesh-mcp/topology.json",
-  "gptadmin_topology_url": "http://127.0.0.1:9001/mcp-relay/grepmesh",
-  "gptadmin_token_env": "GPTADMIN_GREPMESH_TOKEN",
-  "topology_ttl_ms": 30000,
   "limits": {
     "overall_timeout_ms": 20000,
-    "peer_timeout_ms": 25000,
-    "full_rebuild_min_interval_ms": 604800000,
-    "index_activity": {
-      "window_ms": 60000,
-      "hot_event_threshold": 400,
-      "hot_changed_bytes_threshold": 67108864,
-      "hot_debounce_ms": 60000,
-      "hot_cooldown_ms": 21600000,
-      "metadata_only_globs": [],
-      "exclude_globs": []
-    }
+    "peer_timeout_ms": 25000
   },
   "stt": {
     "enabled": true,
@@ -103,22 +84,7 @@
     "max_pdf_pages": 200,
     "max_image_bytes": 268435456
   },
-  "userio": {
-    "enabled": true,
-    "sqlite_path": "/var/lib/universal-userio/userio.sqlite3",
-    "cache_dir": "/var/lib/grepmesh-mcp/userio-cache",
-    "poll_interval_ms": 60000,
-    "user_ids": [],
-    "include_sources": [],
-    "api_base": "http://127.0.0.1:18093",
-    "token_env": "GREPMESH_USERIO_TOKEN",
-    "max_download_attempts": 3,
-    "attachments": {
-      "docs": true,
-      "media": true,
-      "materialize_transcribed": false,
-      "max_bytes": 268435456
-    },
-    "max_writes_per_sync": 40
-  }
+  "gptadmin_topology_url": "https://u-f1102930.t.gptadmin.bezrabotnyi.com/mcp-relay/grepmesh",
+  "gptadmin_token_env": "GPTADMIN_GREPMESH_TOKEN",
+  "topology_ttl_ms": 30000
 }

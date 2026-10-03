@@ -22,6 +22,11 @@
       "host_id": "server-100",
       "local_url": "http://192.168.2.100:9419/mcp",
       "routable_url": "http://192.168.2.100:9419/mcp"
+    },
+    {
+      "host_id": "server-44",
+      "local_url": "http://192.168.2.5:9419/mcp",
+      "routable_url": "http://192.168.2.5:9419/mcp"
     }
   ],
   "exclude_globs": [
@@ -57,6 +62,9 @@
     "**/rollback-*"
   ],
   "topology_cache_path": "/var/lib/grepmesh-mcp/topology.json",
+  "gptadmin_topology_url": "https://u-f1102930.t.gptadmin.bezrabotnyi.com/mcp-relay/grepmesh",
+  "gptadmin_token_env": "GPTADMIN_GREPMESH_TOKEN",
+  "topology_ttl_ms": 30000,
   "limits": {
     "overall_timeout_ms": 20000,
     "peer_timeout_ms": 25000,

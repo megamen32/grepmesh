@@ -23,6 +23,7 @@ set -Eeuo pipefail
 INSTALL_DIR=/opt/grepmesh-custom
 BINARY_PATH=$INSTALL_DIR/grepmesh-mcp
 CONFIG_PATH=/etc/grepmesh-mcp/config.json
+STATE_DIR=/var/lib/grepmesh-mcp
 SERVICE=grepmesh-mcp
 RECEIPT_ROOT=$INSTALL_DIR/.mvp-receipts
 HEALTH_URL=http://127.0.0.1:9419/api/catalog
@@ -98,6 +99,20 @@ command -v sudo >/dev/null || die "sudo not found on target"
 command -v curl >/dev/null || die "curl not found on target"
 command -v systemctl >/dev/null || die "systemctl not found on target"
 sudo -n true 2>/dev/null || die "passwordless sudo unavailable on target"
+
+# A previous package used a dedicated numeric account while the current fleet
+# units run as roomhacker. A writable config is not enough: an unwritable state
+# directory silently prevents topology-cache refreshes and leaves only static
+# peers. Normalize the directory owner to the effective unit identity before
+# the binary/config switch, then prove that identity can create state.
+SERVICE_USER=$(systemctl show -p User --value "$SERVICE")
+SERVICE_GROUP=$(systemctl show -p Group --value "$SERVICE")
+SERVICE_USER=${SERVICE_USER:-root}
+SERVICE_GROUP=${SERVICE_GROUP:-$SERVICE_USER}
+id "$SERVICE_USER" >/dev/null 2>&1 || die "service user does not exist: $SERVICE_USER"
+sudo install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 "$STATE_DIR"
+sudo -u "$SERVICE_USER" test -w "$STATE_DIR" \
+  || die "state directory is not writable by $SERVICE_USER: $STATE_DIR"
 
 health_ok() {
   systemctl is-active --quiet "$SERVICE" || return 1

@@ -88,6 +88,20 @@ address is known. Hub calls use `gptadmin_token_env`, independently of
 are resolved against the configured Hub origin, and Hub requests do not follow
 redirects. Registry discovery reuses `topology_ttl_ms` and `topology_cache_path`.
 
+Use a dedicated managed Hub credential for this path. The production fleet
+profile permits only GrepMesh's `search`, legacy `search_text`, `find_paths`,
+`read_text`, `list_locations`, `list_directory`, and `search_status` tools. Do
+not copy a Hub owner/control token into node configuration. On systemd hosts,
+keep the credential in root-owned `/etc/grepmesh-mcp/gptadmin.env`; the unit
+manager reads it through `EnvironmentFile`. The effective service user must
+own `/var/lib/grepmesh-mcp`, otherwise cache writes fail and the node falls
+back to its static peers.
+
+Roaming laptops should bind only to loopback, register that local endpoint as
+a GPTAdmin child MCP, and leave `peers` empty. Fixed Linux nodes may retain
+direct LAN peers for the other fixed nodes; roaming and remote nodes arrive
+from the registry and use their authenticated `/server/.../mcp` relay routes.
+
 ## Defaults and optional security controls
 
 See [project philosophy](docs/PHILOSOPHY.md).

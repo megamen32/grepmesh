@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+set -a
+[ ! -r "$HOME/.config/grepmesh/stt.env" ] || . "$HOME/.config/grepmesh/stt.env"
+[ ! -r "$HOME/.config/grepmesh/gptadmin.env" ] || . "$HOME/.config/grepmesh/gptadmin.env"
+set +a
+export PATH="/opt/homebrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+export OAR_HOME="$HOME/.cache/grepmesh/ocr"
+exec "$HOME/.local/bin/grepmesh-mcp" "$@"

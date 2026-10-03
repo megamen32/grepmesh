@@ -31,21 +31,35 @@ deployments, keep that loopback default and do not add a second peer token.
 `peer_auth_token_env` is optional and enables bearer authentication explicitly
 for deployments that expose GrepMesh on another transport. Named roots are a convenience and performance control, not a security boundary: choose the obvious directories you want searchable, and add narrower exclusions only when you explicitly need them.
 
-## Optional GPTAdmin Network Tunnel fallback
+## GPTAdmin registry and relay fallback
 
-`routable_url` is always tried first. `gptadmin_proxy_url` is optional and is
-used only when the direct TCP connection cannot be made. It must be a
-credential-free loopback HTTP CONNECT endpoint, normally
-`http://127.0.0.1:3126`, supplied by a locally managed GPTAdmin Network Tunnel
-client. GrepMesh does not create capabilities, issue grants, select an agent,
-or store relay credentials.
+Every node remains a complete local index. Register its loopback endpoint as a
+GrepMesh child MCP in that host's ShellMCP supervisor. Configure
+`gptadmin_topology_url`, `gptadmin_token_env`, `topology_cache_path`, and a
+bounded `topology_ttl_ms`. GrepMesh reads the Hub projection and child registry,
+probes each child with `list_locations(hosts="local", hop_count=1)`, and caches
+only routes and host IDs. Tokens never enter the topology cache.
 
-For M1 to a LAN-only mini endpoint, the operator must first deploy the
-GPTAdmin relay and a local connector that obtains a fresh approved `lan`
-capability grant for the mini's exact address and port. Configure the mini's
-plain `http://…/mcp` URL as `routable_url` and the connector's loopback address
-as `gptadmin_proxy_url`. Do not add a relay URL, a Hub credential, or a
-capability ID to GrepMesh. If the connector is unavailable or the capability
-is denied, GrepMesh reports the fallback failure in that peer's status.
+Use a managed credential restricted to the GrepMesh tools (`search`, the
+legacy `search_text` alias, `find_paths`, `read_text`, `list_locations`,
+`list_directory`, and `search_status`). A Hub owner/control token is not an
+acceptable node credential. Fixed machines may keep direct private-network
+routes and use the relay after connection failure. Do not retain a stale LAN
+route for a roaming laptop: a non-connect HTTP error on the obsolete direct
+route is intentionally surfaced rather than silently bypassed.
 
-Available tools: `search_text`, `find_paths`, `read_text`, and `search_status`.
+For a roaming Mac, use `bind: "127.0.0.1:9419"`, `local_bind: null`, and an
+empty static `peers` list. The LaunchAgent should execute
+`deploy/grepmesh-mcp-wrapper-macos`, which reads the private STT and GPTAdmin
+environment files before starting the binary. This keeps local search working
+off-LAN while remote searches use the authenticated Hub relay.
+
+The checked-in fleet examples are `deploy/mvp-config-server-100.json`,
+`deploy/mvp-config-server-88.json`, `deploy/mvp-config-server-44.json`, and
+`deploy/config-mac-m1.json`. Linux services use the resource envelope in the
+root `AGENTS.md` and `grepmesh-mcp.service`; do not deploy a service whose
+effective user cannot write `/var/lib/grepmesh-mcp`.
+
+Available tools: `search`, `find_paths`, `read_text`, `list_locations`,
+`list_directory`, and `search_status`. `search_text` remains an accepted
+compatibility alias for older peers.
