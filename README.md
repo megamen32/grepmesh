@@ -102,6 +102,20 @@ a GPTAdmin child MCP, and leave `peers` empty. Fixed Linux nodes may retain
 direct LAN peers for the other fixed nodes; roaming and remote nodes arrive
 from the registry and use their authenticated `/server/.../mcp` relay routes.
 
+Codex clients that run with `approval_policy = "never"` must explicitly trust
+this read-only MCP or every call is rejected before it reaches GrepMesh:
+
+```toml
+[mcp_servers.grepmesh]
+url = "http://127.0.0.1:9419/mcp"
+default_tools_approval_mode = "approve"
+enabled_tools = ["search", "search_text", "find_paths", "read_text", "list_locations", "list_directory", "search_status"]
+```
+
+Keep that allow-list read-only. A fresh Codex process is required after adding
+or changing an MCP registration because an already-open chat retains its tool
+snapshot.
+
 ## Defaults and optional security controls
 
 See [project philosophy](docs/PHILOSOPHY.md).
