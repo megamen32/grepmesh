@@ -12,17 +12,17 @@
     {
       "host_id": "server-100",
       "local_url": "http://192.168.2.100:9419/mcp",
-      "routable_url": "http://100.65.58.36:9419/mcp"
+      "routable_url": "http://192.168.2.100:9419/mcp"
     },
     {
       "host_id": "server-44",
       "local_url": "http://192.168.2.5:9419/mcp",
-      "routable_url": "http://100.109.149.33:9419/mcp"
+      "routable_url": "http://192.168.2.5:9419/mcp"
     },
     {
       "host_id": "server-88",
       "local_url": "http://192.168.2.75:9419/mcp",
-      "routable_url": "http://100.101.226.91:9419/mcp"
+      "routable_url": "http://192.168.2.75:9419/mcp"
     }
   ],
   "limits": {
