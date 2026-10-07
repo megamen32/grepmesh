@@ -23,7 +23,7 @@ export ORT_PREFER_DYNAMIC_LINK=1 ORT_SKIP_DOWNLOAD=1
 export TMPDIR="$project_root/.tmp/test-temp"
 # Match the current fleet's feature selection; OCR remains enabled.
 export CARGO_TARGET_DIR="$project_root/.tmp/release-target"
-cargo rustc --locked --release --no-default-features --bin grepmesh-mcp -- -C 'link-arg=-Wl,-rpath,$ORIGIN/lib'
+cargo rustc --locked --release --no-default-features --features ocr --bin grepmesh-mcp -- -C 'link-arg=-Wl,-rpath,$ORIGIN/lib'
 package="$project_root/.tmp/linux-compatible-package"
 mkdir -p "$package/lib" "$package/licenses/onnxruntime"
 cp "$CARGO_TARGET_DIR/release/grepmesh-mcp" "$package/grepmesh-mcp"
@@ -49,6 +49,6 @@ PY
 if [[ "${1:-}" == --test ]]; then
   CARGO_TARGET_DIR="$project_root/.tmp/cargo-target" \
     LD_LIBRARY_PATH="$ORT_LIB_LOCATION${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-    cargo test --locked --no-default-features --lib index::tests
+    cargo test --locked --no-default-features --features ocr --lib index::tests
 fi
 printf 'Package: %s\n' "$package"

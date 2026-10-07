@@ -43,7 +43,11 @@ jobs:
       - name: Build GrepMesh
         shell: bash
         run: |
-          cargo build --release --locked --target "${{ matrix.rust_target }}"
+          if [[ "${{ matrix.target }}" == "macos-x86_64" ]]; then
+            cargo build --release --locked --target "${{ matrix.rust_target }}" --no-default-features
+          else
+            cargo build --release --locked --target "${{ matrix.rust_target }}"
+          fi
       - name: Build ripgrep
         if: runner.os != 'Windows'
         shell: bash

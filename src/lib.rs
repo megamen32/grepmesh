@@ -6,6 +6,10 @@ pub mod gptadmin;
 pub mod index;
 pub mod jobs;
 pub mod mcp;
+#[cfg(feature = "ocr")]
+pub mod ocr;
+#[cfg(not(feature = "ocr"))]
+#[path = "ocr_disabled.rs"]
 pub mod ocr;
 pub mod server;
 pub mod stt;
