@@ -61,7 +61,8 @@
   "topology_cache_path": "/var/lib/grepmesh-mcp/topology.json",
   "limits": {
     "overall_timeout_ms": 20000,
-    "peer_timeout_ms": 25000
+    "peer_timeout_ms": 25000,
+    "full_rebuild_min_interval_ms": 604800000
   },
   "stt": {
     "enabled": true,

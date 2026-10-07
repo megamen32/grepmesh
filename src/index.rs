@@ -98,7 +98,22 @@ impl PersistentIndex {
                 "CREATE TABLE IF NOT EXISTS grepmesh_document_rows (\
                    path TEXT PRIMARY KEY,\
                    fts_rowid INTEGER NOT NULL UNIQUE\
-                 );",
+                 );\
+                 CREATE TRIGGER IF NOT EXISTS grepmesh_cache_rows_after_insert \
+                 AFTER INSERT ON grepmesh_extraction_cache BEGIN \
+                   DELETE FROM grepmesh_document_rows WHERE path=NEW.path; \
+                   DELETE FROM grepmesh_metadata WHERE key='document_rows_v1'; \
+                 END;\
+                 CREATE TRIGGER IF NOT EXISTS grepmesh_cache_rows_after_update \
+                 AFTER UPDATE ON grepmesh_extraction_cache BEGIN \
+                   DELETE FROM grepmesh_document_rows \
+                   WHERE path=OLD.path OR path=NEW.path; \
+                   DELETE FROM grepmesh_metadata WHERE key='document_rows_v1'; \
+                 END;\
+                 CREATE TRIGGER IF NOT EXISTS grepmesh_cache_rows_after_delete \
+                 AFTER DELETE ON grepmesh_extraction_cache BEGIN \
+                   DELETE FROM grepmesh_metadata WHERE key='document_rows_v1'; \
+                 END;",
             )
             .map_err(|error| error.to_string())?;
         Ok(connection)
@@ -216,6 +231,13 @@ impl PersistentIndex {
                 params![path, fts_rowid],
             )
             .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO grepmesh_metadata(key, value) VALUES ('document_rows_v1', '1') \
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())?;
         Ok(())
     }
@@ -297,6 +319,13 @@ impl PersistentIndex {
                 )
                 .map_err(|error| error.to_string())?;
         }
+        transaction
+            .execute(
+                "INSERT INTO grepmesh_metadata(key, value) VALUES ('document_rows_v1', '1') \
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())?;
         Ok(())
     }
@@ -349,6 +378,13 @@ impl PersistentIndex {
                 params![path],
             )
             .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO grepmesh_metadata(key, value) VALUES ('document_rows_v1', '1') \
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())
     }
 
@@ -356,13 +392,13 @@ impl PersistentIndex {
         let mut connection = self.connection()?;
         let migrated = connection
             .query_row(
-                "SELECT value FROM grepmesh_metadata WHERE key='document_rows_v1'",
+                "SELECT count(*)=2 FROM grepmesh_metadata \
+                 WHERE key IN ('document_rows_v1', 'document_rows_triggers_v1') \
+                 AND value='1'",
                 [],
-                |row| row.get::<_, String>(0),
+                |row| row.get::<_, bool>(0),
             )
-            .optional()
-            .map_err(|error| error.to_string())?
-            .is_some_and(|value| value == "1");
+            .map_err(|error| error.to_string())?;
         if migrated {
             return Ok(());
         }
@@ -389,6 +425,13 @@ impl PersistentIndex {
         transaction
             .execute(
                 "INSERT INTO grepmesh_metadata(key, value) VALUES ('document_rows_v1', '1') \
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO grepmesh_metadata(key, value) VALUES ('document_rows_triggers_v1', '1') \
                  ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 [],
             )
@@ -433,7 +476,21 @@ impl PersistentIndex {
                 "INSERT OR IGNORE INTO grepmesh_extraction_cache(path, size, mtime_ns, body) VALUES (?1, ?2, ?3, ?4)",
                 params![path, metadata.len() as i64, metadata_mtime_ns(&metadata).to_string(), body],
             ).map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    "INSERT INTO grepmesh_document_rows(path, fts_rowid) VALUES (?1, ?2) \
+                     ON CONFLICT(path) DO UPDATE SET fts_rowid=excluded.fts_rowid",
+                    params![path, rowid],
+                )
+                .map_err(|error| error.to_string())?;
         }
+        transaction
+            .execute(
+                "INSERT INTO grepmesh_metadata(key, value) VALUES ('document_rows_v1', '1') \
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())?;
         Ok(())
     }
@@ -1667,7 +1724,16 @@ fn trigrams(value: &str) -> BTreeSet<String> {
 
 fn excluded(path: &Path, root: &Path, excludes: &GlobSet) -> bool {
     let relative = path.strip_prefix(root).unwrap_or(path);
-    excludes.is_match(relative) || excludes.is_match(relative.join(".grepmesh-directory-probe"))
+    let matches = |candidate: &Path| {
+        excludes.is_match(candidate)
+            || excludes.is_match(candidate.join(".grepmesh-directory-probe"))
+    };
+    matches(relative)
+        || root
+            .file_name()
+            .map(|name| PathBuf::from(name).join(relative))
+            .as_deref()
+            .is_some_and(matches)
 }
 
 #[cfg(test)]
@@ -1759,6 +1825,16 @@ mod tests {
         let root = PathBuf::from("/workspace");
         let matcher = compile_excludes(&["**/.cache/**".to_string()]).unwrap();
         assert!(excluded(&root.join(".cache"), &root, &matcher));
+    }
+
+    #[test]
+    fn root_named_policy_matches_contents_of_a_separate_root() {
+        let downloads = PathBuf::from("/Users/user/Downloads");
+        let desktop = PathBuf::from("/Users/user/Desktop");
+        let matcher = compile_excludes(&["Downloads/**".to_string()]).unwrap();
+        assert!(excluded(&downloads.join("image.png"), &downloads, &matcher));
+        assert!(excluded(&downloads.join("archive"), &downloads, &matcher));
+        assert!(!excluded(&desktop.join("image.png"), &desktop, &matcher));
     }
 
     #[test]
@@ -1986,6 +2062,256 @@ mod tests {
         assert!(
             plan.iter().any(|detail| detail.ends_with("INDEX 0:=")),
             "FTS lookup must constrain rowid instead of scanning every document: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn rollback_writer_invalidates_stale_row_mapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.sqlite");
+        let first = dir.path().join("first.txt");
+        let second = dir.path().join("second.txt");
+        fs::write(&first, "first original token").unwrap();
+        fs::write(&second, "second preserved token").unwrap();
+        let index = PersistentIndex::open(db.clone()).unwrap();
+        index
+            .replace_document(&first, "first original token")
+            .unwrap();
+        index
+            .replace_document(&second, "second preserved token")
+            .unwrap();
+
+        fs::write(&first, "first rollback replacement").unwrap();
+        let metadata = fs::metadata(&first).unwrap();
+        let path = first.display().to_string();
+        let mut connection = index.connection().unwrap();
+        let transaction = connection.transaction().unwrap();
+        // Simulate the parent binary: it rewrites FTS and cache but knows
+        // nothing about grepmesh_document_rows.
+        transaction
+            .execute(
+                "DELETE FROM grepmesh_documents WHERE path=?1",
+                params![path],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO grepmesh_documents(path, body) VALUES (?1, ?2)",
+                params![path, "first rollback replacement"],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO grepmesh_extraction_cache(path, size, mtime_ns, body) \
+                 VALUES (?1, ?2, ?3, ?4) ON CONFLICT(path) DO UPDATE SET \
+                 size=excluded.size, mtime_ns=excluded.mtime_ns, body=excluded.body",
+                params![
+                    path,
+                    metadata.len() as i64,
+                    metadata_mtime_ns(&metadata).to_string(),
+                    "first rollback replacement"
+                ],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM grepmesh_document_rows WHERE path=?1",
+                    params![path],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0,
+            "legacy cache writes must invalidate rowids they cannot maintain"
+        );
+        assert!(connection
+            .query_row(
+                "SELECT value FROM grepmesh_metadata WHERE key='document_rows_v1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .unwrap()
+            .is_none());
+        drop(connection);
+        drop(index);
+
+        let reopened = PersistentIndex::open(db).unwrap();
+        reopened
+            .replace_document(&first, "first rollback replacement")
+            .unwrap();
+        assert_eq!(
+            reopened.candidates("rollback replacement").unwrap(),
+            vec![first]
+        );
+        assert_eq!(
+            reopened.candidates("second preserved").unwrap(),
+            vec![second]
+        );
+    }
+
+    #[test]
+    fn rollback_writer_rowid_reuse_is_reconciled_before_prune() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.sqlite");
+        let first = dir.path().join("first.txt");
+        let second = dir.path().join("second.txt");
+        let removed = dir.path().join("removed.txt");
+        let replacement = dir.path().join("replacement.txt");
+        fs::write(&first, "first keep token").unwrap();
+        fs::write(&second, "second keep token").unwrap();
+        fs::write(&removed, "removed legacy token").unwrap();
+        let index = PersistentIndex::open(db.clone()).unwrap();
+        index.replace_document(&first, "first keep token").unwrap();
+        index
+            .replace_document(&second, "second keep token")
+            .unwrap();
+        index
+            .replace_document(&removed, "removed legacy token")
+            .unwrap();
+
+        fs::remove_file(&removed).unwrap();
+        fs::write(&replacement, "replacement rollback token").unwrap();
+        let replacement_metadata = fs::metadata(&replacement).unwrap();
+        let removed_path = removed.display().to_string();
+        let replacement_path = replacement.display().to_string();
+        let mut connection = index.connection().unwrap();
+        let removed_rowid: i64 = connection
+            .query_row(
+                "SELECT rowid FROM grepmesh_documents WHERE path=?1",
+                params![removed_path],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let transaction = connection.transaction().unwrap();
+        // Simulate a rolled-back parent binary deleting its highest row and
+        // inserting a different path. SQLite is allowed to reuse that rowid.
+        transaction
+            .execute(
+                "DELETE FROM grepmesh_documents WHERE path=?1",
+                params![removed_path],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "DELETE FROM grepmesh_extraction_cache WHERE path=?1",
+                params![removed_path],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO grepmesh_documents(path, body) VALUES (?1, ?2)",
+                params![replacement_path, "replacement rollback token"],
+            )
+            .unwrap();
+        assert_eq!(transaction.last_insert_rowid(), removed_rowid);
+        transaction
+            .execute(
+                "INSERT INTO grepmesh_extraction_cache(path, size, mtime_ns, body) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    replacement_path,
+                    replacement_metadata.len() as i64,
+                    metadata_mtime_ns(&replacement_metadata).to_string(),
+                    "replacement rollback token"
+                ],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+        drop(connection);
+        drop(index);
+
+        let reopened = PersistentIndex::open(db).unwrap();
+        assert_eq!(reopened.document_count().unwrap(), 3);
+        assert!(reopened.candidates("removed legacy").unwrap().is_empty());
+        assert_eq!(
+            reopened.candidates("replacement rollback").unwrap(),
+            vec![replacement.clone()]
+        );
+        reopened
+            .prune_except(&BTreeSet::from([first.clone(), second.clone()]))
+            .unwrap();
+        assert!(reopened
+            .candidates("replacement rollback")
+            .unwrap()
+            .is_empty());
+        assert_eq!(reopened.document_count().unwrap(), 2);
+        assert_eq!(reopened.candidates("first keep").unwrap(), vec![first]);
+        assert_eq!(reopened.candidates("second keep").unwrap(), vec![second]);
+    }
+
+    #[test]
+    fn first_trigger_install_remigrates_a_legacy_v1_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.sqlite");
+        let old_path = dir.path().join("old.txt");
+        let new_path = dir.path().join("new.txt");
+        let index = PersistentIndex::open(db.clone()).unwrap();
+        index.replace_document(&old_path, "old token").unwrap();
+        let mut connection = index.connection().unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER grepmesh_cache_rows_after_insert; \
+                 DROP TRIGGER grepmesh_cache_rows_after_update; \
+                 DROP TRIGGER grepmesh_cache_rows_after_delete; \
+                 DELETE FROM grepmesh_metadata WHERE key='document_rows_triggers_v1';",
+            )
+            .unwrap();
+        let old_rowid: i64 = connection
+            .query_row(
+                "SELECT rowid FROM grepmesh_documents WHERE path=?1",
+                params![old_path.display().to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let transaction = connection.transaction().unwrap();
+        transaction
+            .execute(
+                "DELETE FROM grepmesh_documents WHERE path=?1",
+                params![old_path.display().to_string()],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "DELETE FROM grepmesh_extraction_cache WHERE path=?1",
+                params![old_path.display().to_string()],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO grepmesh_documents(path, body) VALUES (?1, ?2)",
+                params![new_path.display().to_string(), "new token"],
+            )
+            .unwrap();
+        assert_eq!(transaction.last_insert_rowid(), old_rowid);
+        transaction
+            .execute(
+                "INSERT INTO grepmesh_extraction_cache(path, size, mtime_ns, body) \
+                 VALUES (?1, 0, '0', ?2)",
+                params![new_path.display().to_string(), "new token"],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+        drop(connection);
+        drop(index);
+
+        let reopened = PersistentIndex::open(db).unwrap();
+        assert!(reopened.candidates("old token").unwrap().is_empty());
+        assert_eq!(reopened.candidates("new token").unwrap(), vec![new_path]);
+        assert_eq!(reopened.document_count().unwrap(), 1);
+        assert_eq!(
+            reopened
+                .connection()
+                .unwrap()
+                .query_row(
+                    "SELECT value FROM grepmesh_metadata \
+                     WHERE key='document_rows_triggers_v1'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "1"
         );
     }
 

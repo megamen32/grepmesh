@@ -45,7 +45,12 @@ pub fn default_exclude_globs() -> Vec<String> {
         "**/.cargo/registry/**",
         "**/.cargo/git/**",
         "**/.rustup/**",
+        "**/.local/go/**",
         "**/go/pkg/mod/**",
+        "**/.browseros/**",
+        "**/.codex/sessions/**",
+        "**/.codex/archived_sessions/**",
+        "**/.codex/plugins/cache/**",
         "**/.local/share/Trash/**",
         "**/diag-live/**",
         "**/.grepmesh-jobs/**",
@@ -174,7 +179,7 @@ fn default_search_job_store_max_bytes() -> u64 {
     64 * 1024 * 1024
 }
 fn default_full_rebuild_min_interval_ms() -> u64 {
-    60 * 60 * 1_000
+    7 * 24 * 60 * 60 * 1_000
 }
 
 impl Default for LimitsConfig {
@@ -580,6 +585,10 @@ mod tests {
             "**/build/**",
             "**/target/**",
             "**/.tmp/**",
+            "**/.local/go/**",
+            "**/.browseros/**",
+            "**/.codex/sessions/**",
+            "**/.codex/plugins/cache/**",
         ] {
             assert!(excludes.contains(&pattern.to_string()), "missing {pattern}");
         }
