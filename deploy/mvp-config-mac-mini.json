@@ -78,7 +78,7 @@
   ],
   "index_enabled": false,
   "topology_cache_path": "/Users/roomhacker/.cache/grepmesh/topology.json",
-  "gptadmin_topology_url": "https://u-f1102930.t.gptadmin.bezrabotnyi.com/mcp-relay/grepmesh",
+  "gptadmin_topology_url": "https://u-f1102930.t.gptadmin.bezrabotnyi.com/mcp-relay/agents",
   "gptadmin_token_env": "GPTADMIN_GREPMESH_TOKEN",
   "topology_ttl_ms": 30000
 }
