@@ -73,10 +73,14 @@
     "min_pdf_text_chars": 64,
     "pdf_dpi": 180,
     "max_pdf_pages": 200,
-    "max_image_bytes": 268435456
+    "max_image_bytes": 268435456,
+    "backend": "mesh"
   },
   "topology_cache_path": "/Users/user/.cache/grepmesh/topology.json",
   "gptadmin_topology_url": "https://u-f1102930.t.gptadmin.bezrabotnyi.com/mcp-relay/grepmesh",
   "gptadmin_token_env": "GPTADMIN_GREPMESH_TOKEN",
-  "topology_ttl_ms": 30000
+  "topology_ttl_ms": 30000,
+  "compute": {
+    "enabled": false
+  }
 }
