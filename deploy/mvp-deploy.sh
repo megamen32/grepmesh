@@ -46,12 +46,15 @@ while [[ $# -gt 0 ]]; do
     --config) CONFIG=$2; shift 2 ;;
     --remote) REMOTE=$2; shift 2 ;;
     --rollback) MODE=rollback; RECEIPT=$2; shift 2 ;;
+    --receipt) RECEIPT=$2; shift 2 ;;
     --local-mode) shift ;;
     --mode) MODE=$2; shift 2 ;;
     -h|--help) usage ;;
     *) die "unknown argument: $1 (see --help)" ;;
   esac
 done
+
+[[ $MODE == deploy || $MODE == rollback ]] || die "invalid mode: $MODE"
 
 SELF=$(readlink -f "$0")
 
@@ -234,12 +237,14 @@ run sudo install -m 0644 "$CONFIG" "$CONFIG_PATH.mvp-new"
 run sudo mv -Tf "$INSTALL_DIR/.grepmesh-mcp.mvp-new" "$BINARY_PATH"
 INSTALLED_SHA=$(sha_any "$BINARY_PATH")
 if [[ "$INSTALLED_SHA" != "$NEW_BIN_SHA" ]]; then
-  die "installed binary sha mismatch: $INSTALLED_SHA"
+  log "installed binary sha mismatch: $INSTALLED_SHA"
+  rollback_on_error 1
 fi
 run sudo mv -Tf "$CONFIG_PATH.mvp-new" "$CONFIG_PATH"
 INSTALLED_CFG_SHA=$(sha_any "$CONFIG_PATH")
 if [[ "$INSTALLED_CFG_SHA" != "$NEW_CFG_SHA" ]]; then
-  die "installed config sha mismatch: $INSTALLED_CFG_SHA"
+  log "installed config sha mismatch: $INSTALLED_CFG_SHA"
+  rollback_on_error 1
 fi
 
 run sudo systemctl restart "$SERVICE"
@@ -271,7 +276,7 @@ health_check=PASS (service active + HTTP 200 within ${HEALTH_WAIT}s)
 libonnxruntime_path=$LIB_ONNX
 libonnxruntime_sha256=$(sha_any "$LIB_ONNX")
 binary_lib_dependencies=system only (libstdc++/libm/libgcc_s/libc); no staged lib needed
-rollback_hint=$SELF --rollback $RECEIPT_DIR
+rollback_hint=from owning GrepMesh checkout: deploy/mvp-deploy.sh --rollback $RECEIPT_DIR (add --remote with this host's LAN SSH target when remote)
 MANIFEST
 sudo chmod -R a+rX "$RECEIPT_DIR"
 
