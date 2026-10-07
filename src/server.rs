@@ -445,6 +445,9 @@ async fn handle_rpc(
     let is_notification = payload.get("id").is_none();
     let response = match handle_rpc_inner(state, payload).await {
         Ok(v) => v,
+        Err(err) if err.is::<crate::compute_client::InvalidOcrInput>() => {
+            json!({"jsonrpc":"2.0","error":{"code":-32042,"message":"OCR input cannot be decoded"},"id":id})
+        }
         Err(err) => {
             json!({"jsonrpc":"2.0","error":{"code":-32000,"message":err.to_string()},"id":id})
         }

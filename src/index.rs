@@ -20,6 +20,7 @@ use std::{
 
 type IndexMap = BTreeMap<String, BTreeSet<PathBuf>>;
 type DirectoryScan = (usize, IndexMap, Vec<IndexedDocument>, Vec<PathBuf>);
+const MAX_PENDING_OCR: usize = 65_536;
 
 #[derive(Clone, Debug)]
 struct IndexedDocument {
@@ -95,7 +96,8 @@ impl PersistentIndex {
             .map_err(|error| error.to_string())?;
         connection
             .execute_batch(
-                "CREATE TABLE IF NOT EXISTS grepmesh_document_rows (\
+                "CREATE TABLE IF NOT EXISTS grepmesh_pending_ocr (path TEXT PRIMARY KEY);\
+                 CREATE TABLE IF NOT EXISTS grepmesh_document_rows (\
                    path TEXT PRIMARY KEY,\
                    fts_rowid INTEGER NOT NULL UNIQUE\
                  );\
@@ -144,13 +146,106 @@ impl PersistentIndex {
     }
 
     fn mark_full_rebuild_ms(&self, now_ms: u64) -> Result<(), String> {
-        self.connection()?
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        transaction
             .execute(
                 "INSERT INTO grepmesh_metadata(key, value) VALUES ('last_full_rebuild_ms', ?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 params![now_ms.to_string()],
             )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM grepmesh_metadata WHERE key='ocr_recovery_full_scan_required'",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn ocr_recovery_full_scan_required(&self) -> Result<bool, String> {
+        self.connection()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM grepmesh_metadata WHERE key='ocr_recovery_full_scan_required' AND value='1')", [], |row| row.get(0)
+        ).map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn load_pending_ocr(&self) -> Result<(Vec<PathBuf>, bool), String> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare("SELECT path FROM grepmesh_pending_ocr ORDER BY path LIMIT ?1")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![(MAX_PENDING_OCR + 1) as i64], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|error| error.to_string())?;
+        let mut paths = rows
+            .map(|row| row.map(PathBuf::from))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        let overflow: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM grepmesh_metadata WHERE key='pending_ocr_overflow' AND value='1')", [], |row| row.get(0)
+        ).map_err(|error| error.to_string())?;
+        let overflow = overflow || paths.len() > MAX_PENDING_OCR;
+        paths.truncate(MAX_PENDING_OCR);
+        Ok((paths, overflow))
+    }
+
+    pub(crate) fn defer_ocr(&self, path: &Path) -> Result<(), String> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        let path = path.display().to_string();
+        let exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM grepmesh_pending_ocr WHERE path=?1)",
+                params![path],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if exists {
+            return Ok(());
+        }
+        let count: usize = transaction
+            .query_row("SELECT count(*) FROM grepmesh_pending_ocr", [], |row| {
+                row.get(0)
+            })
+            .map_err(|error| error.to_string())?;
+        if count >= MAX_PENDING_OCR {
+            transaction.execute_batch("INSERT INTO grepmesh_metadata(key,value) VALUES ('pending_ocr_overflow','1'), ('ocr_recovery_full_scan_required','1') ON CONFLICT(key) DO UPDATE SET value='1';")
+                .map_err(|error| error.to_string())?;
+            transaction.commit().map_err(|error| error.to_string())?;
+            return Err("durable OCR queue is full; reconciliation is required".into());
+        }
+        transaction
+            .execute(
+                "INSERT INTO grepmesh_pending_ocr(path) VALUES (?1)",
+                params![path],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn ack_pending_ocr(&self, path: &Path) -> Result<(), String> {
+        self.connection()?
+            .execute(
+                "DELETE FROM grepmesh_pending_ocr WHERE path=?1",
+                params![path.display().to_string()],
+            )
             .map(|_| ())
             .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn set_ocr_overflow(&self, overflow: bool) -> Result<(), String> {
+        let connection = self.connection()?;
+        if overflow {
+            connection.execute_batch("BEGIN; INSERT INTO grepmesh_metadata(key,value) VALUES ('pending_ocr_overflow','1'), ('ocr_recovery_full_scan_required','1') ON CONFLICT(key) DO UPDATE SET value='1'; COMMIT;")
+        } else {
+            connection.execute_batch("BEGIN; INSERT INTO grepmesh_metadata(key,value) VALUES ('ocr_recovery_full_scan_required','1') ON CONFLICT(key) DO UPDATE SET value='1'; DELETE FROM grepmesh_metadata WHERE key='pending_ocr_overflow'; COMMIT;")
+        }.map_err(|error| error.to_string())
     }
 
     fn replace_indexed_document(&self, document: &IndexedDocument) -> Result<(), String> {
@@ -191,6 +286,15 @@ impl PersistentIndex {
             None => false,
         };
         if cache_matches && fts_matches {
+            let acknowledged = transaction
+                .execute(
+                    "DELETE FROM grepmesh_pending_ocr WHERE path=?1",
+                    params![path],
+                )
+                .map_err(|error| error.to_string())?;
+            if acknowledged != 0 {
+                transaction.commit().map_err(|error| error.to_string())?;
+            }
             return Ok(());
         }
         if let Some(rowid) = fts_rowid {
@@ -236,6 +340,12 @@ impl PersistentIndex {
                 "INSERT INTO grepmesh_metadata(key, value) VALUES ('document_rows_v1', '1') \
                  ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 [],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM grepmesh_pending_ocr WHERE path=?1",
+                params![path],
             )
             .map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())?;
@@ -383,6 +493,12 @@ impl PersistentIndex {
                 "INSERT INTO grepmesh_metadata(key, value) VALUES ('document_rows_v1', '1') \
                  ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 [],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM grepmesh_pending_ocr WHERE path=?1",
+                params![path],
             )
             .map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())
@@ -617,6 +733,7 @@ pub struct IndexManager {
     persistent: Option<PersistentIndex>,
     enabled: bool,
     ocr: Option<Arc<OcrEngine>>,
+    pending_store_error: Option<String>,
 }
 
 impl IndexManager {
@@ -631,6 +748,7 @@ impl IndexManager {
             persistent: None,
             enabled: false,
             ocr: None,
+            pending_store_error: None,
         }
     }
 
@@ -668,6 +786,12 @@ impl IndexManager {
         let persistent_state = persistent.clone();
         let stt = SttEngine::new(stt_config);
         let ocr = OcrEngine::new(ocr_config).map(Arc::new);
+        let pending_store_error = match (ocr.as_ref(), persistent.as_ref()) {
+            (Some(ocr), Some(index)) => ocr.attach_pending_store(index.clone()).err(),
+            (Some(ocr), None) if ocr.is_mesh() => Some("durable OCR queue is unavailable".into()),
+            _ => None,
+        };
+        let thread_pending_store_error = pending_store_error.clone();
         let manager_ocr = ocr.clone();
         thread::spawn(move || {
             let index_storage_path = persistent_state.as_ref().map(|index| index.path.clone());
@@ -717,30 +841,19 @@ impl IndexManager {
                 }
             });
             let configured_roots = ordered_roots(&roots).into_iter().collect::<BTreeSet<_>>();
-            let now_ms = unix_time_ms();
             let mut last_full_rebuild_ms = persistent_state
                 .as_ref()
                 .and_then(|index| index.last_full_rebuild_ms().ok().flatten());
-            // A populated legacy database predates the admission marker. Keep
-            // serving it and schedule its first reconciliation after the host
-            // interval instead of forcing another expensive startup walk.
-            if last_full_rebuild_ms.is_none()
-                && persistent_state
-                    .as_ref()
-                    .and_then(|index| index.document_count().ok())
-                    .is_some_and(|count| count > 0)
-            {
-                if let Some(index) = persistent_state.as_ref() {
-                    if index.mark_full_rebuild_ms(now_ms).is_ok() {
-                        last_full_rebuild_ms = Some(now_ms);
-                    }
-                }
-            }
             let rebuild_due = |last: Option<u64>| {
                 let now = unix_time_ms();
-                last.is_none_or(|last| {
-                    now < last || now.saturating_sub(last) >= full_rebuild_min_interval_ms
-                })
+                let recovery_required = ocr.as_ref().is_none_or(|ocr| ocr.deferred_count() == 0)
+                    && persistent_state.as_ref().is_some_and(|index| {
+                        index.ocr_recovery_full_scan_required().unwrap_or(false)
+                    });
+                recovery_required
+                    || last.is_none_or(|last| {
+                        now < last || now.saturating_sub(last) >= full_rebuild_min_interval_ms
+                    })
             };
             let run_rebuild = |last: &mut Option<u64>, generation: &mut u64| {
                 let succeeded = rebuild_index(
@@ -758,16 +871,29 @@ impl IndexManager {
                     },
                     generation,
                 );
-                if succeeded && ocr.as_ref().is_none_or(|ocr| ocr.deferred_count() == 0) {
+                if succeeded
+                    && thread_pending_store_error.is_none()
+                    && ocr.as_ref().is_none_or(|ocr| ocr.deferred_count() == 0)
+                {
                     let completed_ms = unix_time_ms();
                     if let Some(index) = persistent_state.as_ref() {
-                        let _ = index.mark_full_rebuild_ms(completed_ms);
+                        if let Err(error) = index.mark_full_rebuild_ms(completed_ms) {
+                            if let Ok(mut current) = state.write() {
+                                current.state = IndexState::Degraded;
+                                current.last_error =
+                                    Some(format!("persist full reconciliation marker: {error}"));
+                            }
+                            return;
+                        }
                     }
                     *last = Some(completed_ms);
                 }
             };
             let mut generation = 0;
-            if rebuild_due(last_full_rebuild_ms) || persistent_state.is_none() {
+            if (ocr.as_ref().is_none_or(|ocr| ocr.deferred_count() == 0)
+                && rebuild_due(last_full_rebuild_ms))
+                || persistent_state.is_none()
+            {
                 run_rebuild(&mut last_full_rebuild_ms, &mut generation);
             } else {
                 if let Ok(mut ready) = ready_root_state.write() {
@@ -781,7 +907,7 @@ impl IndexManager {
                         .unwrap_or(0);
                 }
             }
-            let mut pending = false;
+            let mut pending = ocr.as_ref().is_some_and(|ocr| ocr.deferred_count() > 0);
             let mut directory_activity = BTreeMap::<PathBuf, DirectoryActivityState>::new();
             loop {
                 let activity_delay_until = directory_activity
@@ -793,7 +919,10 @@ impl IndexManager {
                     // An overdue full pass is intentionally blocked while GPU
                     // work is deferred. Never turn its expired deadline into
                     // recv_timeout(0) and spin throughout the GPU outage.
-                    Duration::from_secs(30)
+                    ocr.as_ref()
+                        .map(|ocr| ocr.retry_poll_interval())
+                        .unwrap_or(Duration::from_secs(30))
+                        .max(Duration::from_secs(1))
                 } else if pending {
                     last_full_rebuild_ms
                         .map(|last| {
@@ -854,7 +983,7 @@ impl IndexManager {
                     pending = true;
                 }
                 // GPU admission failures are deferred independently of the
-                // weekly full walk. Retry one input per minute and preserve
+                // weekly full walk. Retry one input serially and preserve
                 // the successful-reconciliation marker until all are served.
                 if let (Some(ocr), Some(index)) = (ocr.as_ref(), persistent_state.as_ref()) {
                     let retry = ocr.take_retry_paths(1).into_iter().collect::<BTreeSet<_>>();
@@ -873,8 +1002,8 @@ impl IndexManager {
                         }
                         pending = true;
                     }
-                    if pending && rebuild_due(last_full_rebuild_ms) {
-                        ocr.clear_overflow_if_drained();
+                    if ocr.clear_overflow_if_drained() {
+                        pending = true;
                     }
                 }
                 if pending
@@ -895,6 +1024,7 @@ impl IndexManager {
             persistent,
             enabled: true,
             ocr: manager_ocr,
+            pending_store_error,
         }
     }
 
@@ -914,6 +1044,10 @@ impl IndexManager {
         if deferred > 0 && snapshot.state != IndexState::Building {
             snapshot.state = IndexState::Degraded;
             snapshot.last_error = Some(format!("{deferred} OCR inputs await an available GPU"));
+        }
+        if let Some(error) = &self.pending_store_error {
+            snapshot.state = IndexState::Degraded;
+            snapshot.last_error = Some(format!("attach durable OCR queue: {error}"));
         }
         snapshot
     }
@@ -1310,7 +1444,12 @@ fn retry_ocr_path(
     let metadata = match fs::symlink_metadata(path) {
         Ok(value) => value,
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            ocr.forget_deferred(path);
+            match persistent.remove_document(path) {
+                Ok(()) => ocr.forget_deferred(path),
+                Err(error) => {
+                    tracing::warn!(error = %error, "remove missing deferred OCR document failed")
+                }
+            }
             return;
         }
         Err(_) => return,
@@ -1921,6 +2060,65 @@ mod tests {
     }
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn durable_ocr_pending_reopens_and_acks_with_fts_commit() {
+        let temp_root = Path::new(".tmp/index-tests");
+        fs::create_dir_all(temp_root).unwrap();
+        let dir = tempfile::tempdir_in(temp_root).unwrap();
+        let database = dir.path().join("index.sqlite");
+        let path = dir.path().join("scan.png");
+        fs::write(&path, "controlled input; no inference is run").unwrap();
+        {
+            let index = PersistentIndex::open(database.clone()).unwrap();
+            index
+                .replace_document(&path, "previous durable OCR token")
+                .unwrap();
+            index.defer_ocr(&path).unwrap();
+            index.set_ocr_overflow(true).unwrap();
+        }
+        let index = PersistentIndex::open(database).unwrap();
+        assert_eq!(
+            index.load_pending_ocr().unwrap(),
+            (vec![path.clone()], true)
+        );
+        let connection = index.connection().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER durable_ocr_ack_failure BEFORE DELETE ON grepmesh_pending_ocr \
+             BEGIN SELECT RAISE(ABORT, 'controlled pending ACK failure'); END;",
+            )
+            .unwrap();
+        let error = index
+            .replace_document(&path, "replacement durable OCR token")
+            .unwrap_err();
+        assert!(error.contains("controlled pending ACK failure"));
+        assert_eq!(
+            index.load_pending_ocr().unwrap(),
+            (vec![path.clone()], true)
+        );
+        assert_eq!(index.candidates("previous").unwrap(), vec![path.clone()]);
+        assert!(index.candidates("replacement").unwrap().is_empty());
+        connection
+            .execute_batch("DROP TRIGGER durable_ocr_ack_failure;")
+            .unwrap();
+        index
+            .replace_document(&path, "replacement durable OCR token")
+            .unwrap();
+        assert_eq!(index.load_pending_ocr().unwrap(), (Vec::new(), true));
+        assert!(index.candidates("previous").unwrap().is_empty());
+        assert_eq!(index.candidates("replacement").unwrap(), vec![path.clone()]);
+        index.set_ocr_overflow(false).unwrap();
+        index.defer_ocr(&path).unwrap();
+        // An unchanged cached document still needs to commit its pending ACK.
+        index
+            .replace_document(&path, "replacement durable OCR token")
+            .unwrap();
+        assert_eq!(index.load_pending_ocr().unwrap(), (Vec::new(), false));
+        assert!(index.ocr_recovery_full_scan_required().unwrap());
+        index.mark_full_rebuild_ms(unix_time_ms()).unwrap();
+        assert!(!index.ocr_recovery_full_scan_required().unwrap());
+    }
 
     #[cfg(feature = "ocr")]
     #[test]

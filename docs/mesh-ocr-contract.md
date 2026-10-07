@@ -41,8 +41,8 @@ must remain healthy. Complete builds/deploy/restarts before final canary.
 Code review fixes: GPU outage cannot make the index recv_timeout(0) spin;
 expired alternate-peer capability is refreshed before retry; one large-body
 intake is admitted before JSON; pending OCR completion is acknowledged only
-once SQLite accepts the text. Retry is one file/minute independent of hot FS
-activity; a thin PDF after transport failure is never treated as completed OCR.
+once SQLite accepts the text. Retry is serial: after a committed result, at most one file/second;
+a failed attempt restores the60s backoff, independent of hot FS activity; a thin PDF after transport failure is never treated as completed OCR.
 Mesh inputs above32MiB follow the index size policy instead of retrying forever.
 Local PDF rendering is bounded90s. NoGPU => defer without opening largepayload.
 Failedroutes cool down60s and do not cause per-file capability/request storms.
@@ -76,3 +76,14 @@ GPTAdmin topology, retaining LinuxLAN routes. The restricted fleet token is
 deployed only through its protected ~/.config/grepmesh/gptadmin.env, excluded
 from search. No extra MCPprocess or localCPUOCR is enabled. M1 currently
 travels with theuser and is intentionally not a live acceptance dependency.
+
+Durable pending OCR is bounded65,536paths inSQLite, restored afterrestart.
+FTS replacement/deletion and pending ACK commit atomically; failed enqueue
+keeps the memory entry and blocks completion until durable reconciliation.
+Overflow records a forced full-walk flag. Once tracked work drains, a new walk
+rediscovers overflowed inputs even with a recent weekly marker; only a
+successfully committed full reconciliation clears that flag. Migration from
+the initial memory-only GPU release seeds this flag without resetting the
+genuine full-rebuild timestamp. Confirmed undecodable image payloads return
+a typed terminal error; emptyindex ACK still requiresSQLitecommit and does
+not cool down the healthy GPU. IO, CUDA and transport failures remainretryable.

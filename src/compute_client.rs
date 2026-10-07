@@ -22,6 +22,16 @@ const STATUS_TTL: Duration = Duration::from_secs(10);
 const FAILED_PEER_COOLDOWN: Duration = Duration::from_secs(60);
 const MAX_PEERS: usize = 8;
 
+#[derive(Debug)]
+pub(crate) struct InvalidOcrInput;
+
+impl std::fmt::Display for InvalidOcrInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("mesh OCR input is not decodable")
+    }
+}
+impl std::error::Error for InvalidOcrInput {}
+
 #[derive(Clone, Debug, Deserialize)]
 struct ComputeStatus {
     host_id: String,
@@ -245,9 +255,13 @@ impl ComputeClient {
             // Leave budget for another eligible candidate after a failed worker.
             let attempt_deadline = deadline.min(Instant::now() + Duration::from_secs(45));
             let result = self.call(&peer, "ocr_extract", arguments.clone(), attempt_deadline);
-            let Ok(result) = result else {
-                self.mark_failed(&peer);
-                continue;
+            let result = match result {
+                Ok(value) => value,
+                Err(error) if error.is::<InvalidOcrInput>() => return Err(error),
+                Err(_) => {
+                    self.mark_failed(&peer);
+                    continue;
+                }
             };
             if result.get("host_id").and_then(Value::as_str) != Some(peer.host_id.as_str())
                 || result.get("backend").and_then(Value::as_str) != Some("cuda")
@@ -392,6 +406,9 @@ impl std::fmt::Display for ConnectFailure {
 impl std::error::Error for ConnectFailure {}
 
 fn unwrap_result(body: Value) -> Result<Value> {
+    if body.pointer("/error/code").and_then(Value::as_i64) == Some(-32042) {
+        return Err(anyhow!(InvalidOcrInput));
+    }
     if body.get("error").is_some() {
         return Err(anyhow!("OCR worker rejected request"));
     }
@@ -463,6 +480,17 @@ fn unix_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_confirmed_input_rejection_is_terminal() {
+        let error =
+            unwrap_result(json!({"error":{"code":-32042,"message":"OCR input cannot be decoded"}}))
+                .unwrap_err();
+        assert!(error.is::<InvalidOcrInput>());
+        let error = unwrap_result(json!({"error":{"code":-32000,"message":"GPU worker is busy"}}))
+            .unwrap_err();
+        assert!(!error.is::<InvalidOcrInput>());
+    }
 
     #[cfg(feature = "ocr")]
     #[test]

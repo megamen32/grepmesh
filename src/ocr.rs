@@ -1,5 +1,6 @@
 use crate::compute_client::{mesh_input_limit, ComputeClient};
 use crate::config::OcrConfig;
+use crate::index::PersistentIndex;
 use anyhow::{anyhow, Context, Result};
 use image::ImageFormat;
 use oar_ocr::{
@@ -31,6 +32,11 @@ pub struct OcrEngine {
     last_retry: Mutex<Instant>,
     retry_cursor: Mutex<Option<PathBuf>>,
     deferred_overflow: AtomicBool,
+    pending_store: Mutex<Option<PersistentIndex>>,
+    pending_store_healthy: AtomicBool,
+    pending_store_load_failed: AtomicBool,
+    undurable: Mutex<BTreeSet<PathBuf>>,
+    retry_fast: AtomicBool,
 }
 
 struct OcrRuntime {
@@ -52,7 +58,48 @@ impl OcrEngine {
             ),
             retry_cursor: Mutex::new(None),
             deferred_overflow: AtomicBool::new(false),
+            pending_store: Mutex::new(None),
+            pending_store_healthy: AtomicBool::new(true),
+            pending_store_load_failed: AtomicBool::new(false),
+            undurable: Mutex::new(BTreeSet::new()),
+            retry_fast: AtomicBool::new(false),
         })
+    }
+
+    pub(crate) fn attach_pending_store(&self, store: PersistentIndex) -> Result<(), String> {
+        if !self.is_mesh() {
+            return Ok(());
+        }
+        *self
+            .pending_store
+            .lock()
+            .map_err(|_| "pending store lock unavailable")? = Some(store.clone());
+        let loaded = store.load_pending_ocr();
+        match loaded {
+            Ok((paths, overflow)) => {
+                self.deferred
+                    .lock()
+                    .map_err(|_| "pending queue lock unavailable")?
+                    .extend(paths);
+                self.deferred_overflow.store(overflow, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(error) => {
+                self.pending_store_load_failed
+                    .store(true, Ordering::Relaxed);
+                self.pending_store_healthy.store(false, Ordering::Relaxed);
+                self.deferred_overflow.store(true, Ordering::Relaxed);
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn retry_poll_interval(&self) -> Duration {
+        if self.retry_fast.load(Ordering::Relaxed) {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_secs(30)
+        }
     }
 
     pub(crate) fn is_mesh(&self) -> bool {
@@ -78,7 +125,27 @@ impl OcrEngine {
     /// and file deletion through this method.
     pub(crate) fn forget_deferred(&self, path: &Path) {
         if let Ok(mut paths) = self.deferred.lock() {
+            if !paths.contains(path) {
+                return;
+            }
+            let store = self.pending_store.lock();
+            let Ok(store) = store else {
+                return;
+            };
+            if let Some(store) = store.as_ref() {
+                if store.ack_pending_ocr(path).is_err() {
+                    return;
+                }
+            }
             paths.remove(path);
+            if let Ok(mut undurable) = self.undurable.lock() {
+                undurable.remove(path);
+                self.pending_store_healthy.store(
+                    undurable.is_empty() && !self.pending_store_load_failed.load(Ordering::Relaxed),
+                    Ordering::Relaxed,
+                );
+            }
+            self.retry_fast.store(true, Ordering::Relaxed);
         }
     }
 
@@ -91,16 +158,47 @@ impl OcrEngine {
             .deferred
             .lock()
             .map_err(|_| anyhow!("deferred OCR queue lock is unavailable"))?;
-        if paths.contains(path) {
-            return Ok(());
-        }
-        if paths.len() >= MAX_DEFERRED_PATHS {
+        self.retry_fast.store(false, Ordering::Relaxed);
+        if !paths.contains(path) && paths.len() >= MAX_DEFERRED_PATHS {
             self.deferred_overflow.store(true, Ordering::Relaxed);
+            if let Some(store) = self
+                .pending_store
+                .lock()
+                .map_err(|_| anyhow!("pending store lock unavailable"))?
+                .as_ref()
+            {
+                store.set_ocr_overflow(true).map_err(anyhow::Error::msg)?;
+            }
             return Err(anyhow!(
                 "deferred mesh OCR queue is full; input was not queued and requires reconciliation"
             ));
         }
         paths.insert(path.to_path_buf());
+        if let Some(store) = self
+            .pending_store
+            .lock()
+            .map_err(|_| anyhow!("pending store lock unavailable"))?
+            .as_ref()
+        {
+            let mut undurable = self
+                .undurable
+                .lock()
+                .map_err(|_| anyhow!("undurable OCR queue lock unavailable"))?;
+            if let Err(error) = store.defer_ocr(path) {
+                undurable.insert(path.to_path_buf());
+                self.pending_store_healthy.store(false, Ordering::Relaxed);
+                self.deferred_overflow.store(true, Ordering::Relaxed);
+                // Best effort durable recovery latch; the in-memory failure
+                // remains blocking even when the database rejects this too.
+                let _ = store.set_ocr_overflow(true);
+                return Err(anyhow::Error::msg(error));
+            }
+            undurable.remove(path);
+            self.pending_store_healthy.store(
+                undurable.is_empty() && !self.pending_store_load_failed.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+        }
         Ok(())
     }
 
@@ -110,7 +208,22 @@ impl OcrEngine {
         let Ok(paths) = self.deferred.lock() else {
             return false;
         };
-        paths.is_empty() && self.deferred_overflow.swap(false, Ordering::Relaxed)
+        if !paths.is_empty()
+            || !self.pending_store_healthy.load(Ordering::Relaxed)
+            || !self.deferred_overflow.load(Ordering::Relaxed)
+        {
+            return false;
+        }
+        let Ok(store) = self.pending_store.lock() else {
+            return false;
+        };
+        if store
+            .as_ref()
+            .is_some_and(|store| store.set_ocr_overflow(false).is_err())
+        {
+            return false;
+        }
+        self.deferred_overflow.swap(false, Ordering::Relaxed)
     }
 
     /// Entries stay pending until the index acknowledges persistence or the
@@ -123,10 +236,15 @@ impl OcrEngine {
         let Ok(mut last_retry) = self.last_retry.lock() else {
             return Vec::new();
         };
-        if last_retry.elapsed() < RETRY_COOLDOWN {
+        let cooldown = if self.retry_fast.load(Ordering::Relaxed) {
+            Duration::from_secs(1)
+        } else {
+            RETRY_COOLDOWN
+        };
+        if last_retry.elapsed() < cooldown {
             return Vec::new();
         }
-        let Ok(mut paths) = self.deferred.lock() else {
+        let Ok(paths) = self.deferred.lock() else {
             return Vec::new();
         };
         let Ok(mut cursor) = self.retry_cursor.lock() else {
@@ -148,16 +266,18 @@ impl OcrEngine {
             return Vec::new();
         };
         *last_retry = Instant::now();
+        self.retry_fast.store(false, Ordering::Relaxed);
         *cursor = Some(path.clone());
-        if matches!(path.try_exists(), Ok(false)) {
-            paths.remove(&path);
-            return Vec::new();
-        }
+        // Even missing inputs reach the index's durable terminal ACK, which
+        // also removes stale searchable text before clearing this queue.
         // The max parameter cannot multiply the shared project's workload.
         vec![path]
     }
 
     pub fn is_image(&self, path: &Path) -> bool {
+        if self.is_mesh() {
+            return remote_image_type(path).is_some();
+        }
         path.extension()
             .and_then(|ext| ext.to_str())
             .and_then(ImageFormat::from_extension)
@@ -192,12 +312,9 @@ impl OcrEngine {
 
     pub fn extract_image(&self, path: &Path) -> Result<String> {
         if self.config.backend == "mesh" {
-            let input_type = path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            return self.extract_remote(path, &input_type);
+            let input_type = remote_image_type(path)
+                .ok_or_else(|| anyhow!("unsupported mesh OCR image format"))?;
+            return self.extract_remote(path, input_type);
         }
         if self.config.backend != "local" {
             return Err(anyhow!("unsupported OCR backend"));
@@ -247,9 +364,15 @@ impl OcrEngine {
             let client = mesh.get_or_insert_with(|| ComputeClient::new(self.config.clone()));
             client.extract(path, input_type)
         })();
-        if matches!(path.try_exists(), Ok(false)) {
-            self.forget_deferred(path);
-        } else if result.is_err() {
+        let result = match result {
+            Err(error) if error.is::<crate::compute_client::InvalidOcrInput>() => {
+                // A confirmed undecodable image is terminal. The index still
+                // acknowledges an empty result only after its SQLite commit.
+                Ok(String::new())
+            }
+            result => result,
+        };
+        if result.is_err() {
             self.defer_path(path)?;
         }
         // A successful GPU result is not durable until SQLite accepts it.
@@ -323,6 +446,23 @@ impl OcrEngine {
             markdown.push_str(&format!("## Page {}\n\n{}", index + 1, text));
         }
         Ok(markdown)
+    }
+}
+
+fn remote_image_type(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .and_then(ImageFormat::from_extension)?
+    {
+        ImageFormat::Png => Some("png"),
+        ImageFormat::Jpeg => Some("jpg"),
+        ImageFormat::WebP => Some("webp"),
+        ImageFormat::Tiff => Some("tiff"),
+        ImageFormat::Bmp => Some("bmp"),
+        ImageFormat::Gif => Some("gif"),
+        ImageFormat::Avif => Some("avif"),
+        _ => None,
     }
 }
 
@@ -406,6 +546,101 @@ fn require_cuda_environment(config: &OcrConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn committed_retry_drains_serially_and_failure_restores_backoff() {
+        let ocr = OcrEngine::new(OcrConfig {
+            backend: "mesh".into(),
+            ..OcrConfig::default()
+        })
+        .unwrap();
+        for name in ["a.png", "b.png", "c.png"] {
+            ocr.defer_path(Path::new(name)).unwrap();
+        }
+        let first = ocr.take_retry_paths(10);
+        assert_eq!(first, vec![PathBuf::from("a.png")]);
+        ocr.forget_deferred(&first[0]);
+        assert_eq!(ocr.retry_poll_interval(), Duration::from_secs(1));
+        *ocr.last_retry.lock().unwrap() = Instant::now() - Duration::from_millis(1100);
+        assert_eq!(ocr.take_retry_paths(10), vec![PathBuf::from("b.png")]);
+        // No durable ACK: the same positive failure backoff remains active.
+        assert_eq!(ocr.retry_poll_interval(), Duration::from_secs(30));
+        assert!(ocr.take_retry_paths(10).is_empty());
+        assert_eq!(ocr.deferred_count(), 2);
+    }
+
+    #[test]
+    fn mesh_image_policy_matches_worker_types_and_normalizes_jpeg_aliases() {
+        let ocr = OcrEngine::new(OcrConfig {
+            backend: "mesh".into(),
+            ..OcrConfig::default()
+        })
+        .unwrap();
+        assert!(ocr.is_image(Path::new("image.jpeg")));
+        assert_eq!(remote_image_type(Path::new("image.jpeg")), Some("jpg"));
+        assert!(!ocr.is_image(Path::new("application.ico")));
+        assert!(!ocr.is_image(Path::new("texture.tga")));
+    }
+
+    #[test]
+    fn pending_engine_work_survives_recreation_until_durable_ack() {
+        let root = Path::new(".tmp/ocr-tests");
+        fs::create_dir_all(root).unwrap();
+        let dir = tempfile::tempdir_in(root).unwrap();
+        let store = PersistentIndex::open(dir.path().join("index.sqlite")).unwrap();
+        let path = dir.path().join("input.png");
+        let config = OcrConfig {
+            backend: "mesh".into(),
+            ..OcrConfig::default()
+        };
+        let first = OcrEngine::new(config.clone()).unwrap();
+        first.attach_pending_store(store.clone()).unwrap();
+        first.defer_path(&path).unwrap();
+        drop(first);
+        let second = OcrEngine::new(config).unwrap();
+        second.attach_pending_store(store.clone()).unwrap();
+        assert!(second.is_deferred(&path));
+        // Missing inputs still reach the index's SQL deletion/ACK path.
+        assert_eq!(second.take_retry_paths(1), vec![path.clone()]);
+        second.forget_deferred(&path);
+        assert!(store.load_pending_ocr().unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn failed_enqueue_retries_durability_and_blocks_completion_until_repaired() {
+        let root = Path::new(".tmp/ocr-tests");
+        fs::create_dir_all(root).unwrap();
+        let dir = tempfile::tempdir_in(root).unwrap();
+        let database = dir.path().join("index.sqlite");
+        let store = PersistentIndex::open(database.clone()).unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection.execute_batch("CREATE TRIGGER enqueue_failure BEFORE INSERT ON grepmesh_pending_ocr BEGIN SELECT RAISE(ABORT, 'controlled enqueue failure'); END;").unwrap();
+        let config = OcrConfig {
+            backend: "mesh".into(),
+            ..OcrConfig::default()
+        };
+        let engine = OcrEngine::new(config.clone()).unwrap();
+        engine.attach_pending_store(store.clone()).unwrap();
+        let path = dir.path().join("input.png");
+        assert!(engine.defer_path(&path).is_err());
+        assert!(engine.is_deferred(&path));
+        assert!(!engine.pending_store_healthy.load(Ordering::Relaxed));
+        assert!(store.ocr_recovery_full_scan_required().unwrap());
+        assert!(!engine.clear_overflow_if_drained());
+        connection
+            .execute_batch("DROP TRIGGER enqueue_failure;")
+            .unwrap();
+        // Existing memory entries must still retry their durable insert.
+        engine.defer_path(&path).unwrap();
+        assert!(engine.pending_store_healthy.load(Ordering::Relaxed));
+        drop(engine);
+        let reopened = OcrEngine::new(config).unwrap();
+        reopened.attach_pending_store(store.clone()).unwrap();
+        assert!(reopened.is_deferred(&path));
+        reopened.forget_deferred(&path);
+        assert!(reopened.clear_overflow_if_drained());
+        assert!(store.ocr_recovery_full_scan_required().unwrap());
+    }
 
     #[test]
     fn deferred_retry_is_serial_and_overflow_requires_a_new_walk() {

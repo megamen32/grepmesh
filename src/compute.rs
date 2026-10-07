@@ -239,7 +239,9 @@ impl ComputeWorker {
                 let text = engine.extract_pdf(&path)?;
                 text
             } else {
-                engine.extract_image(&path)?
+                engine
+                    .extract_image(&path)
+                    .map_err(classify_image_failure)?
             };
             let result = json!({"text": text, "host_id": worker.host_id, "gpu_uuid": gpu.uuid,
                 "gpu_name": gpu.name, "backend": "cuda"});
@@ -255,6 +257,20 @@ impl ComputeWorker {
             })?
             .context("GPU OCR job failed")?
     }
+}
+
+fn classify_image_failure(error: anyhow::Error) -> anyhow::Error {
+    // Pinned oar-ocr-core 0.9.2 preserves ImageError as the source of
+    // OCRError::ImageLoad. Inspect that typed chain; never infer input validity
+    // from a generic "load image" message or classify IO/resource/CUDA errors.
+    #[cfg(feature = "ocr")]
+    if error.chain().filter_map(|source| source.downcast_ref::<image::ImageError>()).any(|error| {
+        matches!(error, image::ImageError::Decoding(_)) || matches!(error,
+            image::ImageError::Unsupported(unsupported) if matches!(unsupported.kind(), image::error::UnsupportedErrorKind::Format(_)))
+    }) {
+        return anyhow!(crate::compute_client::InvalidOcrInput);
+    }
+    error
 }
 
 fn validate_request(request: &OcrExtractRequest, limit: usize) -> Result<String> {
@@ -371,6 +387,43 @@ fn observed_at() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn confirmed_decode_and_format_errors_are_terminal_but_io_and_limits_are_not() {
+        use image::{
+            error::{
+                DecodingError, ImageFormatHint, LimitError, LimitErrorKind, UnsupportedError,
+                UnsupportedErrorKind,
+            },
+            ImageError,
+        };
+        let errors = [
+            ImageError::Decoding(DecodingError::from_format_hint(ImageFormatHint::Unknown)),
+            ImageError::Unsupported(UnsupportedError::from_format_and_kind(
+                ImageFormatHint::Unknown,
+                UnsupportedErrorKind::Format(ImageFormatHint::Unknown),
+            )),
+        ];
+        for error in errors {
+            let error = anyhow::Error::new(error).context("load image private-input-path");
+            assert!(classify_image_failure(error).is::<crate::compute_client::InvalidOcrInput>());
+        }
+        for error in [
+            ImageError::IoError(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "missing input",
+            )),
+            ImageError::Limits(LimitError::from_kind(LimitErrorKind::InsufficientMemory)),
+        ] {
+            let error = anyhow::Error::new(error).context("load image private-input-path");
+            assert!(!classify_image_failure(error).is::<crate::compute_client::InvalidOcrInput>());
+        }
+        assert!(
+            !classify_image_failure(anyhow!("CUDA provider unavailable"))
+                .is::<crate::compute_client::InvalidOcrInput>()
+        );
+    }
     #[test]
     fn parser_selects_exact_device_and_converts_mib() {
         let gpu = parse_gpu("1, GPU-other, RTX, 12288, 4000, 0, 8.6\n0, GPU-selected, RTX 3080 Ti, 12288, 7000, 4, 8.6", "0").unwrap();

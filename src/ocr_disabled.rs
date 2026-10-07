@@ -6,6 +6,15 @@ use std::path::Path;
 pub struct OcrEngine;
 
 impl OcrEngine {
+    pub(crate) fn attach_pending_store(
+        &self,
+        _store: crate::index::PersistentIndex,
+    ) -> std::result::Result<(), String> {
+        Ok(())
+    }
+    pub(crate) fn retry_poll_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(30)
+    }
     pub(crate) fn defer_path(&self, _path: &Path) -> Result<()> {
         Ok(())
     }

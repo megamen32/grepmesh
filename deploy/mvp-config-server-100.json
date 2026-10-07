@@ -23,7 +23,7 @@
   "peers": [
     {
       "host_id": "server-88",
-      "local_url": "http://127.0.0.1:9419/mcp",
+      "local_url": "http://192.168.2.75:9419/mcp",
       "routable_url": "http://192.168.2.75:9419/mcp"
     },
     {
