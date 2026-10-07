@@ -463,6 +463,147 @@ fn unix_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn busy_best_gpu_retries_an_available_peer_without_local_inference() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        };
+        type Requests = Arc<Mutex<Vec<(String, String)>>>;
+
+        fn mock_peer(
+            host: &'static str,
+            score: f64,
+            reject_ocr: bool,
+            requests: Requests,
+        ) -> (
+            PeerConfig,
+            tokio::sync::oneshot::Sender<()>,
+            std::thread::JoinHandle<()>,
+        ) {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+            let (stop, stopped) = tokio::sync::oneshot::channel();
+            let thread = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async move {
+                    let count = Arc::new(AtomicUsize::new(0));
+                    let app = axum::Router::new().route("/mcp", axum::routing::post(
+                        move |axum::Json(request): axum::Json<Value>| {
+                            let count = count.clone();
+                            let requests = requests.clone();
+                            async move {
+                                let tool = request.pointer("/params/name").and_then(Value::as_str).unwrap_or_default();
+                                requests.lock().unwrap().push((host.into(), tool.into()));
+                                let error = |message| json!({"jsonrpc":"2.0", "id":1, "error":{"code":-32000, "message":message}});
+                                if count.fetch_add(1, Ordering::Relaxed) >= 2 {
+                                    return axum::Json(error("mock request budget exceeded"));
+                                }
+                                let data = match tool {
+                                    "compute_status" => json!({
+                                        "host_id":host, "backend":"cuda", "gpu_uuid":format!("uuid-{host}"),
+                                        "gpu_name":"mock CUDA GPU", "compute_capability":"8.6",
+                                        "gpu_free_bytes":4u64*1024*1024*1024, "gpu_utilization_percent":0,
+                                        "busy_count":0, "admission":"available", "observed_at":unix_seconds(),
+                                        "performance_score":score
+                                    }),
+                                    "ocr_extract" => {
+                                        let encoded = request.pointer("/params/arguments/content_base64").and_then(Value::as_str).unwrap_or_default();
+                                        if STANDARD.decode(encoded).ok().as_deref() != Some(&[0xa5u8; 32][..])
+                                            || request.pointer("/params/arguments/input_type").and_then(Value::as_str) != Some("png") {
+                                            return axum::Json(error("unexpected OCR payload"));
+                                        }
+                                        if reject_ocr { return axum::Json(error("GPU worker is busy")); }
+                                        json!({"text":"mesh failover fixture text", "host_id":host, "backend":"cuda", "gpu_uuid":format!("uuid-{host}")})
+                                    }
+                                    _ => return axum::Json(error("unexpected RPC tool")),
+                                };
+                                axum::Json(json!({"jsonrpc":"2.0", "id":1, "result":{
+                                    "content":[{"type":"text", "text":serde_json::to_string(&data).unwrap()}], "isError":false
+                                }}))
+                            }
+                        }
+                    )).layer(axum::extract::DefaultBodyLimit::max(4096));
+                    let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                    let finished = tokio::time::timeout(Duration::from_secs(8), async {
+                        axum::serve(listener, app).with_graceful_shutdown(async { let _ = stopped.await; }).await.unwrap();
+                    }).await;
+                    assert!(finished.is_ok(), "mock peer exceeded its finite lifetime");
+                });
+            });
+            (
+                PeerConfig {
+                    host_id: host.into(),
+                    local_url: url.clone(),
+                    routable_url: url,
+                    gptadmin_proxy_url: None,
+                    gptadmin_relay_url: None,
+                },
+                stop,
+                thread,
+            )
+        }
+
+        let requests: Requests = Arc::new(Mutex::new(Vec::new()));
+        let (best, stop_best, best_thread) = mock_peer("best", 400.0, true, requests.clone());
+        let (alternate, stop_alternate, alternate_thread) =
+            mock_peer("alternate", 100.0, false, requests.clone());
+        let temp_root = Path::new(".tmp/compute-client-tests");
+        std::fs::create_dir_all(temp_root).unwrap();
+        let directory = tempfile::tempdir_in(temp_root).unwrap();
+        let input = directory.path().join("fixture.png");
+        std::fs::write(&input, [0xa5u8; 32]).unwrap();
+        let engine = crate::ocr::OcrEngine::new(OcrConfig {
+            backend: "mesh".into(),
+            // Probe order deliberately differs from GPU performance order.
+            mesh_peers: vec![alternate, best],
+            remote_timeout_ms: 5_000,
+            // Invalid image bytes and missing models make local inference
+            // incapable of producing the fixture's remote text.
+            det_model: directory
+                .path()
+                .join("missing-det.onnx")
+                .display()
+                .to_string(),
+            rec_model: directory
+                .path()
+                .join("missing-rec.onnx")
+                .display()
+                .to_string(),
+            dict: directory
+                .path()
+                .join("missing-dict.txt")
+                .display()
+                .to_string(),
+            ..OcrConfig::default()
+        })
+        .unwrap();
+        let result = engine.extract_image(&input);
+        // Join both bounded servers before asserting the client outcome.
+        let _ = stop_best.send(());
+        let _ = stop_alternate.send(());
+        best_thread.join().unwrap();
+        alternate_thread.join().unwrap();
+        assert_eq!(result.unwrap(), "mesh failover fixture text");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 4, "one status and extraction per peer");
+        assert_eq!(
+            requests.as_slice(),
+            &[
+                ("alternate".into(), "compute_status".into()),
+                ("best".into(), "compute_status".into()),
+                ("best".into(), "ocr_extract".into()),
+                ("alternate".into(), "ocr_extract".into()),
+            ]
+        );
+    }
+
     #[test]
     fn local_compute_route_survives_search_topology_and_is_unique() {
         let local = PeerConfig {
