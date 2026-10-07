@@ -10,7 +10,7 @@ path = "src/main.rs"
 [features]
 default = ["local-stt", "ocr"]
 local-stt = ["dep:sherpa-onnx"]
-ocr = ["dep:oar-ocr", "dep:image"]
+ocr = ["dep:oar-ocr", "dep:image", "dep:rayon"]
 
 [dependencies]
 anyhow = "1"
@@ -36,6 +36,7 @@ tar = "0.4"
 tempfile = "3"
 oar-ocr = { version = "0.9.1", features = ["auto-download"], optional = true }
 image = { version = "0.25.10", optional = true }
+rayon = { version = "1", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

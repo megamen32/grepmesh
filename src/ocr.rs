@@ -2,6 +2,7 @@ use crate::config::OcrConfig;
 use anyhow::{anyhow, Context, Result};
 use image::ImageFormat;
 use oar_ocr::{
+    core::config::OrtSessionConfig,
     oarocr::{OAROCRBuilder, OAROCR},
     utils::load_image,
 };
@@ -14,7 +15,12 @@ use std::{
 
 pub struct OcrEngine {
     config: OcrConfig,
-    pipeline: Mutex<Option<OAROCR>>,
+    pipeline: Mutex<Option<OcrRuntime>>,
+}
+
+struct OcrRuntime {
+    ocr: OAROCR,
+    preprocessing: rayon::ThreadPool,
 }
 
 impl OcrEngine {
@@ -55,27 +61,44 @@ impl OcrEngine {
     }
 
     pub fn extract_image(&self, path: &Path) -> Result<String> {
-        let image = load_image(path).with_context(|| format!("load image {}", path.display()))?;
         let mut pipeline = self
             .pipeline
             .lock()
             .map_err(|_| anyhow!("OCR pipeline lock is unavailable"))?;
         if pipeline.is_none() {
-            *pipeline = Some(
-                OAROCRBuilder::new(
-                    self.config.det_model.as_str(),
-                    self.config.rec_model.as_str(),
-                    self.config.dict.as_str(),
-                )
+            let preprocessing = rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
                 .build()
-                .context("initialize OAR-OCR pipeline")?,
-            );
+                .context("initialize bounded OCR preprocessing pool")?;
+            let ocr = OAROCRBuilder::new(
+                self.config.det_model.as_str(),
+                self.config.rec_model.as_str(),
+                self.config.dict.as_str(),
+            )
+            // Detection and recognition each own an ORT session. Host
+            // parallelism ignores the shared service's two-CPU budget;
+            // worker pools then compete with each other and spin while
+            // throttled. OCR already runs serially under this mutex.
+            .ort_session(
+                OrtSessionConfig::new()
+                    .with_intra_threads(1)
+                    .with_inter_threads(1)
+                    .with_parallel_execution(false)
+                    .add_config_entry("session.intra_op.allow_spinning", "0")
+                    .add_config_entry("session.inter_op.allow_spinning", "0"),
+            )
+            .build()
+            .context("initialize OAR-OCR pipeline")?;
+            *pipeline = Some(OcrRuntime { ocr, preprocessing });
         }
-        let results = pipeline
-            .as_ref()
-            .expect("OCR pipeline initialized")
-            .predict(vec![image])
-            .context("run OAR-OCR")?;
+        let runtime = pipeline.as_ref().expect("OCR pipeline initialized");
+        // Image decoding and nested Rayon OCR operations use this pool rather
+        // than creating a global pool sized for every CPU on the host.
+        let results = runtime.preprocessing.install(|| {
+            let image =
+                load_image(path).with_context(|| format!("load image {}", path.display()))?;
+            runtime.ocr.predict(vec![image]).context("run OAR-OCR")
+        })?;
         let mut lines = Vec::new();
         for page in results {
             for region in page.text_regions {

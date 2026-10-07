@@ -44,3 +44,10 @@ defect, not an accepted background allowance.
 Any budget increase requires fresh steady/peak measurements on that host, an
 impact review for co-tenants, a documented change here, and a post-change
 consumer canary.
+
+OCR must keep its own inference and preprocessing pools bounded: one ORT
+intra-op thread, one inter-op thread, sequential execution with spinning
+disabled, and one reusable local Rayon worker. Decode and prediction both run
+inside that local pool. Host-sized defaults previously created 111 threads
+inside the two-CPU service and prolonged reconciliation under CPU throttling.
+These application bounds do not replace or raise the existing cgroup limits.

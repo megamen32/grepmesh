@@ -1454,6 +1454,7 @@ dependencies = [
  "image",
  "notify",
  "oar-ocr",
+ "rayon",
  "reqwest",
  "rusqlite",
  "serde",
