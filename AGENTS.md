@@ -32,7 +32,14 @@ parallel.
 
 The Mac LaunchAgent is not protected by systemd. Keep local indexing roots
 narrow, retain the configured rebuild interval, and do not add broad roots
-without measuring a complete scan first.
+without measuring a complete scan first. Its reviewed operating budget is one
+index/reconciliation worker, less than 2% CPU averaged over a 60-second idle
+window, less than 1 GiB resident memory in steady state (2 GiB fault ceiling),
+no sustained swap growth, at most 64 tasks, and at most 8 GiB for the SQLite
+database plus WAL/SHM and 2 GiB of build/test temporary data. Full rebuilds stay
+at least 24 hours apart on the current Mac roots. A rebuild may use one core,
+but it must finish and return to the idle budget; continuous one-core use is a
+defect, not an accepted background allowance.
 
 Any budget increase requires fresh steady/peak measurements on that host, an
 impact review for co-tenants, a documented change here, and a post-change

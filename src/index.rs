@@ -6,7 +6,7 @@ use crate::{
 };
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -79,6 +79,7 @@ impl PersistentIndex {
         }
         let store = Self { path };
         store.connection()?;
+        store.migrate_document_rows()?;
         store.backfill_cache_from_fts()?;
         Ok(store)
     }
@@ -92,12 +93,20 @@ impl PersistentIndex {
                  USING fts5(path UNINDEXED, body, tokenize='trigram');                 CREATE TABLE IF NOT EXISTS grepmesh_extraction_cache (                   path TEXT PRIMARY KEY,                   size INTEGER NOT NULL,                   mtime_ns TEXT NOT NULL,                   body TEXT NOT NULL                 );                 CREATE TABLE IF NOT EXISTS grepmesh_metadata (                   key TEXT PRIMARY KEY,                   value TEXT NOT NULL                 );",
             )
             .map_err(|error| error.to_string())?;
+        connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS grepmesh_document_rows (\
+                   path TEXT PRIMARY KEY,\
+                   fts_rowid INTEGER NOT NULL UNIQUE\
+                 );",
+            )
+            .map_err(|error| error.to_string())?;
         Ok(connection)
     }
 
     fn document_count(&self) -> Result<usize, String> {
         self.connection()?
-            .query_row("SELECT count(*) FROM grepmesh_documents", [], |row| {
+            .query_row("SELECT count(*) FROM grepmesh_document_rows", [], |row| {
                 row.get(0)
             })
             .map_err(|error| error.to_string())
@@ -135,43 +144,76 @@ impl PersistentIndex {
             .transaction()
             .map_err(|error| error.to_string())?;
         let path = document.path.display().to_string();
-        // Extraction cache hits still reach this writer during a full scan.
-        // Skip writes only when both persisted representations agree; checking
-        // the FTS row also preserves repair of missing, stale or duplicate rows.
-        let unchanged: bool = transaction
+        // FTS5 cannot index an UNINDEXED path column. Looking up a path there
+        // scans the complete content table and turns a rebuild into O(files^2).
+        // Keep the FTS rowid in an ordinary keyed table and validate exactly
+        // one row instead.
+        let (cache_exists, cache_matches, fts_rowid): (bool, bool, Option<i64>) = transaction
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM grepmesh_extraction_cache \
-                 WHERE path=?1 AND size=?2 AND mtime_ns=?3 AND body=?4) \
-                 AND (SELECT count(*)=1 AND min(body)=?4 \
-                 FROM grepmesh_documents WHERE path=?1)",
+                "SELECT \
+                   EXISTS(SELECT 1 FROM grepmesh_extraction_cache WHERE path=?1), \
+                   EXISTS(SELECT 1 FROM grepmesh_extraction_cache \
+                          WHERE path=?1 AND size=?2 AND mtime_ns=?3 AND body=?4), \
+                   (SELECT fts_rowid FROM grepmesh_document_rows WHERE path=?1)",
                 params![
                     path,
                     document.size as i64,
                     document.mtime_ns.to_string(),
                     document.body
                 ],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(|error| error.to_string())?;
-        if unchanged {
+        let fts_matches = match fts_rowid {
+            Some(rowid) => transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM grepmesh_documents \
+                     WHERE rowid=?1 AND path=?2 AND body=?3)",
+                    params![rowid, path, document.body],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(|error| error.to_string())?,
+            None => false,
+        };
+        if cache_matches && fts_matches {
             return Ok(());
         }
-        transaction
-            .execute(
-                "DELETE FROM grepmesh_documents WHERE path = ?1",
-                params![path],
-            )
-            .map_err(|error| error.to_string())?;
+        if let Some(rowid) = fts_rowid {
+            transaction
+                .execute(
+                    "DELETE FROM grepmesh_documents WHERE rowid=?1",
+                    params![rowid],
+                )
+                .map_err(|error| error.to_string())?;
+        } else if cache_exists {
+            // A cache row without the row map is an interrupted migration or
+            // external corruption. Pay for one legacy scan to repair it; the
+            // normal new-document path never scans FTS by path.
+            transaction
+                .execute(
+                    "DELETE FROM grepmesh_documents WHERE path=?1",
+                    params![path],
+                )
+                .map_err(|error| error.to_string())?;
+        }
         transaction
             .execute(
                 "INSERT INTO grepmesh_documents(path, body) VALUES (?1, ?2)",
                 params![path, document.body],
             )
             .map_err(|error| error.to_string())?;
+        let fts_rowid = transaction.last_insert_rowid();
         transaction
             .execute(
                 "INSERT INTO grepmesh_extraction_cache(path, size, mtime_ns, body) VALUES (?1, ?2, ?3, ?4)                  ON CONFLICT(path) DO UPDATE SET size=excluded.size, mtime_ns=excluded.mtime_ns, body=excluded.body",
                 params![path, document.size as i64, document.mtime_ns.to_string(), document.body],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO grepmesh_document_rows(path, fts_rowid) VALUES (?1, ?2) \
+                 ON CONFLICT(path) DO UPDATE SET fts_rowid=excluded.fts_rowid",
+                params![path, fts_rowid],
             )
             .map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())?;
@@ -217,31 +259,40 @@ impl PersistentIndex {
 
     fn prune_except(&self, seen: &BTreeSet<PathBuf>) -> Result<(), String> {
         let mut connection = self.connection()?;
-        let paths = {
+        let rows = {
             let mut statement = connection
-                .prepare("SELECT path FROM grepmesh_documents")
+                .prepare("SELECT path, fts_rowid FROM grepmesh_document_rows")
                 .map_err(|error| error.to_string())?;
             let rows = statement
-                .query_map([], |row| row.get::<_, String>(0))
+                .query_map([], |row| {
+                    Ok((
+                        PathBuf::from(row.get::<_, String>(0)?),
+                        row.get::<_, i64>(1)?,
+                    ))
+                })
                 .map_err(|error| error.to_string())?;
-            rows.filter_map(Result::ok)
-                .map(PathBuf::from)
-                .collect::<Vec<_>>()
+            rows.filter_map(Result::ok).collect::<Vec<_>>()
         };
         let transaction = connection
             .transaction()
             .map_err(|error| error.to_string())?;
-        for path in paths.into_iter().filter(|path| !seen.contains(path)) {
+        for (path, rowid) in rows.into_iter().filter(|(path, _)| !seen.contains(path)) {
             let path = path.display().to_string();
             transaction
                 .execute(
-                    "DELETE FROM grepmesh_documents WHERE path=?1",
-                    params![path.clone()],
+                    "DELETE FROM grepmesh_documents WHERE rowid=?1",
+                    params![rowid],
                 )
                 .map_err(|error| error.to_string())?;
             transaction
                 .execute(
                     "DELETE FROM grepmesh_extraction_cache WHERE path=?1",
+                    params![path],
+                )
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    "DELETE FROM grepmesh_document_rows WHERE path=?1",
                     params![path],
                 )
                 .map_err(|error| error.to_string())?;
@@ -256,16 +307,90 @@ impl PersistentIndex {
             .transaction()
             .map_err(|error| error.to_string())?;
         let path = path.display().to_string();
+        let rowid = transaction
+            .query_row(
+                "SELECT fts_rowid FROM grepmesh_document_rows WHERE path=?1",
+                params![path],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let cache_exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM grepmesh_extraction_cache WHERE path=?1)",
+                params![path],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if let Some(rowid) = rowid {
+            transaction
+                .execute(
+                    "DELETE FROM grepmesh_documents WHERE rowid=?1",
+                    params![rowid],
+                )
+                .map_err(|error| error.to_string())?;
+        } else if cache_exists {
+            transaction
+                .execute(
+                    "DELETE FROM grepmesh_documents WHERE path=?1",
+                    params![path],
+                )
+                .map_err(|error| error.to_string())?;
+        }
         transaction
             .execute(
-                "DELETE FROM grepmesh_documents WHERE path=?1",
+                "DELETE FROM grepmesh_extraction_cache WHERE path=?1",
                 params![path.clone()],
             )
             .map_err(|error| error.to_string())?;
         transaction
             .execute(
-                "DELETE FROM grepmesh_extraction_cache WHERE path=?1",
+                "DELETE FROM grepmesh_document_rows WHERE path=?1",
                 params![path],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())
+    }
+
+    fn migrate_document_rows(&self) -> Result<(), String> {
+        let mut connection = self.connection()?;
+        let migrated = connection
+            .query_row(
+                "SELECT value FROM grepmesh_metadata WHERE key='document_rows_v1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .is_some_and(|value| value == "1");
+        if migrated {
+            return Ok(());
+        }
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute("DELETE FROM grepmesh_document_rows", [])
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO grepmesh_document_rows(path, fts_rowid) \
+                 SELECT path, max(rowid) FROM grepmesh_documents GROUP BY path",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM grepmesh_documents \
+                 WHERE rowid NOT IN (SELECT fts_rowid FROM grepmesh_document_rows)",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO grepmesh_metadata(key, value) VALUES ('document_rows_v1', '1') \
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [],
             )
             .map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())
@@ -273,13 +398,18 @@ impl PersistentIndex {
 
     fn backfill_cache_from_fts(&self) -> Result<(), String> {
         let mut connection = self.connection()?;
-        let existing = {
+        let missing = {
             let mut statement = connection
-                .prepare("SELECT path, body FROM grepmesh_documents WHERE path NOT IN (SELECT path FROM grepmesh_extraction_cache)")
+                .prepare(
+                    "SELECT rows.path, rows.fts_rowid \
+                     FROM grepmesh_document_rows AS rows \
+                     LEFT JOIN grepmesh_extraction_cache AS cache ON cache.path=rows.path \
+                     WHERE cache.path IS NULL",
+                )
                 .map_err(|error| error.to_string())?;
             let rows = statement
                 .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
                 })
                 .map_err(|error| error.to_string())?;
             rows.filter_map(Result::ok).collect::<Vec<_>>()
@@ -287,11 +417,18 @@ impl PersistentIndex {
         let transaction = connection
             .transaction()
             .map_err(|error| error.to_string())?;
-        for (path, body) in existing {
+        for (path, rowid) in missing {
             let metadata = match fs::metadata(&path) {
                 Ok(metadata) if metadata.is_file() => metadata,
                 _ => continue,
             };
+            let body = transaction
+                .query_row(
+                    "SELECT body FROM grepmesh_documents WHERE rowid=?1",
+                    params![rowid],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|error| error.to_string())?;
             transaction.execute(
                 "INSERT OR IGNORE INTO grepmesh_extraction_cache(path, size, mtime_ns, body) VALUES (?1, ?2, ?3, ?4)",
                 params![path, metadata.len() as i64, metadata_mtime_ns(&metadata).to_string(), body],
@@ -304,7 +441,7 @@ impl PersistentIndex {
     pub fn clear(&self) -> Result<(), String> {
         let connection = self.connection()?;
         connection
-            .execute_batch("DELETE FROM grepmesh_documents; DELETE FROM grepmesh_extraction_cache; DELETE FROM grepmesh_metadata;")
+            .execute_batch("DELETE FROM grepmesh_documents; DELETE FROM grepmesh_extraction_cache; DELETE FROM grepmesh_document_rows; DELETE FROM grepmesh_metadata;")
             .map_err(|error| error.to_string())?;
         Ok(())
     }
@@ -1748,7 +1885,7 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_document_repairs_missing_stale_or_duplicate_fts_and_cache() {
+    fn unchanged_document_repairs_missing_or_stale_fts_and_cache() {
         let dir = tempfile::tempdir().unwrap();
         let index = PersistentIndex::open(dir.path().join("index.sqlite")).unwrap();
         let document = dir.path().join("document.txt");
@@ -1760,7 +1897,6 @@ mod tests {
         for corruption in [
             "DELETE FROM grepmesh_documents",
             "UPDATE grepmesh_documents SET body='stale content'",
-            "INSERT INTO grepmesh_documents(path, body) SELECT path, body FROM grepmesh_documents",
             "DELETE FROM grepmesh_extraction_cache",
         ] {
             connection.execute(corruption, []).unwrap();
@@ -1778,6 +1914,79 @@ mod tests {
                 Some("searchable repair token")
             );
         }
+    }
+
+    #[test]
+    fn document_row_migration_deduplicates_legacy_fts_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.sqlite");
+        let document = dir.path().join("document.txt");
+        fs::write(&document, "deduplicated searchable token").unwrap();
+        {
+            let index = PersistentIndex::open(db.clone()).unwrap();
+            index
+                .replace_document(&document, "deduplicated searchable token")
+                .unwrap();
+            let connection = index.connection().unwrap();
+            connection
+                .execute(
+                    "INSERT INTO grepmesh_documents(path, body) \
+                     VALUES (?1, 'legacy duplicate body')",
+                    params![document.display().to_string()],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "DELETE FROM grepmesh_metadata WHERE key='document_rows_v1'",
+                    [],
+                )
+                .unwrap();
+        }
+
+        let index = PersistentIndex::open(db).unwrap();
+        index
+            .replace_document(&document, "deduplicated searchable token")
+            .unwrap();
+        assert_eq!(
+            index.candidates("deduplicated").unwrap(),
+            vec![document.clone()]
+        );
+        assert!(index.candidates("legacy duplicate").unwrap().is_empty());
+        let count: i64 = index
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM grepmesh_documents WHERE path=?1",
+                params![document.display().to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn unchanged_validation_uses_fts_rowid_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = PersistentIndex::open(dir.path().join("index.sqlite")).unwrap();
+        let plan = index
+            .connection()
+            .unwrap()
+            .prepare(
+                "EXPLAIN QUERY PLAN \
+                 SELECT EXISTS(SELECT 1 FROM grepmesh_documents \
+                 WHERE rowid=?1 AND path=?2 AND body=?3)",
+            )
+            .unwrap()
+            .query_map(params![1_i64, "/document.txt", "body"], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|detail| detail.ends_with("INDEX 0:=")),
+            "FTS lookup must constrain rowid instead of scanning every document: {plan:?}"
+        );
     }
 
     #[test]
