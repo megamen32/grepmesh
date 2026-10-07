@@ -5,7 +5,10 @@ use crate::{
     stt::SttEngine,
 };
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{
+    event::{CreateKind, ModifyKind, RenameMode},
+    EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -21,6 +24,22 @@ use std::{
 type IndexMap = BTreeMap<String, BTreeSet<PathBuf>>;
 type DirectoryScan = (usize, IndexMap, Vec<IndexedDocument>, Vec<PathBuf>);
 const MAX_PENDING_OCR: usize = 65_536;
+
+#[derive(Default)]
+struct PendingIndexEvent {
+    count: u64,
+    new_subtree: bool,
+}
+
+fn new_subtree_event(kind: EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Create(CreateKind::Folder | CreateKind::Any)
+            | EventKind::Modify(ModifyKind::Name(
+                RenameMode::To | RenameMode::Both | RenameMode::Any
+            ))
+    )
+}
 
 #[derive(Clone, Debug)]
 struct IndexedDocument {
@@ -796,7 +815,8 @@ impl IndexManager {
         thread::spawn(move || {
             let index_storage_path = persistent_state.as_ref().map(|index| index.path.clone());
             let (events, rx) = mpsc::sync_channel(1);
-            let pending_event_paths = Arc::new(Mutex::new(BTreeMap::<PathBuf, u64>::new()));
+            let pending_event_paths =
+                Arc::new(Mutex::new(BTreeMap::<PathBuf, PendingIndexEvent>::new()));
             let watcher_pending_paths = Arc::clone(&pending_event_paths);
             let watched_index_storage_path = index_storage_path.clone();
             let watch_roots = ordered_roots(&roots);
@@ -804,6 +824,13 @@ impl IndexManager {
                 let mut watcher: RecommendedWatcher = match notify::recommended_watcher(
                     move |event: notify::Result<notify::Event>| {
                         if let Ok(event) = event {
+                            let new_subtree = new_subtree_event(event.kind);
+                            let rename_target = matches!(
+                                event.kind,
+                                EventKind::Modify(ModifyKind::Name(RenameMode::Both))
+                            )
+                            .then(|| event.paths.last().cloned())
+                            .flatten();
                             let paths =
                                 event
                                     .paths
@@ -817,7 +844,12 @@ impl IndexManager {
                             if !paths.is_empty() {
                                 if let Ok(mut pending) = watcher_pending_paths.lock() {
                                     for path in paths {
-                                        *pending.entry(path).or_default() += 1;
+                                        let is_target = rename_target
+                                            .as_ref()
+                                            .is_none_or(|target| target == &path);
+                                        let event = pending.entry(path).or_default();
+                                        event.count = event.count.saturating_add(1);
+                                        event.new_subtree |= new_subtree && is_target;
                                     }
                                 }
                                 let _ = events.try_send(());
@@ -949,11 +981,11 @@ impl IndexManager {
                             Err(_) => break,
                         }
                     }
-                    let event_counts = pending_event_paths
+                    let event_batch = pending_event_paths
                         .lock()
                         .map(|mut pending| std::mem::take(&mut *pending))
                         .unwrap_or_default();
-                    let event_counts = event_counts
+                    let event_batch = event_batch
                         .into_iter()
                         .filter(|(path, _)| {
                             !index_storage_path
@@ -961,9 +993,18 @@ impl IndexManager {
                                 .is_some_and(|index_path| is_index_storage_path(path, index_path))
                         })
                         .collect::<BTreeMap<_, _>>();
-                    if event_counts.is_empty() {
+                    if event_batch.is_empty() {
                         continue;
                     }
+                    let new_subtrees = event_batch
+                        .iter()
+                        .filter(|(_, event)| event.new_subtree)
+                        .map(|(path, _)| path.clone())
+                        .collect::<BTreeSet<_>>();
+                    let event_counts = event_batch
+                        .into_iter()
+                        .map(|(path, event)| (path, event.count))
+                        .collect::<BTreeMap<_, _>>();
                     let changed_paths = event_counts.keys().cloned().collect::<BTreeSet<_>>();
                     if let Some(index) = persistent_state.as_ref() {
                         reconcile_event_paths(
@@ -974,6 +1015,17 @@ impl IndexManager {
                             &activity_config,
                             &mut directory_activity,
                             &state,
+                            max_file_bytes,
+                            stt.as_ref(),
+                            ocr.as_deref(),
+                            index,
+                        );
+                        reconcile_new_subtrees(
+                            &new_subtrees,
+                            &roots,
+                            &excludes,
+                            &activity_config,
+                            &directory_activity,
                             max_file_bytes,
                             stt.as_ref(),
                             ocr.as_deref(),
@@ -1043,11 +1095,19 @@ impl IndexManager {
         let deferred = self.ocr.as_ref().map_or(0, |ocr| ocr.deferred_count());
         if deferred > 0 && snapshot.state != IndexState::Building {
             snapshot.state = IndexState::Degraded;
-            snapshot.last_error = Some(format!("{deferred} OCR inputs await an available GPU"));
+            let pending = format!("{deferred} OCR inputs await an available GPU");
+            snapshot.last_error = Some(match snapshot.last_error {
+                Some(error) => format!("{error}; {pending}"),
+                None => pending,
+            });
         }
         if let Some(error) = &self.pending_store_error {
             snapshot.state = IndexState::Degraded;
-            snapshot.last_error = Some(format!("attach durable OCR queue: {error}"));
+            let pending = format!("attach durable OCR queue: {error}");
+            snapshot.last_error = Some(match snapshot.last_error {
+                Some(error) => format!("{error}; {pending}"),
+                None => pending,
+            });
         }
         snapshot
     }
@@ -1209,6 +1269,112 @@ fn is_index_storage_path(path: &Path, index_path: &Path) -> bool {
             let sidecar = PathBuf::from(sidecar);
             normalized_path == normalize(&sidecar)
         })
+}
+
+/// Create/rename-target events can precede recursive watch attachment. Walk
+/// only those new subtrees on the existing index worker to recover child events
+/// missed in that interval; ordinary directory metadata never reaches here.
+fn reconcile_new_subtrees(
+    paths: &BTreeSet<PathBuf>,
+    roots: &BTreeMap<String, Vec<PathBuf>>,
+    excludes: &[String],
+    activity_config: &IndexActivityConfig,
+    activity: &BTreeMap<PathBuf, DirectoryActivityState>,
+    max_file_bytes: u64,
+    stt: Option<&SttEngine>,
+    ocr: Option<&OcrEngine>,
+    persistent: &PersistentIndex,
+) {
+    let combined_excludes = excludes
+        .iter()
+        .chain(&activity_config.exclude_globs)
+        .cloned()
+        .collect::<Vec<_>>();
+    let Ok(matcher) = compile_excludes(&combined_excludes) else {
+        return;
+    };
+    let configured_roots = ordered_roots(roots)
+        .into_iter()
+        .map(|root| {
+            let canonical = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+            (root, canonical)
+        })
+        .collect::<Vec<_>>();
+    for raw_path in paths {
+        if raw_path
+            .ancestors()
+            .skip(1)
+            .any(|parent| paths.contains(parent))
+        {
+            continue;
+        }
+        let Some((root, canonical_root)) = configured_roots
+            .iter()
+            .filter(|(_, canonical)| raw_path.starts_with(canonical))
+            .max_by_key(|(_, canonical)| canonical.components().count())
+        else {
+            continue;
+        };
+        let path = raw_path
+            .strip_prefix(canonical_root)
+            .map(|relative| root.join(relative))
+            .unwrap_or_else(|_| raw_path.clone());
+        if !path.is_dir() || excluded(&path, root, &matcher) {
+            continue;
+        }
+        let relative = path.strip_prefix(root).unwrap_or(&path);
+        let bucket = relative
+            .components()
+            .next()
+            .map(|component| root.join(component.as_os_str()))
+            .unwrap_or_else(|| root.clone());
+        let mut metadata_globs = activity_config.metadata_only_globs.clone();
+        if activity
+            .get(&bucket)
+            .is_some_and(|stats| unix_time_ms() < stats.hot_until_ms)
+        {
+            metadata_globs.push("**".into());
+        }
+        let metadata_only = compile_excludes(&metadata_globs).ok();
+        // Reuse the full walk's serial directory-unit traversal. Commit each
+        // file immediately rather than buffering all subtree document bodies.
+        let mut units = VecDeque::from([path]);
+        while let Some(unit) = units.pop_front() {
+            match scan_directory_unit(
+                &unit,
+                root,
+                &matcher,
+                max_file_bytes,
+                false,
+                stt,
+                ocr,
+                Some(persistent),
+                metadata_only.as_ref(),
+            ) {
+                Ok((_, _, documents, children)) => {
+                    units.extend(children);
+                    for document in documents {
+                        match persistent.replace_indexed_document(&document) {
+                            Ok(()) => {
+                                if let Some(ocr) = ocr {
+                                    ocr.forget_deferred(&document.path);
+                                }
+                            }
+                            Err(error) => {
+                                if let Some(ocr) = ocr {
+                                    let _ = ocr.defer_path(&document.path);
+                                }
+                                tracing::warn!(path = %document.path.display(), error = %error, "new subtree index update failed");
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(path = %unit.display(), error = %error, "new subtree index update failed")
+                }
+            }
+        }
+    }
 }
 
 fn reconcile_event_paths(
@@ -1713,7 +1879,12 @@ fn scan_directory_unit(
     let mut map = BTreeMap::new();
     let metadata = match fs::symlink_metadata(unit) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::PermissionDenied | ErrorKind::NotFound
+            ) =>
+        {
             return Ok((0, map, Vec::new(), Vec::new()))
         }
         Err(error) => return Err(format!("{}: {error}", unit.display())),
@@ -1747,7 +1918,14 @@ fn scan_directory_unit(
         Ok(entries) => entries
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
             .collect(),
-        Err(error) if error.kind() == ErrorKind::PermissionDenied => Vec::new(),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::PermissionDenied | ErrorKind::NotFound
+            ) =>
+        {
+            Vec::new()
+        }
         Err(error) => return Err(format!("{}: {error}", unit.display())),
     };
     Ok((0, map, Vec::new(), children))
@@ -1815,7 +1993,14 @@ fn walk(
 ) -> Result<usize, String> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::PermissionDenied => return Ok(0),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::PermissionDenied | ErrorKind::NotFound
+            ) =>
+        {
+            return Ok(0)
+        }
         Err(error) => return Err(format!("{}: {error}", path.display())),
     };
     if device_id(&metadata).is_some_and(|device| Some(device) != context.root_device) {
@@ -1910,7 +2095,14 @@ fn walk(
             }
             let bytes = match fs::read(path) {
                 Ok(bytes) => bytes,
-                Err(error) if error.kind() == ErrorKind::PermissionDenied => return Ok(0),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::PermissionDenied | ErrorKind::NotFound
+                    ) =>
+                {
+                    return Ok(0)
+                }
                 Err(error) => return Err(format!("{}: {error}", path.display())),
             };
             let extracted = extract_index_text(path, bytes);
@@ -1962,14 +2154,28 @@ fn walk(
     }
     let entries = match fs::read_dir(path) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == ErrorKind::PermissionDenied => return Ok(0),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::PermissionDenied | ErrorKind::NotFound
+            ) =>
+        {
+            return Ok(0)
+        }
         Err(error) => return Err(format!("{}: {error}", path.display())),
     };
     let mut count = 0;
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
-            Err(error) if error.kind() == ErrorKind::PermissionDenied => continue,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::PermissionDenied | ErrorKind::NotFound
+                ) =>
+            {
+                continue
+            }
             Err(error) => return Err(error.to_string()),
         };
         count += walk(&entry.path(), context, map, documents)?;
@@ -2060,6 +2266,130 @@ mod tests {
     }
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn created_subtree_recovers_nested_files_but_directory_metadata_does_not_rescan() {
+        let temp_root = Path::new(".tmp/index-tests");
+        fs::create_dir_all(temp_root).unwrap();
+        let fixture = tempfile::tempdir_in(temp_root).unwrap();
+        let root = fixture.path().join("watched");
+        fs::create_dir(&root).unwrap();
+        let index = PersistentIndex::open(fixture.path().join("index.sqlite")).unwrap();
+        let nested = root.join("new-subtree/nested");
+        fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("missed-child-event.txt");
+        fs::write(&file, "CREATED_SUBTREE_TOKEN").unwrap();
+        let new_directory = fs::canonicalize(root.join("new-subtree")).unwrap();
+        let roots = BTreeMap::from([("home".into(), vec![root.clone()])]);
+        let activity_config = IndexActivityConfig::default();
+        let mut activity = BTreeMap::new();
+        assert!(new_subtree_event(EventKind::Create(CreateKind::Folder)));
+        assert!(new_subtree_event(EventKind::Modify(ModifyKind::Name(
+            RenameMode::To
+        ))));
+        reconcile_new_subtrees(
+            &BTreeSet::from([new_directory.clone()]),
+            &roots,
+            &[],
+            &activity_config,
+            &activity,
+            0,
+            None,
+            None,
+            &index,
+        );
+        assert!(index
+            .candidates("CREATED_SUBTREE_TOKEN")
+            .unwrap()
+            .contains(&file));
+
+        let late_file = nested.join("ordinary-metadata-child.txt");
+        fs::write(&late_file, "METADATA_GUARD_TOKEN").unwrap();
+        let metadata_kind =
+            EventKind::Modify(ModifyKind::Metadata(notify::event::MetadataKind::Any));
+        assert!(!new_subtree_event(metadata_kind));
+        let metadata_paths = BTreeSet::from([new_directory.clone()]);
+        let event_counts = BTreeMap::from([(new_directory, 1)]);
+        let snapshot = Arc::new(RwLock::new(IndexSnapshot::default()));
+        reconcile_event_paths(
+            &metadata_paths,
+            &event_counts,
+            &roots,
+            &[],
+            &activity_config,
+            &mut activity,
+            &snapshot,
+            0,
+            None,
+            None,
+            &index,
+        );
+        assert!(index.candidates("METADATA_GUARD_TOKEN").unwrap().is_empty());
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn pending_ocr_status_preserves_underlying_walk_failure() {
+        let mut manager = IndexManager::disabled();
+        let config = OcrConfig {
+            backend: "mesh".into(),
+            ..Default::default()
+        };
+        let ocr = OcrEngine::new(config).unwrap();
+        ocr.defer_path(Path::new(".tmp/pending-status-input.png"))
+            .unwrap();
+        manager.ocr = Some(Arc::new(ocr));
+        manager.snapshot.write().unwrap().last_error = Some("underlying walk failure".into());
+        let status = manager.status();
+        assert_eq!(status.state, IndexState::Degraded);
+        assert_eq!(
+            status.last_error.as_deref(),
+            Some("underlying walk failure; 1 OCR inputs await an available GPU")
+        );
+        assert_eq!(
+            manager.snapshot.read().unwrap().last_error.as_deref(),
+            Some("underlying walk failure")
+        );
+    }
+
+    #[test]
+    fn disappearing_enumerated_child_does_not_abort_remaining_directory_units() {
+        let temp_root = Path::new(".tmp/index-tests");
+        fs::create_dir_all(temp_root).unwrap();
+        let root = tempfile::tempdir_in(temp_root).unwrap();
+        let disappearing = root.path().join("a-transient.txt");
+        let surviving = root.path().join("z-surviving.txt");
+        fs::write(&disappearing, "temporary generated content").unwrap();
+        fs::write(&surviving, "SURVIVING_INDEX_TOKEN").unwrap();
+        let units = root_units(root.path()).unwrap();
+        assert!(units.contains(&disappearing));
+        fs::remove_file(&disappearing).unwrap();
+        let excludes = compile_excludes(&[]).unwrap();
+        let mut count = 0;
+        let mut documents = Vec::new();
+        for unit in units {
+            let (unit_count, _, unit_documents, children) = scan_directory_unit(
+                &unit,
+                root.path(),
+                &excludes,
+                0,
+                true,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            count += unit_count;
+            documents.extend(unit_documents);
+            assert!(children.is_empty());
+        }
+        assert_eq!(count, 1);
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].path, surviving);
+        assert!(documents[0].body.contains("SURVIVING_INDEX_TOKEN"));
+        assert!(root_units(&root.path().join("missing-configured-root")).is_err());
+    }
 
     #[test]
     fn durable_ocr_pending_reopens_and_acks_with_fts_commit() {

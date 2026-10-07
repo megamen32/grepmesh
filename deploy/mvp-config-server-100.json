@@ -65,7 +65,7 @@
     "**/rollback-*"
   ],
   "topology_cache_path": "/var/lib/grepmesh-mcp/topology.json",
-  "gptadmin_topology_url": "http://127.0.0.1:9001/mcp-relay/grepmesh",
+  "gptadmin_topology_url": "http://127.0.0.1:9001/mcp-relay/agents",
   "gptadmin_token_env": "GPTADMIN_GREPMESH_TOKEN",
   "topology_ttl_ms": 30000,
   "limits": {

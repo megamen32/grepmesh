@@ -87,7 +87,7 @@
     "max_image_bytes": 268435456,
     "backend": "mesh"
   },
-  "gptadmin_topology_url": "https://u-f1102930.t.gptadmin.bezrabotnyi.com/mcp-relay/grepmesh",
+  "gptadmin_topology_url": "https://u-f1102930.t.gptadmin.bezrabotnyi.com/mcp-relay/agents",
   "gptadmin_token_env": "GPTADMIN_GREPMESH_TOKEN",
   "topology_ttl_ms": 30000,
   "compute": {
