@@ -83,3 +83,15 @@ Fresh44 reserve before installation must remain >=8GiB and memory/IO full
 avg10<1. Do not modify the existing Ollama/Whisper libraries or their services.
 The installer only adds private copies, model files and GrepMesh's dropin;
 intentional GrepMesh restart belongs to the subsequent atomic rollout.
+
+Server88 private runtime preparation was separately admitted after live
+measurement on2026-10-07: MemAvailable~103GiB, hostmemory/IO fullavg10=0,
+RTX3080Ti free2056MiB (inference admission remains denied). Its existing
+Whisper/Ollama tenants stayrunning. Only verified files are staged/copied:
+CPU100%, MemoryHigh256MiB/Max512MiB, swap0, TasksMax32, IOWeight20,
+network transfer<=16MiB/s, deadline600s for preparation and180s for install.
+TemporaryGPU assets<4GiB, privateinstalledGPU<4GiB, wholeproject<20GiB.
+This budget follows the measured44 copyprocess peakRSS6MiB and includes
+512MiB for bounded newlychargedfilesystemcache; it is not a GPU inference
+reserve or authorization to alter another tenant. Recheck88 >=8GiB reserve
+and hostmemory/IO fullavg10<1 before each step.
