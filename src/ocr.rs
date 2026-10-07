@@ -335,7 +335,9 @@ impl OcrRuntime {
             .add_config_entry("session.intra_op.allow_spinning", "0")
             .add_config_entry("session.inter_op.allow_spinning", "0");
         match config.execution_provider.as_str() {
-            "cpu" => {}
+            "cpu" => {
+                session = session.with_execution_providers(vec![OrtExecutionProvider::CPU]);
+            }
             "cuda" => {
                 if !cfg!(feature = "ocr-cuda") {
                     return Err(anyhow!("CUDA OCR support is disabled in this build"));
@@ -345,26 +347,10 @@ impl OcrRuntime {
                 }
                 #[cfg(feature = "ocr-cuda")]
                 {
-                    // Reject missing/broken CUDA registration explicitly.
-                    // PP-OCR graphs still need CPU shape/control operators;
-                    // forbidding every CPU node rejects otherwise valid CUDA
-                    // inference. The required provider may never be skipped.
-                    let _required_cuda = ort::session::Session::builder()
-                        .context("prepare required CUDA registration")?
-                        .with_execution_providers([ort::ep::CUDA::default()
-                            .with_device_id(config.gpu_device_id)
-                            .with_memory_limit(config.gpu_mem_limit_bytes.min(512 * 1024 * 1024))
-                            .build()
-                            .error_on_failure()])
-                        .map_err(|error| anyhow!("required CUDA registration failed: {error}"))?;
+                    require_cuda_environment(config)?;
                 }
-                session = session.with_execution_providers(vec![OrtExecutionProvider::CUDA {
-                    device_id: Some(config.gpu_device_id),
-                    gpu_mem_limit: Some(config.gpu_mem_limit_bytes.min(512 * 1024 * 1024)),
-                    arena_extend_strategy: Some("SameAsRequested".into()),
-                    cudnn_conv_algo_search: Some("Default".into()),
-                    cudnn_conv_use_max_workspace: Some(false),
-                }]);
+                // Inherit the strict environment provider on both actual model
+                // commits. OAR's explicit CUDA dispatch permits silent fallback.
             }
             _ => return Err(anyhow!("unsupported OCR execution provider")),
         }
@@ -379,10 +365,42 @@ impl OcrRuntime {
             config.dict.as_str(),
         )
         .ort_session(session)
+        .image_batch_size(1)
+        .region_batch_size(1)
         .build()
         .map_err(|error| anyhow!("initialize OAR-OCR pipeline: {error}"))?;
         Ok(Self { ocr, preprocessing })
     }
+}
+
+#[cfg(feature = "ocr-cuda")]
+fn require_cuda_environment(config: &OcrConfig) -> Result<()> {
+    // Configure before the first ORT session. Each real OAR model commit then
+    // registers this required provider, failing instead of skipping CUDA.
+    static ENVIRONMENT: std::sync::OnceLock<(i32, usize, bool)> = std::sync::OnceLock::new();
+    let memory_limit = config.gpu_mem_limit_bytes.min(512 * 1024 * 1024);
+    let (device, memory, committed) = ENVIRONMENT.get_or_init(|| {
+        let provider = ort::ep::CUDA::default()
+            .with_device_id(config.gpu_device_id)
+            .with_memory_limit(memory_limit)
+            .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
+            .with_conv_algorithm_search(ort::ep::cuda::ConvAlgorithmSearch::Default)
+            .with_conv_max_workspace(false)
+            .build()
+            .error_on_failure();
+        (
+            config.gpu_device_id,
+            memory_limit,
+            ort::init().with_execution_providers([provider]).commit(),
+        )
+    });
+    if *device != config.gpu_device_id || *memory != memory_limit {
+        return Err(anyhow!("CUDA environment device or memory budget differs"));
+    }
+    if !committed {
+        return Err(anyhow!("ORT was already configured without required CUDA"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
