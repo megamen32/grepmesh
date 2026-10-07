@@ -132,6 +132,11 @@ For PDFs, AnyDoc remains the fast first path. If the extracted text layer contai
 
 Extracted document, OCR, and STT bodies are cached persistently by file size and modification time. Watcher reconciliations reuse unchanged content instead of rerunning AnyDoc, OCR, or remote transcription. Incremental watcher updates remain immediate; full reconciliations are only a safety sweep and run at most once per `limits.full_rebuild_min_interval_ms` (seven days by default). The last successful pass is stored in the host's SQLite index, so restarts do not bypass the limit. Set a different value in each host's own config only when its storage or reconciliation requirements justify the extra work.
 
+Persistent indexing is enabled by default. A relay-only node that should search
+locally with ripgrep must set top-level `"index_enabled": false`; omitting
+`index_path` or setting it to `null` selects the default SQLite path and does
+not disable indexing.
+
 OCR is an optional compile-time feature. Normal Linux and Apple-silicon release builds keep it enabled. The Intel macOS release is built with `--no-default-features` because ONNX Runtime no longer publishes an x86_64 macOS runtime; it remains suitable for relay-only nodes or text indexing with OCR disabled.
 
 Each host also controls hot-directory protection under `limits.index_activity`. GrepMesh counts watcher events and changed bytes per top-level directory during `window_ms`. Crossing either threshold marks that directory hot for `hot_cooldown_ms`, switches updates to filename/size/time metadata only, and suppresses repeated writes for `hot_debounce_ms`. `metadata_only_globs` and `exclude_globs` provide manual per-host policy. Cache, log, build, target, and temporary directories are excluded by default. Current counters and hot state are returned in `index_directory_activity` with host status.
