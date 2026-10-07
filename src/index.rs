@@ -616,6 +616,7 @@ pub struct IndexManager {
     ready_roots: Arc<RwLock<BTreeSet<PathBuf>>>,
     persistent: Option<PersistentIndex>,
     enabled: bool,
+    ocr: Option<Arc<OcrEngine>>,
 }
 
 impl IndexManager {
@@ -629,6 +630,7 @@ impl IndexManager {
             ready_roots: Arc::new(RwLock::new(BTreeSet::new())),
             persistent: None,
             enabled: false,
+            ocr: None,
         }
     }
 
@@ -665,7 +667,8 @@ impl IndexManager {
             });
         let persistent_state = persistent.clone();
         let stt = SttEngine::new(stt_config);
-        let ocr = OcrEngine::new(ocr_config);
+        let ocr = OcrEngine::new(ocr_config).map(Arc::new);
+        let manager_ocr = ocr.clone();
         thread::spawn(move || {
             let index_storage_path = persistent_state.as_ref().map(|index| index.path.clone());
             let (events, rx) = mpsc::sync_channel(1);
@@ -745,7 +748,7 @@ impl IndexManager {
                     &excludes,
                     max_file_bytes,
                     stt.as_ref(),
-                    ocr.as_ref(),
+                    ocr.as_deref(),
                     &activity_config,
                     RebuildState {
                         snapshot: &state,
@@ -755,7 +758,7 @@ impl IndexManager {
                     },
                     generation,
                 );
-                if succeeded {
+                if succeeded && ocr.as_ref().is_none_or(|ocr| ocr.deferred_count() == 0) {
                     let completed_ms = unix_time_ms();
                     if let Some(index) = persistent_state.as_ref() {
                         let _ = index.mark_full_rebuild_ms(completed_ms);
@@ -786,7 +789,12 @@ impl IndexManager {
                     .map(|stats| stats.hot_until_ms)
                     .max()
                     .unwrap_or(0);
-                let remaining = if pending {
+                let remaining = if ocr.as_ref().is_some_and(|ocr| ocr.deferred_count() > 0) {
+                    // An overdue full pass is intentionally blocked while GPU
+                    // work is deferred. Never turn its expired deadline into
+                    // recv_timeout(0) and spin throughout the GPU outage.
+                    Duration::from_secs(30)
+                } else if pending {
                     last_full_rebuild_ms
                         .map(|last| {
                             let due = last
@@ -839,13 +847,38 @@ impl IndexManager {
                             &state,
                             max_file_bytes,
                             stt.as_ref(),
-                            ocr.as_ref(),
+                            ocr.as_deref(),
                             index,
                         );
                     }
                     pending = true;
                 }
+                // GPU admission failures are deferred independently of the
+                // weekly full walk. Retry one input per minute and preserve
+                // the successful-reconciliation marker until all are served.
+                if let (Some(ocr), Some(index)) = (ocr.as_ref(), persistent_state.as_ref()) {
+                    let retry = ocr.take_retry_paths(1).into_iter().collect::<BTreeSet<_>>();
+                    if !retry.is_empty() {
+                        for path in &retry {
+                            retry_ocr_path(
+                                path,
+                                &roots,
+                                &excludes,
+                                &activity_config,
+                                max_file_bytes,
+                                stt.as_ref(),
+                                ocr,
+                                index,
+                            );
+                        }
+                        pending = true;
+                    }
+                    if pending && rebuild_due(last_full_rebuild_ms) {
+                        ocr.clear_overflow_if_drained();
+                    }
+                }
                 if pending
+                    && ocr.as_ref().is_none_or(|ocr| ocr.deferred_count() == 0)
                     && (persistent_state.is_none()
                         || (rebuild_due(last_full_rebuild_ms)
                             && unix_time_ms() >= activity_delay_until))
@@ -861,6 +894,7 @@ impl IndexManager {
             ready_roots,
             persistent,
             enabled: true,
+            ocr: manager_ocr,
         }
     }
 
@@ -875,6 +909,11 @@ impl IndexManager {
             });
         if snapshot.state != IndexState::Building {
             snapshot.current_path = None;
+        }
+        let deferred = self.ocr.as_ref().map_or(0, |ocr| ocr.deferred_count());
+        if deferred > 0 && snapshot.state != IndexState::Building {
+            snapshot.state = IndexState::Degraded;
+            snapshot.last_error = Some(format!("{deferred} OCR inputs await an available GPU"));
         }
         snapshot
     }
@@ -1233,8 +1272,18 @@ fn reconcile_event_paths(
             }
             Ok((_, _, documents, _)) => {
                 for document in documents {
-                    if let Err(error) = persistent.replace_indexed_document(&document) {
-                        tracing::warn!(path = %path.display(), error = %error, "incremental index update failed");
+                    match persistent.replace_indexed_document(&document) {
+                        Ok(()) => {
+                            if let Some(ocr) = ocr {
+                                ocr.forget_deferred(&document.path);
+                            }
+                        }
+                        Err(error) => {
+                            if let Some(ocr) = ocr {
+                                let _ = ocr.defer_path(&document.path);
+                            }
+                            tracing::warn!(path = %path.display(), error = %error, "incremental index update failed");
+                        }
                     }
                 }
                 stats.last_indexed_ms = now;
@@ -1243,6 +1292,85 @@ fn reconcile_event_paths(
                 tracing::warn!(path = %path.display(), error = %error, "incremental index update failed");
             }
         }
+    }
+}
+
+/// Retry an actual pending file without fabricating filesystem activity or
+/// allowing a hot bucket's metadata cache to masquerade as completed OCR.
+fn retry_ocr_path(
+    path: &Path,
+    roots: &BTreeMap<String, Vec<PathBuf>>,
+    excludes: &[String],
+    activity_config: &IndexActivityConfig,
+    max_file_bytes: u64,
+    stt: Option<&SttEngine>,
+    ocr: &OcrEngine,
+    persistent: &PersistentIndex,
+) {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            ocr.forget_deferred(path);
+            return;
+        }
+        Err(_) => return,
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        ocr.forget_deferred(path);
+        return;
+    }
+    let configured = ordered_roots(roots);
+    let Some(root) = configured
+        .iter()
+        .filter(|root| path.starts_with(root))
+        .max_by_key(|root| root.components().count())
+    else {
+        ocr.forget_deferred(path);
+        return;
+    };
+    if !ocr.is_image(path) && !ocr.is_pdf(path) {
+        ocr.forget_deferred(path);
+        return;
+    }
+    if let Ok(root_metadata) = fs::symlink_metadata(root) {
+        if device_id(&metadata).is_some_and(|device| Some(device) != device_id(&root_metadata)) {
+            ocr.forget_deferred(path);
+            return;
+        }
+    }
+    let mut all_excludes = excludes.to_vec();
+    all_excludes.extend(activity_config.exclude_globs.iter().cloned());
+    let Ok(matcher) = compile_excludes(&all_excludes) else {
+        return;
+    };
+    if excluded(path, root, &matcher) {
+        ocr.forget_deferred(path);
+        return;
+    }
+    let metadata_only = compile_excludes(&activity_config.metadata_only_globs).ok();
+    match scan_directory_unit(
+        path,
+        root,
+        &matcher,
+        max_file_bytes,
+        false,
+        stt,
+        Some(ocr),
+        Some(persistent),
+        metadata_only.as_ref(),
+    ) {
+        Ok((_, _, documents, _)) => {
+            for document in documents {
+                match persistent.replace_indexed_document(&document) {
+                    Ok(()) => ocr.forget_deferred(&document.path),
+                    Err(error) => {
+                        let _ = ocr.defer_path(&document.path);
+                        tracing::warn!(error = %error, "deferred OCR index write failed");
+                    }
+                }
+            }
+        }
+        Err(error) => tracing::warn!(error = %error, "deferred OCR scan failed"),
     }
 }
 
@@ -1349,6 +1477,9 @@ fn rebuild_index(
                 for document in documents {
                     seen_paths.insert(document.path.clone());
                     if let Err(error) = persistent.replace_indexed_document(&document) {
+                        if let Some(ocr) = ocr {
+                            let _ = ocr.defer_path(&document.path);
+                        }
                         if let Ok(mut current) = rebuild.snapshot.write() {
                             current.state = IndexState::Degraded;
                             current.last_error =
@@ -1356,6 +1487,9 @@ fn rebuild_index(
                             current.generation = generation.saturating_add(1);
                         }
                         return false;
+                    }
+                    if let Some(ocr) = ocr {
+                        ocr.forget_deferred(&document.path);
                     }
                 }
             }
@@ -1517,6 +1651,23 @@ fn ordered_roots(roots: &BTreeMap<String, Vec<PathBuf>>) -> Vec<PathBuf> {
     ordered
 }
 
+fn complete_empty_ocr(
+    path: &Path,
+    context: &ScanContext<'_>,
+    ocr: &OcrEngine,
+) -> Result<usize, String> {
+    if ocr.is_mesh() {
+        if let Some(index) = context.persistent {
+            if let Err(error) = index.remove_document(path) {
+                let _ = ocr.defer_path(path);
+                return Err(error);
+            }
+        }
+        ocr.forget_deferred(path);
+    }
+    Ok(0)
+}
+
 fn walk(
     path: &PathBuf,
     context: &ScanContext<'_>,
@@ -1544,6 +1695,9 @@ fn walk(
             .metadata_only
             .is_some_and(|matcher| excluded(path, context.root, matcher))
         {
+            if let Some(ocr) = context.ocr {
+                ocr.forget_deferred(path);
+            }
             documents.push(IndexedDocument {
                 path: path.clone(),
                 body: format!(
@@ -1560,7 +1714,10 @@ fn walk(
             });
             return Ok(1);
         }
-        if let Some(persistent) = context.persistent {
+        if let Some(persistent) = context
+            .persistent
+            .filter(|_| context.ocr.is_none_or(|ocr| !ocr.is_deferred(path)))
+        {
             if let Ok(Some(body)) = persistent.cached_body(path, size, mtime_ns) {
                 if context.build_candidates {
                     for gram in trigrams(&body.to_ascii_lowercase()) {
@@ -1590,11 +1747,12 @@ fn walk(
             }
         } else if let Some(ocr) = context.ocr.filter(|ocr| ocr.is_image(path)) {
             if ocr.max_image_bytes() != 0 && metadata.len() > ocr.max_image_bytes() {
+                ocr.forget_deferred(path);
                 return Ok(0);
             }
             match ocr.extract_image(path) {
                 Ok(text) if !text.trim().is_empty() => text,
-                Ok(_) => return Ok(0),
+                Ok(_) => return complete_empty_ocr(path, context, ocr),
                 Err(error) => {
                     tracing::warn!(path = %path.display(), error = %error, "OCR skipped image file");
                     return Ok(0);
@@ -1606,6 +1764,9 @@ fn walk(
                 .map(OcrEngine::max_image_bytes)
                 .unwrap_or(context.max_file_bytes);
             if read_limit != 0 && metadata.len() > read_limit {
+                if let Some(ocr) = context.ocr {
+                    ocr.forget_deferred(path);
+                }
                 return Ok(0);
             }
             let bytes = match fs::read(path) {
@@ -1622,10 +1783,15 @@ fn walk(
                     Ok(text) if !text.trim().is_empty() => text,
                     Ok(_) => match extracted {
                         Some(text) => text,
-                        None => return Ok(0),
+                        None => return complete_empty_ocr(path, context, ocr),
                     },
                     Err(error) => {
                         tracing::warn!(path = %path.display(), error = %error, "OCR PDF fallback failed");
+                        if ocr.is_mesh() {
+                            // Never persist a thin PDF layer as complete after
+                            // a temporary GPU admission/transport failure.
+                            return Ok(0);
+                        }
                         match extracted {
                             Some(text) => text,
                             None => return Ok(0),

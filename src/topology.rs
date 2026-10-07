@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::topology_cache::{CacheFreshness, TopologySnapshot};
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PeerConfig {
     pub host_id: String,
     pub local_url: String,

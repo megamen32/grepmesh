@@ -6,6 +6,25 @@ use std::path::Path;
 pub struct OcrEngine;
 
 impl OcrEngine {
+    pub(crate) fn defer_path(&self, _path: &Path) -> Result<()> {
+        Ok(())
+    }
+    pub(crate) fn is_deferred(&self, _path: &Path) -> bool {
+        false
+    }
+    pub(crate) fn forget_deferred(&self, _path: &Path) {}
+    pub(crate) fn is_mesh(&self) -> bool {
+        false
+    }
+    pub(crate) fn deferred_count(&self) -> usize {
+        0
+    }
+    pub(crate) fn take_retry_paths(&self, _max: usize) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+    pub(crate) fn clear_overflow_if_drained(&self) -> bool {
+        false
+    }
     pub fn new(_config: OcrConfig) -> Option<Self> {
         None
     }

@@ -1,16 +1,18 @@
 use crate::{
     backend::LocalBackend,
+    compute::{ComputeWorker, OcrExtractRequest},
     config::AppConfig,
     gptadmin::GptAdminTopologyClient,
     jobs::SearchJobs,
     mcp::{compact_search_response_data, MeshService},
-    topology::Topology,
+    topology::{PeerConfig, Topology},
     topology_cache::TopologySnapshot,
 };
 use anyhow::{anyhow, Result};
 use axum::{
-    extract::State,
+    extract::{DefaultBodyLimit, Request, State},
     http::{header, HeaderMap, StatusCode, Uri},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -25,12 +27,13 @@ const DEFAULT_FOREGROUND_SEARCH_WAIT_MS: u64 = 30_000;
 #[derive(Clone)]
 struct AppState {
     service: Arc<MeshService>,
+    compute: Arc<ComputeWorker>,
     jobs: SearchJobs,
     peer_auth_token: Option<String>,
     require_peer_auth: bool,
 }
 
-pub async fn run_server(config: AppConfig) -> Result<()> {
+pub async fn run_server(mut config: AppConfig) -> Result<()> {
     let cached_snapshot =
         config
             .topology_cache_path
@@ -90,6 +93,36 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
         Topology::new(config.host_id.clone(), config.peers.clone())
     };
     topology.retain_known_peers(&config.peers);
+    // OCR discovery follows the same protected live/cache routes as search;
+    // never force indexing clients to construct a local CPU session for mesh.
+    config.ocr.mesh_peers = topology.peers.clone();
+    if config.compute.enabled {
+        let local_compute_address = config.local_bind.unwrap_or_else(|| {
+            if config.bind.ip().is_unspecified() {
+                std::net::SocketAddr::from(([127, 0, 0, 1], config.bind.port()))
+            } else {
+                config.bind
+            }
+        });
+        let local_compute_url = format!("http://{local_compute_address}/mcp");
+        config.ocr.mesh_peers.push(PeerConfig {
+            host_id: config.host_id.clone(),
+            local_url: local_compute_url.clone(),
+            routable_url: local_compute_url,
+            gptadmin_proxy_url: None,
+            gptadmin_relay_url: None,
+        });
+    }
+    config.ocr.mesh_topology_cache_path = config.topology_cache_path.clone();
+    config.ocr.mesh_peer_token_env = config.peer_auth_token_env.clone();
+    config.ocr.mesh_relay_token_env = config.gptadmin_token_env.clone();
+    config.ocr.mesh_relay_origin = config.gptadmin_topology_url.clone();
+    let compute = Arc::new(ComputeWorker::new(
+        config.host_id.clone(),
+        config.compute.clone(),
+        config.ocr.clone(),
+        config.limits.max_response_bytes,
+    ));
     if config.userio.enabled {
         // The cache root must exist before the index watcher registers its
         // roots: notify refuses to watch a missing directory and the adapter
@@ -196,6 +229,7 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
     }
     let mut remote_app = build_app(AppState {
         service: Arc::clone(&service),
+        compute: Arc::clone(&compute),
         jobs: jobs.clone(),
         peer_auth_token: peer_auth_token.clone(),
         require_peer_auth,
@@ -205,6 +239,7 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
         let local_listener = tokio::net::TcpListener::bind(local_bind).await?;
         let local_app = build_app(AppState {
             service,
+            compute,
             jobs,
             peer_auth_token,
             require_peer_auth: false,
@@ -234,11 +269,104 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
 }
 
 fn build_app(state: AppState) -> Router {
+    let max_request_bytes = state.compute.max_request_bytes().max(2 * 1024 * 1024);
     Router::new()
         .route("/", post(handle_rpc))
         .route("/health", get(health))
         .route("/mcp", post(handle_rpc))
+        .route("/compute/status", get(compute_status))
+        .route("/compute/ocr", post(compute_extract))
+        .layer(DefaultBodyLimit::max(max_request_bytes))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            guard_request_intake,
+        ))
         .with_state(state)
+}
+
+fn requires_bounded_intake(path: &str, headers: &HeaderMap) -> bool {
+    path == "/compute/ocr"
+        || matches!(path, "/" | "/mcp")
+            && headers
+                .get(header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .map_or(true, |length| length > 2 * 1024 * 1024)
+}
+
+async fn guard_request_intake(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // Authenticate using precisely the existing peer policy before any body
+    // buffering. Keep origin and protocol validation in their existing handlers.
+    if state.require_peer_auth
+        && validate_peer_auth(request.headers(), state.peer_auth_token.as_deref()).is_err()
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "peer authentication failed"})),
+        )
+            .into_response();
+    }
+    let _intake = if requires_bounded_intake(request.uri().path(), request.headers()) {
+        match state.compute.try_acquire_intake() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({"error": "GPU worker request intake is busy"})),
+                )
+                    .into_response()
+            }
+        }
+    } else {
+        None
+    };
+    // Holding the permit through the handler bounds both parsing and waiting
+    // memory; the separate native slot still survives OCR response deadlines.
+    next.run(request).await
+}
+
+fn validate_private_compute(state: &AppState, headers: &HeaderMap) -> Result<()> {
+    if state.require_peer_auth {
+        validate_peer_auth(headers, state.peer_auth_token.as_deref())?;
+    }
+    validate_origin(headers)
+}
+
+async fn compute_status(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(error) = validate_private_compute(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": error.to_string()})),
+        )
+            .into_response();
+    }
+    (StatusCode::OK, Json(state.compute.status().await)).into_response()
+}
+
+async fn compute_extract(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<OcrExtractRequest>,
+) -> Response {
+    if let Err(error) = validate_private_compute(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": error.to_string()})),
+        )
+            .into_response();
+    }
+    match state.compute.extract(request).await {
+        Ok(result) => (StatusCode::OK, Json(result)).into_response(),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 async fn health(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -268,6 +396,17 @@ async fn handle_rpc(
     Json(payload): Json<Value>,
 ) -> Response {
     let id = payload.get("id").cloned().unwrap_or(Value::Null);
+    // Only byte-carrying OCR calls need the raised transport limit. Preserve
+    // the former Axum 2 MiB request ceiling for every existing mesh operation.
+    let is_ocr = payload.get("method").and_then(Value::as_str) == Some("tools/call")
+        && payload.pointer("/params/name").and_then(Value::as_str) == Some("ocr_extract");
+    if !is_ocr && serde_json::to_vec(&payload).map_or(true, |bytes| bytes.len() > 2 * 1024 * 1024) {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({"error": "request exceeds mesh request limit"})),
+        )
+            .into_response();
+    }
     if state.require_peer_auth
         && validate_peer_auth(&headers, state.peer_auth_token.as_deref()).is_err()
     {
@@ -358,9 +497,25 @@ async fn handle_rpc_inner(state: AppState, payload: Value) -> Result<Value> {
                 tool_meta("list_locations", "List configured browse locations across hosts."),
                 tool_meta("list_directory", "List immediate safe directory entries for one host."),
                 tool_meta("search_status", "Report search/status metadata for one or more hosts."),
+                tool_meta("compute_status", "Report live GPU OCR capability and worker admission without inference."),
+                tool_meta("ocr_extract", "Extract text from bounded image/PDF bytes using this host's admitted CUDA worker."),
             ]
         }),
-        "tools/call" => call_tool(state.service.as_ref(), &state.jobs, params).await?,
+        "tools/call" => match params.get("name").and_then(Value::as_str) {
+            Some("compute_status") => {
+                tool_content(state.compute.status().await, state.service.as_ref())?
+            }
+            Some("ocr_extract") => {
+                let request = serde_json::from_value(
+                    params.get("arguments").cloned().unwrap_or(Value::Null),
+                )?;
+                tool_content(
+                    state.compute.extract(request).await?,
+                    state.service.as_ref(),
+                )?
+            }
+            _ => call_tool(state.service.as_ref(), &state.jobs, params).await?,
+        },
         _ => {
             return Ok(
                 json!({"jsonrpc":"2.0","error":{"code":-32601,"message":"method not found"},"id":id}),
@@ -389,6 +544,15 @@ fn tool_meta(name: &str, description: &str) -> Value {
         ]
     });
     let schema = match name {
+        "compute_status" => json!({"type": "object", "properties": {}}),
+        "ocr_extract" => json!({
+            "type": "object", "required": ["content_base64", "input_type"], "additionalProperties": false,
+            "properties": {
+                "content_base64": {"type": "string", "description": "Base64 file bytes; decoded size at most 32 MiB."},
+                "input_type": {"type": "string", "enum": ["png", "jpg", "jpeg", "webp", "tif", "tiff", "bmp", "gif", "avif", "pdf"]},
+                "filename": {"type": "string", "description": "Optional basename with matching allowed extension; never a path to read."}
+            }
+        }),
         "search" | "search_text" => json!({
             "type": "object",
             "required": ["query"],
@@ -687,6 +851,19 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn body_intake_covers_unknown_and_large_rpc_without_blocking_small_search() {
+        let mut headers = HeaderMap::new();
+        assert!(requires_bounded_intake("/mcp", &headers));
+        headers.insert(header::CONTENT_LENGTH, "1024".parse().unwrap());
+        assert!(!requires_bounded_intake("/mcp", &headers));
+        assert!(requires_bounded_intake("/compute/ocr", &headers));
+        assert!(!requires_bounded_intake("/compute/status", &headers));
+        headers.insert(header::CONTENT_LENGTH, "2097153".parse().unwrap());
+        assert!(requires_bounded_intake("/", &headers));
+        assert!(requires_bounded_intake("/mcp", &headers));
+    }
+
+    #[test]
     fn protocol_negotiation_prefers_client_supported_version() {
         assert_eq!(
             negotiate_protocol_version(&json!({"protocolVersion": "2025-06-18"})),
@@ -733,6 +910,12 @@ mod tests {
         let service = Arc::new(MeshService::new(local, Topology::new("local", vec![])));
         let state = AppState {
             service,
+            compute: Arc::new(ComputeWorker::new(
+                "local".into(),
+                Default::default(),
+                Default::default(),
+                128 * 1024,
+            )),
             jobs: SearchJobs::default(),
             peer_auth_token: None,
             require_peer_auth: false,
@@ -750,6 +933,32 @@ mod tests {
         assert!(instructions.contains("search"));
         assert!(instructions.contains("read_text"));
         assert!(instructions.contains("host_status"));
+    }
+
+    #[tokio::test]
+    async fn compute_tools_use_disabled_cpu_worker_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = LocalBackend::new("cpu-host", temp.path(), Default::default());
+        let state = AppState {
+            service: Arc::new(MeshService::new(local, Topology::new("cpu-host", vec![]))),
+            compute: Arc::new(ComputeWorker::new(
+                "cpu-host".into(),
+                Default::default(),
+                Default::default(),
+                128 * 1024,
+            )),
+            jobs: SearchJobs::default(),
+            peer_auth_token: None,
+            require_peer_auth: false,
+        };
+        let response = handle_rpc_inner(state.clone(), json!({"id": 1, "method": "tools/call", "params": {"name": "compute_status", "arguments": {}}})).await.unwrap();
+        let status: Value =
+            serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(status["host_id"], "cpu-host");
+        assert_eq!(status["admission"], "ineligible");
+        let extraction = handle_rpc_inner(state, json!({"id": 2, "method": "tools/call", "params": {"name": "ocr_extract", "arguments": {"content_base64": "YWJj", "input_type": "png"}}})).await;
+        assert!(extraction.is_err());
     }
 
     #[test]

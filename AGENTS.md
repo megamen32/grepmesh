@@ -51,3 +51,24 @@ disabled, and one reusable local Rayon worker. Decode and prediction both run
 inside that local pool. Host-sized defaults previously created 111 threads
 inside the two-CPU service and prolonged reconciliation under CPU throttling.
 These application bounds do not replace or raise the existing cgroup limits.
+
+
+## Mesh GPU OCR placement and budgets
+
+Server-100 uses `ocr.backend=mesh` and must never create a local inference
+session or CPU fallback. NVIDIA workers on 44/88 execute through the existing
+GrepMesh API9419. Their normal GrepMesh cgroup limits remain unchanged. One
+worker job per host; retained tenant VRAM reserve2560MiB plus two512MiB ORT
+arenas required at admission. CUDA-only inference, CPU threads1/1 and Rayon1.
+Bound32MiB input,1MiB output,90s renderer/inference deadlines; no unboundedqueue.
+Queue/busy/notenoughVRAM -> selectanotherpeer or deferclientOCR for retry.
+
+For the new server-44 GPU runtime placement, 2026-10-07 measured93GiB host
+MemAvailable, memory/IO PSI0, GPU12GiB total with~7.3GiB free. A single native
+candidate build may run there from an exported canonical source artifact (no
+ServerAdmin checkout) with CPUQuota100%, Cargojobs1, MemoryHigh1536M,
+MemoryMax2G, swap0, TasksMax128, IOWeight20,600sdeadline; build/tempgrowth<2GiB,
+project build/artifacts<20GiB. This is the documented GPU worker's owninghost,
+not a way to evade server-100 limits. No other tenant, Ollama, Whisper or fleet
+session may be stopped or its limits changed. Always measure prior to a run;
+other hosts do not inherit this new44budget without their own reserveproof.

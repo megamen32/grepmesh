@@ -1,5 +1,7 @@
 pub mod backend;
 pub mod backup_catalog;
+pub mod compute;
+pub mod compute_client;
 pub mod config;
 pub mod console;
 pub mod gptadmin;

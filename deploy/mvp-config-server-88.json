@@ -59,7 +59,8 @@
     "**/.local/share/Trash/**",
     "**/diag-live/**",
     "**/rollback-*/**",
-    "**/rollback-*"
+    "**/rollback-*",
+    "**/grepmesh-custom/gpu/**"
   ],
   "topology_cache_path": "/var/lib/grepmesh-mcp/topology.json",
   "gptadmin_topology_url": "https://u-f1102930.t.gptadmin.bezrabotnyi.com/mcp-relay/grepmesh",
@@ -98,6 +99,15 @@
     "min_pdf_text_chars": 64,
     "pdf_dpi": 180,
     "max_pdf_pages": 200,
-    "max_image_bytes": 268435456
+    "max_image_bytes": 268435456,
+    "backend": "mesh"
+  },
+  "compute": {
+    "enabled": true,
+    "gpu_device_id": 0,
+    "max_payload_bytes": 33554432,
+    "min_free_vram_mb": 2560,
+    "max_gpu_utilization_percent": 70,
+    "temp_dir": "/var/lib/grepmesh-mcp/.tmp/compute"
   }
 }

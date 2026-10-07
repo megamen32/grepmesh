@@ -21,9 +21,9 @@ tar -xzf "$archive" -C "$ort_cache"
 export ORT_LIB_LOCATION="$ort_cache/$ort_name/lib"
 export ORT_PREFER_DYNAMIC_LINK=1 ORT_SKIP_DOWNLOAD=1
 export TMPDIR="$project_root/.tmp/test-temp"
-# Match the current fleet's feature selection; OCR remains enabled.
+# Include CUDA dispatch for admitted GPU workers; mesh clients never initialize local inference.
 export CARGO_TARGET_DIR="$project_root/.tmp/release-target"
-cargo rustc --locked --release --no-default-features --features ocr --bin grepmesh-mcp -- -C 'link-arg=-Wl,-rpath,$ORIGIN/lib'
+cargo rustc --locked --release --no-default-features --features ocr-cuda --bin grepmesh-mcp -- -C 'link-arg=-Wl,-rpath,$ORIGIN/lib'
 package="$project_root/.tmp/linux-compatible-package"
 mkdir -p "$package/lib" "$package/licenses/onnxruntime"
 cp "$CARGO_TARGET_DIR/release/grepmesh-mcp" "$package/grepmesh-mcp"

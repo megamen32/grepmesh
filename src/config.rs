@@ -241,6 +241,27 @@ impl BackupCatalogConfig {
 pub struct OcrConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// local or mesh; mesh never falls back to CPU inference on the client.
+    #[serde(default = "default_ocr_backend")]
+    pub backend: String,
+    #[serde(default = "default_ocr_provider")]
+    pub execution_provider: String,
+    #[serde(default)]
+    pub gpu_device_id: i32,
+    #[serde(default = "default_ocr_gpu_memory")]
+    pub gpu_mem_limit_bytes: usize,
+    #[serde(default)]
+    pub mesh_peers: Vec<PeerConfig>,
+    #[serde(default)]
+    pub mesh_topology_cache_path: Option<PathBuf>,
+    #[serde(default)]
+    pub mesh_peer_token_env: Option<String>,
+    #[serde(default)]
+    pub mesh_relay_token_env: Option<String>,
+    #[serde(default)]
+    pub mesh_relay_origin: Option<String>,
+    #[serde(default = "default_ocr_remote_timeout")]
+    pub remote_timeout_ms: u64,
     #[serde(default = "default_ocr_det_model")]
     pub det_model: String,
     #[serde(default = "default_ocr_rec_model")]
@@ -263,6 +284,16 @@ impl Default for OcrConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            backend: default_ocr_backend(),
+            execution_provider: default_ocr_provider(),
+            gpu_device_id: 0,
+            gpu_mem_limit_bytes: default_ocr_gpu_memory(),
+            mesh_peers: Vec::new(),
+            mesh_topology_cache_path: None,
+            mesh_peer_token_env: None,
+            mesh_relay_token_env: None,
+            mesh_relay_origin: None,
+            remote_timeout_ms: default_ocr_remote_timeout(),
             det_model: default_ocr_det_model(),
             rec_model: default_ocr_rec_model(),
             dict: default_ocr_dict(),
@@ -271,6 +302,43 @@ impl Default for OcrConfig {
             pdf_dpi: default_ocr_pdf_dpi(),
             max_pdf_pages: default_ocr_max_pdf_pages(),
             max_image_bytes: default_ocr_max_image_bytes(),
+        }
+    }
+}
+
+fn default_ocr_backend() -> String {
+    "local".into()
+}
+fn default_ocr_provider() -> String {
+    "cpu".into()
+}
+fn default_ocr_gpu_memory() -> usize {
+    512 * 1024 * 1024
+}
+fn default_ocr_remote_timeout() -> u64 {
+    90_000
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ComputeConfig {
+    pub enabled: bool,
+    pub gpu_device_id: i32,
+    pub max_payload_bytes: usize,
+    pub min_free_vram_mb: u64,
+    pub max_gpu_utilization_percent: u64,
+    pub temp_dir: PathBuf,
+}
+
+impl Default for ComputeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            gpu_device_id: 0,
+            max_payload_bytes: 32 * 1024 * 1024,
+            min_free_vram_mb: 2560,
+            max_gpu_utilization_percent: 70,
+            temp_dir: PathBuf::from(".tmp/compute"),
         }
     }
 }
@@ -509,6 +577,8 @@ pub struct AppConfig {
     pub stt: SttConfig,
     #[serde(default)]
     pub ocr: OcrConfig,
+    #[serde(default)]
+    pub compute: ComputeConfig,
     #[serde(default)]
     pub userio: UserioConfig,
     #[serde(default = "default_topology_ttl_ms")]

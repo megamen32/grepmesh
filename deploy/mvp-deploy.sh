@@ -11,7 +11,7 @@
 #   stage binary+config -> receipt with old binary/config copies + sha256s + commands
 #   -> smoke-test new binary -> atomic mv into /opt/grepmesh-custom/grepmesh-mcp
 #   -> install config -> systemctl restart grepmesh-mcp -> wait <=30s active
-#   -> curl http://127.0.0.1:9419/api/catalog expecting 200
+#   -> curl http://127.0.0.1:9419/health expecting 200
 #   -> any failure after backup: restore old binary+config, restart, re-verify, exit non-zero.
 #
 # Requires passwordless sudo on the target (verified for roomhacker on both nodes).
@@ -26,7 +26,7 @@ CONFIG_PATH=/etc/grepmesh-mcp/config.json
 STATE_DIR=/var/lib/grepmesh-mcp
 SERVICE=grepmesh-mcp
 RECEIPT_ROOT=$INSTALL_DIR/.mvp-receipts
-HEALTH_URL=http://127.0.0.1:9419/api/catalog
+HEALTH_URL=http://127.0.0.1:9419/health
 HEALTH_WAIT=30
 
 MODE=deploy
@@ -67,7 +67,7 @@ if [[ -n "$REMOTE" ]]; then
   if [[ $MODE == deploy ]]; then
     [[ -f "$BINARY" ]] || die "binary not found: $BINARY"
     [[ -f "$CONFIG" ]] || die "config not found: $CONFIG"
-    STAGE=$(ssh "$REMOTE" 'mktemp -d /tmp/mvp-deploy-stage.XXXXXX')
+    STAGE=$(ssh "$REMOTE" 'mkdir -p /var/lib/grepmesh-mcp/.tmp && mktemp -d /var/lib/grepmesh-mcp/.tmp/mvp-deploy-stage.XXXXXX')
     trap 'ssh -o BatchMode=yes "$REMOTE" "rm -rf \"$STAGE\"" >/dev/null 2>&1 || true' EXIT
     scp -q "$BINARY" "$REMOTE:$STAGE/grepmesh-mcp.new"
     scp -q "$CONFIG" "$REMOTE:$STAGE/config.json.new"
