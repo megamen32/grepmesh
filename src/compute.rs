@@ -139,7 +139,7 @@ impl ComputeWorker {
         if let Some(reason) = self.eligibility_error() {
             return self.unavailable("ineligible", reason);
         }
-        match self.probe_gpu().await {
+        match self.probe_gpu(false).await {
             Ok(gpu) => json!({
                 "host_id": self.host_id, "backend": "cuda", "gpu_uuid": gpu.uuid,
                 "gpu_name": gpu.name, "compute_capability": gpu.capability,
@@ -162,12 +162,19 @@ impl ComputeWorker {
             "performance_score": 0, "performance_score_approximate": true})
     }
 
-    async fn probe_gpu(&self) -> Result<Gpu> {
-        // Repeated status requests must not multiply subprocesses or queue.
-        let _probe = self
-            .probe_lock
-            .try_lock()
-            .map_err(|_| anyhow!("GPU capability probe is busy"))?;
+    async fn probe_gpu(&self, admitted_job: bool) -> Result<Gpu> {
+        // Status polls never queue or multiply subprocesses. The sole job
+        // already holding the inference permit may wait briefly for a poll;
+        // a concurrent status request must not cancel admitted OCR work.
+        let _probe = if admitted_job {
+            tokio::time::timeout(Duration::from_secs(3), self.probe_lock.lock())
+                .await
+                .map_err(|_| anyhow!("GPU capability probe is busy"))?
+        } else {
+            self.probe_lock
+                .try_lock()
+                .map_err(|_| anyhow!("GPU capability probe is busy"))?
+        };
         let mut command = tokio::process::Command::new("nvidia-smi");
         command
             .args([
@@ -196,7 +203,7 @@ impl ComputeWorker {
         let permit = Arc::clone(&self.slots)
             .try_acquire_owned()
             .map_err(|_| anyhow!("GPU worker is busy"))?;
-        let gpu = self.probe_gpu().await?;
+        let gpu = self.probe_gpu(true).await?;
         let admission = self.gpu_admission(&gpu);
         if admission != "available" {
             return Err(anyhow!("GPU worker rejected admission: {admission}"));
