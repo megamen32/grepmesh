@@ -95,3 +95,8 @@ This budget follows the measured44 copyprocess peakRSS6MiB and includes
 512MiB for bounded newlychargedfilesystemcache; it is not a GPU inference
 reserve or authorization to alter another tenant. Recheck88 >=8GiB reserve
 and hostmemory/IO fullavg10<1 before each step.
+
+Hosted native release CI is isolated from fleet processes. Keep at most one
+platform job active, Cargo jobs1 and a20-minute job deadline; reuse already
+verified native artifacts for fleet deployment rather than rebuilding on
+clients. These restrictions do not authorize any fleet budget change.
