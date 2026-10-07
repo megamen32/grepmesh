@@ -1922,6 +1922,78 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn empty_mesh_ocr_ack_waits_for_sqlite_commit() {
+        let temp_root = Path::new(".tmp/index-tests");
+        fs::create_dir_all(temp_root).unwrap();
+        let dir = tempfile::tempdir_in(temp_root).unwrap();
+        let path = dir.path().join("scan.png");
+        fs::write(&path, "controlled input; no inference is run").unwrap();
+        let index = PersistentIndex::open(dir.path().join("index.sqlite")).unwrap();
+        index
+            .replace_document(&path, "previous searchable OCR token")
+            .unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        let ocr = OcrEngine::new(OcrConfig {
+            backend: "mesh".into(),
+            ..OcrConfig::default()
+        })
+        .unwrap();
+        ocr.defer_path(&path).unwrap();
+        let excludes = GlobSetBuilder::new().build().unwrap();
+        let context = ScanContext {
+            root: dir.path(),
+            root_device: None,
+            excludes: &excludes,
+            max_file_bytes: 0,
+            build_candidates: false,
+            stt: None,
+            ocr: Some(&ocr),
+            persistent: Some(&index),
+            metadata_only: None,
+        };
+        let connection = index.connection().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER mesh_ocr_ack_fail_delete \
+             BEFORE DELETE ON grepmesh_extraction_cache \
+             BEGIN SELECT RAISE(ABORT, 'controlled SQLite failure'); END;",
+            )
+            .unwrap();
+
+        let error = complete_empty_ocr(&path, &context, &ocr).unwrap_err();
+        assert!(error.contains("controlled SQLite failure"));
+        assert!(
+            ocr.is_deferred(&path),
+            "a rolled-back deletion must retain its retry"
+        );
+        assert_eq!(index.candidates("previous").unwrap(), vec![path.clone()]);
+        assert_eq!(
+            index
+                .cached_body(&path, metadata.len(), metadata_mtime_ns(&metadata))
+                .unwrap()
+                .as_deref(),
+            Some("previous searchable OCR token")
+        );
+
+        connection
+            .execute_batch("DROP TRIGGER mesh_ocr_ack_fail_delete;")
+            .unwrap();
+        assert_eq!(complete_empty_ocr(&path, &context, &ocr).unwrap(), 0);
+        assert!(
+            !ocr.is_deferred(&path),
+            "only a committed deletion acknowledges completion"
+        );
+        assert_eq!(ocr.deferred_count(), 0);
+        assert!(index.candidates("previous").unwrap().is_empty());
+        assert!(index
+            .cached_body(&path, metadata.len(), metadata_mtime_ns(&metadata))
+            .unwrap()
+            .is_none());
+        assert_eq!(index.document_count().unwrap(), 0);
+    }
+
     #[test]
     fn permission_denied_subtree_does_not_degrade_the_entire_index() {
         let root = tempfile::tempdir().unwrap();
