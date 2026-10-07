@@ -73,3 +73,13 @@ project build/artifacts<20GiB. This is the documented GPU worker's owninghost,
 not a way to evade server-100 limits. No other tenant, Ollama, Whisper or fleet
 session may be stopped or its limits changed. Always measure prior to a run;
 other hosts do not inherit this new44budget without their own reserveproof.
+
+Private GPU runtime installation on44 is a sequential deployment operation,
+not an inference/build fanout: CPU100%, MemoryHigh256MiB/Max512MiB, swap0,
+TasksMax32, IOWeight20, deadline180s; stagedGPU assets<4GiB, durableGPU
+runtime<4GiB and wholeproject<20GiB. A file-copy process has only a small
+userspace buffer; cgroup boundaries also bound newly charged filesystemcache.
+Fresh44 reserve before installation must remain >=8GiB and memory/IO full
+avg10<1. Do not modify the existing Ollama/Whisper libraries or their services.
+The installer only adds private copies, model files and GrepMesh's dropin;
+intentional GrepMesh restart belongs to the subsequent atomic rollout.

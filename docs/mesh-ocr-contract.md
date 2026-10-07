@@ -59,3 +59,13 @@ for its capability probe. PP-OCR includes CPU shape/control nodes, so
 disabling allCPU EP nodes rejects validCUDA graphs. MandatoryCUDA provider
 registration is now checked fail-closed before constructing the model sessions.
 The actual CUDA worker PID/allocation plus OCR output remain required proof.
+
+Final source guard uses a single explicitly configured ORT environment with
+CUDA dispatch.error_on_failure; both actual model commits inherit it instead
+of OAR's permissive local dispatch. Existing or mismatched environment is
+rejected. Image/region batch sizes are1. Native44 controlled image returned
+exactfixturetext in1.89s with366MiB actualGPU allocation; a CPU-ORT-only
+child rejected the same valid model/input without inference. Busy admission
+rejected a second request. All18 focused compute/client/OCR/SQLite regression
+checks passed in one bounded85.5s run, peak819MiB, zero swap. Production
+offload and finalindexedtext canary are still required.
