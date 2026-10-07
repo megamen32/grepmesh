@@ -77,9 +77,9 @@
   },
   "ocr": {
     "enabled": true,
-    "det_model": "pp-ocrv6_tiny_det.onnx",
-    "rec_model": "eslav_pp-ocrv5_mobile_rec.onnx",
-    "dict": "ppocrv5_eslav_dict.txt",
+    "det_model": "/var/lib/grepmesh-mcp/ocr-models/pp-ocrv6_tiny_det.onnx",
+    "rec_model": "/var/lib/grepmesh-mcp/ocr-models/eslav_pp-ocrv5_mobile_rec.onnx",
+    "dict": "/var/lib/grepmesh-mcp/ocr-models/ppocrv5_eslav_dict.txt",
     "pdf_fallback": true,
     "min_pdf_text_chars": 64,
     "pdf_dpi": 180,
