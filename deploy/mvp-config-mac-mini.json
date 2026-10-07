@@ -1,0 +1,84 @@
+{
+  "host_id": "mac-mini",
+  "bind": "192.168.2.4:9419",
+  "local_bind": "127.0.0.1:9419",
+  "root": "/Users/roomhacker",
+  "roots": {
+    "home": [
+      "/Users/roomhacker"
+    ]
+  },
+  "peers": [
+    {
+      "host_id": "server-100",
+      "local_url": "http://192.168.2.100:9419/mcp",
+      "routable_url": "http://100.65.58.36:9419/mcp"
+    },
+    {
+      "host_id": "server-44",
+      "local_url": "http://192.168.2.5:9419/mcp",
+      "routable_url": "http://100.109.149.33:9419/mcp"
+    },
+    {
+      "host_id": "server-88",
+      "local_url": "http://192.168.2.75:9419/mcp",
+      "routable_url": "http://100.101.226.91:9419/mcp"
+    }
+  ],
+  "limits": {
+    "overall_timeout_ms": 20000,
+    "peer_timeout_ms": 25000
+  },
+  "peer_auth_token_env": "GREPMESH_PEER_TOKEN",
+  "exclude_globs": [
+    "**/*.key",
+    "**/*.pem",
+    "**/.Trash/**",
+    "**/.aws/credentials",
+    "**/.cache/**",
+    "**/.cargo/git/**",
+    "**/.cargo/registry/**",
+    "**/.config/grepmesh/*.env",
+    "**/.git/**",
+    "**/.gnupg/**",
+    "**/.hg/**",
+    "**/.local/share/Trash/**",
+    "**/.mypy_cache/**",
+    "**/.netrc",
+    "**/.next/**",
+    "**/.nox/**",
+    "**/.npm/_cacache*/**",
+    "**/.nuxt/**",
+    "**/.pnpm-store/**",
+    "**/.pytest_cache/**",
+    "**/.ruff_cache/**",
+    "**/.rustup/**",
+    "**/.ssh/**",
+    "**/.svn/**",
+    "**/.tox/**",
+    "**/.venv/**",
+    "**/Library/**",
+    "**/__pycache__/**",
+    "**/bower_components/**",
+    "**/build/**",
+    "**/coverage/**",
+    "**/diag-live/**",
+    "**/dist/**",
+    "**/go/pkg/mod/**",
+    "**/gshadow",
+    "**/id_ed25519",
+    "**/id_rsa",
+    "**/node_modules/**",
+    "**/out/**",
+    "**/rollback-*",
+    "**/rollback-*/**",
+    "**/shadow",
+    "**/target/**",
+    "**/venv/**"
+  ],
+  "index_enabled": false,
+  "topology_cache_path": "/Users/roomhacker/.cache/grepmesh/topology.json",
+  "gptadmin_topology_url": "https://u-f1102930.t.gptadmin.bezrabotnyi.com/mcp-relay/grepmesh",
+  "gptadmin_token_env": "GPTADMIN_GREPMESH_TOKEN",
+  "topology_ttl_ms": 30000
+}

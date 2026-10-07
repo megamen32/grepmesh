@@ -69,3 +69,10 @@ child rejected the same valid model/input without inference. Busy admission
 rejected a second request. All18 focused compute/client/OCR/SQLite regression
 checks passed in one bounded85.5s run, peak819MiB, zero swap. Production
 offload and finalindexedtext canary are still required.
+
+Mac mini remains a lightweight relay with index_enabled=false. Its checked-in
+config replaces the obsolete directroamingM1 peer with authenticated dynamic
+GPTAdmin topology, retaining LinuxLAN routes. The restricted fleet token is
+deployed only through its protected ~/.config/grepmesh/gptadmin.env, excluded
+from search. No extra MCPprocess or localCPUOCR is enabled. M1 currently
+travels with theuser and is intentionally not a live acceptance dependency.
