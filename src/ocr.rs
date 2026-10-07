@@ -343,15 +343,28 @@ impl OcrRuntime {
                 if config.gpu_device_id < 0 || config.gpu_mem_limit_bytes == 0 {
                     return Err(anyhow!("invalid CUDA OCR device or memory limit"));
                 }
-                session = session
-                    .add_config_entry("session.disable_cpu_ep_fallback", "1")
-                    .with_execution_providers(vec![OrtExecutionProvider::CUDA {
-                        device_id: Some(config.gpu_device_id),
-                        gpu_mem_limit: Some(config.gpu_mem_limit_bytes.min(512 * 1024 * 1024)),
-                        arena_extend_strategy: Some("SameAsRequested".into()),
-                        cudnn_conv_algo_search: Some("Default".into()),
-                        cudnn_conv_use_max_workspace: Some(false),
-                    }]);
+                #[cfg(feature = "ocr-cuda")]
+                {
+                    // Reject missing/broken CUDA registration explicitly.
+                    // PP-OCR graphs still need CPU shape/control operators;
+                    // forbidding every CPU node rejects otherwise valid CUDA
+                    // inference. The required provider may never be skipped.
+                    let _required_cuda = ort::session::Session::builder()
+                        .context("prepare required CUDA registration")?
+                        .with_execution_providers([ort::ep::CUDA::default()
+                            .with_device_id(config.gpu_device_id)
+                            .with_memory_limit(config.gpu_mem_limit_bytes.min(512 * 1024 * 1024))
+                            .build()
+                            .error_on_failure()])
+                        .map_err(|error| anyhow!("required CUDA registration failed: {error}"))?;
+                }
+                session = session.with_execution_providers(vec![OrtExecutionProvider::CUDA {
+                    device_id: Some(config.gpu_device_id),
+                    gpu_mem_limit: Some(config.gpu_mem_limit_bytes.min(512 * 1024 * 1024)),
+                    arena_extend_strategy: Some("SameAsRequested".into()),
+                    cudnn_conv_algo_search: Some("Default".into()),
+                    cudnn_conv_use_max_workspace: Some(false),
+                }]);
             }
             _ => return Err(anyhow!("unsupported OCR execution provider")),
         }
@@ -359,8 +372,7 @@ impl OcrRuntime {
             .num_threads(1)
             .build()
             .context("initialize bounded OCR preprocessing pool")?;
-        // Each model owns a session; neither may silently fall back to CPU
-        // when the GPU worker explicitly requested CUDA execution.
+        // Both models request the same required, validated CUDA provider.
         let ocr = OAROCRBuilder::new(
             config.det_model.as_str(),
             config.rec_model.as_str(),
@@ -368,7 +380,7 @@ impl OcrRuntime {
         )
         .ort_session(session)
         .build()
-        .context("initialize OAR-OCR pipeline")?;
+        .map_err(|error| anyhow!("initialize OAR-OCR pipeline: {error}"))?;
         Ok(Self { ocr, preprocessing })
     }
 }

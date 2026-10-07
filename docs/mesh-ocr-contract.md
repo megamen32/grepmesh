@@ -12,7 +12,7 @@ includes host_id, CUDA backend, live GPU UUID/name/compute capability, free
 VRAM, GPU utilization, local busy count, admission status and observation time.
 One inference per worker, no unbounded queue; reject busy/insufficient-memory
 work so the caller can try the next candidate. Fail closed when CUDA is absent.
-No CPU inference fallback for backend=mesh or GPU-required worker.
+Backendmesh never performs local inference. GPU-required workers validate CUDA registration with error_on_failure; PP-OCR CPU shape/control operators are permitted, while neural tensor inference uses CUDA.
 
 Client: poll at most a small known peer set, cache capabilities briefly, exclude
 stale/failed/unavailable/busy peers. Rank available GPU performance then headroom
@@ -52,3 +52,10 @@ GPU runtime archive: official onnxruntime-linux-x64-gpu-1.25.1.tgz SHA256
 Native dependencies are private deployment assets; no proprietary GPU library
 or generated policy/credential enters the Git repository. Existing Ollama and
 Whisper processes, model cache and resource contracts remain their owners'.
+
+Native candidate exposed two defects before rollout: status polling could
+reject an already admitted job; only the single admitted job now waits<=3s
+for its capability probe. PP-OCR includes CPU shape/control nodes, so
+disabling allCPU EP nodes rejects validCUDA graphs. MandatoryCUDA provider
+registration is now checked fail-closed before constructing the model sessions.
+The actual CUDA worker PID/allocation plus OCR output remain required proof.

@@ -59,7 +59,8 @@ Server-100 uses `ocr.backend=mesh` and must never create a local inference
 session or CPU fallback. NVIDIA workers on 44/88 execute through the existing
 GrepMesh API9419. Their normal GrepMesh cgroup limits remain unchanged. One
 worker job per host; retained tenant VRAM reserve2560MiB plus two512MiB ORT
-arenas required at admission. CUDA-only inference, CPU threads1/1 and Rayon1.
+arenas required at admission. CUDA provider registration is mandatory; neural inference usesCUDA, while
+model shape/control operators can runonCPU. CPUthreads1/1 andRayon1.
 Bound32MiB input,1MiB output,90s renderer/inference deadlines; no unboundedqueue.
 Queue/busy/notenoughVRAM -> selectanotherpeer or deferclientOCR for retry.
 

@@ -11,7 +11,7 @@ path = "src/main.rs"
 default = ["local-stt", "ocr"]
 local-stt = ["dep:sherpa-onnx"]
 ocr = ["dep:oar-ocr", "dep:image", "dep:rayon"]
-ocr-cuda = ["ocr", "oar-ocr/cuda"]
+ocr-cuda = ["ocr", "oar-ocr/cuda", "dep:ort"]
 
 [dependencies]
 anyhow = "1"
@@ -39,6 +39,7 @@ tempfile = "3"
 oar-ocr = { version = "0.9.1", features = ["auto-download"], optional = true }
 image = { version = "0.25.10", optional = true }
 rayon = { version = "1", optional = true }
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "cuda"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"
