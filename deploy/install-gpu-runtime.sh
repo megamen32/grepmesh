@@ -23,7 +23,7 @@ sudo -n cp "$ort/LICENSE" "$ort/ThirdPartyNotices.txt" "$root/licenses/"
 sudo -n sh -c 'cd "$1" && sha256sum lib/*.so* > runtime-sha256.txt' sh "$root"
 user=$(systemctl show grepmesh-mcp.service -p User --value); user=${user:-root}
 group=$(systemctl show grepmesh-mcp.service -p Group --value); group=${group:-$user}
-sudo -n install -d -o "$user" -g "$group" -m 0750 /var/lib/grepmesh-mcp/ocr-models /var/lib/grepmesh-mcp/.tmp/compute
+sudo -n install -d -o "$user" -g "$group" -m 0750 /var/lib/grepmesh-mcp/ocr-models /var/lib/grepmesh-mcp/.tmp /var/lib/grepmesh-mcp/.tmp/compute
 sudo -n cp "$stage/pp-ocrv6_tiny_det.onnx" "$stage/eslav_pp-ocrv5_mobile_rec.onnx" "$stage/ppocrv5_eslav_dict.txt" /var/lib/grepmesh-mcp/ocr-models/
 sudo -n chown -R "$user:$group" /var/lib/grepmesh-mcp/ocr-models
 sudo -n install -d -m 0755 /etc/systemd/system/grepmesh-mcp.service.d
