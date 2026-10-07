@@ -110,7 +110,11 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
         config.limits.clone(),
         config.roots.clone(),
         config.exclude_globs.clone(),
-        config.index_path.clone(),
+        if config.index_enabled {
+            config.index_path.clone()
+        } else {
+            None
+        },
         config.stt.clone(),
         config.ocr.clone(),
     );

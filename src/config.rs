@@ -489,6 +489,9 @@ pub struct AppConfig {
     pub exclude_globs: Vec<String>,
     #[serde(default)]
     pub topology_cache_path: Option<PathBuf>,
+    /// Set false on relay-only nodes that must use ripgrep without a persistent index.
+    #[serde(default = "default_index_enabled")]
+    pub index_enabled: bool,
     /// Local persistent full-text index. Enabled by default; every GrepMesh node
     /// indexes its own configured roots and mesh fan-out provides one logical
     /// cross-host index without copying documents to a central server.
@@ -516,6 +519,10 @@ pub struct AppConfig {
 
 fn default_bind() -> SocketAddr {
     "127.0.0.1:9419".parse().expect("valid default bind")
+}
+
+fn default_index_enabled() -> bool {
+    true
 }
 
 fn default_index_path_for(host_id: &str, root: &Path) -> Option<PathBuf> {
@@ -556,7 +563,9 @@ impl AppConfig {
         if cfg.limits.max_file_bytes == 0 {
             cfg.limits.max_file_bytes = default_max_file_bytes();
         }
-        if cfg.index_path.is_none() {
+        if !cfg.index_enabled {
+            cfg.index_path = None;
+        } else if cfg.index_path.is_none() {
             cfg.index_path = default_index_path_for(&cfg.host_id, &cfg.root);
         }
         Ok(cfg)
@@ -614,5 +623,60 @@ mod tests {
         assert!(config.peers.is_empty());
         assert!(config.peer_auth_token_env.is_none());
         assert!(config.index_path.is_none());
+        assert!(config.index_enabled);
+    }
+
+    #[test]
+    fn explicit_index_disabled_skips_default_and_explicit_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, index_path) in [
+            ("missing", None),
+            ("null", Some(serde_json::Value::Null)),
+            (
+                "explicit",
+                Some(serde_json::json!(directory
+                    .path()
+                    .join("must-not-be-used.sqlite3"))),
+            ),
+        ] {
+            let path = directory.path().join(format!("{name}.json"));
+            let mut value = serde_json::json!({
+                "host_id": "relay-only",
+                "root": directory.path(),
+                "index_enabled": false
+            });
+            if let Some(index_path) = index_path {
+                value["index_path"] = index_path;
+            }
+            std::fs::write(&path, value.to_string()).unwrap();
+            let config = AppConfig::from_path(path).unwrap();
+            assert!(!config.index_enabled);
+            assert!(config.index_path.is_none());
+        }
+    }
+
+    #[test]
+    fn enabled_index_defaults_or_preserves_its_path() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, explicit_path) in [
+            ("default", None),
+            ("explicit", Some(directory.path().join("explicit.sqlite3"))),
+        ] {
+            let path = directory.path().join(format!("{name}.json"));
+            let mut value = serde_json::json!({
+                "host_id": "indexed",
+                "root": directory.path()
+            });
+            if let Some(explicit_path) = &explicit_path {
+                value["index_path"] = serde_json::json!(explicit_path);
+            }
+            std::fs::write(&path, value.to_string()).unwrap();
+            let config = AppConfig::from_path(path).unwrap();
+            assert!(config.index_enabled);
+            assert!(config.index_path.is_some());
+            if let Some(explicit_path) = explicit_path {
+                assert_eq!(config.index_path.as_deref(), Some(explicit_path.as_path()));
+            }
+        }
     }
 }
