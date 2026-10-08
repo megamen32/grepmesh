@@ -97,6 +97,11 @@ reserve or authorization to alter another tenant. Recheck88 >=8GiB reserve
 and hostmemory/IO fullavg10<1 before each step.
 
 Hosted native release CI is isolated from fleet processes. Keep at most one
-platform job active, Cargo jobs1 and a20-minute job deadline; reuse already
+platform job active and Cargo jobs1. Linux/macOS have a20-minute job deadline;
+Windows has a40-minute deadline after the measured cold jobs1 build exceeded
+20minutes on run37692308698 while compilation still progressed. The isolated
+GitHub-hosted windows-latest VM has4vCPU/16GB RAM/14GB SSD; jobs1 reserves
+CPU capacity for runner/OS. No fleet capacity or runtime limit changes.
+Keep the full native features and packaging/search acceptance gates; reuse already
 verified native artifacts for fleet deployment rather than rebuilding on
 clients. These restrictions do not authorize any fleet budget change.
