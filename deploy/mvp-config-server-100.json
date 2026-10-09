@@ -78,7 +78,10 @@
       "hot_changed_bytes_threshold": 67108864,
       "hot_debounce_ms": 60000,
       "hot_cooldown_ms": 21600000,
-      "metadata_only_globs": [],
+      "metadata_only_globs": [
+        "**/.tmpbin/**",
+        "**/forensics_out/**"
+      ],
       "exclude_globs": []
     }
   },
