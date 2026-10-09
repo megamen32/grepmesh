@@ -116,7 +116,8 @@ def inspect(before):
             "home_child_read_errors": child_read_errors,
             "pending": row[0], "metadata_only_pending": row[1] or 0,
             "service_memory_events": events, "rust_log": rust_log,
-            "registration_errno": "not retained by existing service",
+            "registration_errno": None,
+            "registration_error_observed": False,
             "observation_seconds": time.monotonic() - start}
 
 
