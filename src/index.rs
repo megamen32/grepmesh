@@ -31,8 +31,17 @@ fn register_watch_root(
     excludes: &GlobSet,
     watch: &mut impl FnMut(&Path) -> notify::Result<()>,
 ) -> Vec<(PathBuf, notify::Error)> {
+    register_watch_subtree(root, root, excludes, watch)
+}
+
+fn register_watch_subtree(
+    start: &Path,
+    root: &Path,
+    excludes: &GlobSet,
+    watch: &mut impl FnMut(&Path) -> notify::Result<()>,
+) -> Vec<(PathBuf, notify::Error)> {
     let mut failures = Vec::new();
-    let mut remaining = VecDeque::from([root.to_path_buf()]);
+    let mut remaining = VecDeque::from([start.to_path_buf()]);
     let root_device = fs::symlink_metadata(root)
         .ok()
         .and_then(|meta| device_id(&meta));
@@ -57,20 +66,20 @@ fn register_watch_root(
             break;
         }
         if let Err(error) = watch(&unit) {
-            // notify6 may have registered a prefix before returning one leaf's
-            // error. Retry its independent children on this SAME watcher.
-            // Resource exhaustion is global; do not multiply failed requests.
+            // Register individual directories on the same watcher: recursive
+            // notify6 traversal cannot apply our excludes and can exhaust the
+            // user's watches inside node_modules or build output.
             let exhausted = matches!(error.kind, notify::ErrorKind::MaxFilesWatch);
             failures.push((unit.clone(), error));
             if exhausted {
                 break;
             }
-            if let Ok(children) = fs::read_dir(&unit) {
-                remaining.extend(children.filter_map(|entry| {
-                    let entry = entry.ok()?;
-                    entry.file_type().ok()?.is_dir().then(|| entry.path())
-                }));
-            }
+        }
+        if let Ok(children) = fs::read_dir(&unit) {
+            remaining.extend(children.filter_map(|entry| {
+                let entry = entry.ok()?;
+                entry.file_type().ok()?.is_dir().then(|| entry.path())
+            }));
         }
     }
     failures
@@ -872,6 +881,9 @@ impl IndexManager {
             let watched_index_storage_path = index_storage_path.clone();
             let watch_roots = ordered_roots(&roots);
             let watch_excludes = compile_excludes(&excludes).unwrap_or_default();
+            let callback_roots = watch_roots.clone();
+            let callback_excludes = watch_excludes.clone();
+            let (watch_events, watch_rx) = mpsc::sync_channel(MAX_WATCH_RECOVERY_UNITS);
             thread::spawn(move || {
                 let mut watcher: RecommendedWatcher = match notify::recommended_watcher(
                     move |event: notify::Result<notify::Event>| {
@@ -890,7 +902,13 @@ impl IndexManager {
                                     .filter(|path| {
                                         !watched_index_storage_path.as_ref().is_some_and(
                                             |index_path| is_index_storage_path(path, index_path),
-                                        )
+                                        ) && callback_roots
+                                            .iter()
+                                            .filter(|root| path.starts_with(root))
+                                            .max_by_key(|root| root.components().count())
+                                            .is_some_and(|root| {
+                                                !excluded(path, root, &callback_excludes)
+                                            })
                                     })
                                     .collect::<Vec<_>>();
                             if !paths.is_empty() {
@@ -899,6 +917,12 @@ impl IndexManager {
                                         let is_target = rename_target
                                             .as_ref()
                                             .is_none_or(|target| target == &path);
+                                        if new_subtree && is_target && path.is_dir() {
+                                            if let Err(error) = watch_events.try_send(path.clone())
+                                            {
+                                                tracing::error!(path = %path.display(), error = %error, "queue new GrepMesh watch failed");
+                                            }
+                                        }
                                         let event = pending.entry(path).or_default();
                                         event.count = event.count.saturating_add(1);
                                         event.new_subtree |= new_subtree && is_target;
@@ -915,15 +939,27 @@ impl IndexManager {
                         return;
                     }
                 };
-                for root in watch_roots {
-                    for (path, error) in register_watch_root(&root, &watch_excludes, &mut |path| {
-                        watcher.watch(path, RecursiveMode::Recursive)
+                for root in &watch_roots {
+                    for (path, error) in register_watch_root(root, &watch_excludes, &mut |path| {
+                        watcher.watch(path, RecursiveMode::NonRecursive)
                     }) {
                         tracing::error!(root = %root.display(), path = %path.display(), error = ?error, "watch GrepMesh root failed");
                     }
                 }
-                loop {
-                    thread::park();
+                while let Ok(path) = watch_rx.recv() {
+                    if let Some(root) = watch_roots
+                        .iter()
+                        .filter(|root| path.starts_with(root))
+                        .max_by_key(|root| root.components().count())
+                    {
+                        for (path, error) in
+                            register_watch_subtree(&path, root, &watch_excludes, &mut |path| {
+                                watcher.watch(path, RecursiveMode::NonRecursive)
+                            })
+                        {
+                            tracing::error!(root = %root.display(), path = %path.display(), error = ?error, "watch new GrepMesh subtree failed");
+                        }
+                    }
                 }
             });
             let configured_roots = ordered_roots(&roots).into_iter().collect::<BTreeSet<_>>();
@@ -2319,6 +2355,40 @@ fn excluded(path: &Path, root: &Path, excludes: &GlobSet) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn energy_recovery_watch_filters_nested_excluded_subtrees() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for child in [
+            "healthy/src",
+            "healthy/node_modules/dependency",
+            "healthy/.git/objects",
+        ] {
+            std::fs::create_dir_all(root.join(child)).unwrap();
+        }
+        let mut watched = std::collections::BTreeSet::new();
+        let errors = super::register_watch_root(
+            root,
+            &super::compile_excludes(&["**/node_modules/**".into(), "**/.git/**".into()]).unwrap(),
+            &mut |path| {
+                if path == root {
+                    return Err(notify::Error::generic("one recursive boundary"));
+                }
+                watched.insert(path.to_path_buf());
+                Ok(())
+            },
+        );
+        assert!(!errors.is_empty());
+        assert!(
+            watched.contains(&root.join("healthy/src")),
+            "healthy nested directories need their own filtered watch"
+        );
+        assert!(!watched
+            .iter()
+            .any(|p| p.starts_with(root.join("healthy/node_modules"))
+                || p.starts_with(root.join("healthy/.git"))));
+    }
+
     #[test]
     fn energy_recovery_watch_error_keeps_healthy_siblings() {
         let dir = tempfile::tempdir().unwrap();
