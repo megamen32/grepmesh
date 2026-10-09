@@ -31,6 +31,7 @@ pub struct OcrEngine {
     deferred: Mutex<BTreeSet<PathBuf>>,
     last_retry: Mutex<Instant>,
     retry_cursor: Mutex<Option<PathBuf>>,
+    metadata_retry_cursor: Mutex<Option<PathBuf>>,
     deferred_overflow: AtomicBool,
     pending_store: Mutex<Option<PersistentIndex>>,
     pending_store_healthy: AtomicBool,
@@ -57,6 +58,7 @@ impl OcrEngine {
                     .unwrap_or_else(Instant::now),
             ),
             retry_cursor: Mutex::new(None),
+            metadata_retry_cursor: Mutex::new(None),
             deferred_overflow: AtomicBool::new(false),
             pending_store: Mutex::new(None),
             pending_store_healthy: AtomicBool::new(true),
@@ -272,6 +274,47 @@ impl OcrEngine {
         // also removes stale searchable text before clearing this queue.
         // The max parameter cannot multiply the shared project's workload.
         vec![path]
+    }
+
+    pub(crate) fn metadata_retry_paths(
+        &self,
+        max: usize,
+        accept: impl Fn(&Path) -> bool,
+    ) -> Vec<PathBuf> {
+        if !self.is_mesh() || max == 0 {
+            return Vec::new();
+        }
+        let Ok(paths) = self.deferred.lock() else {
+            return Vec::new();
+        };
+        let Ok(mut cursor) = self.metadata_retry_cursor.lock() else {
+            return Vec::new();
+        };
+        let ordered: Box<dyn Iterator<Item = &PathBuf> + '_> =
+            if let Some(previous) = cursor.as_ref() {
+                Box::new(
+                    paths
+                        .range::<PathBuf, _>((
+                            std::ops::Bound::Excluded(previous.clone()),
+                            std::ops::Bound::Unbounded,
+                        ))
+                        .chain(paths.range::<PathBuf, _>((
+                            std::ops::Bound::Unbounded,
+                            std::ops::Bound::Included(previous.clone()),
+                        ))),
+                )
+            } else {
+                Box::new(paths.iter())
+            };
+        let selected = ordered
+            .filter(|path| accept(path))
+            .take(max.min(64))
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(last) = selected.last() {
+            *cursor = Some(last.clone());
+        }
+        selected
     }
 
     pub fn is_image(&self, path: &Path) -> bool {
@@ -546,6 +589,33 @@ fn require_cuda_environment(config: &OcrConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn energy_recovery_metadata_batch_is_bounded_without_gpu_retry() {
+        let ocr = OcrEngine::new(OcrConfig {
+            backend: "mesh".into(),
+            ..OcrConfig::default()
+        })
+        .unwrap();
+        ocr.defer_path(Path::new("a-ordinary.png")).unwrap();
+        for i in 0..70 {
+            ocr.defer_path(Path::new(&format!("generated/.tmpbin/{i:03}.png")))
+                .unwrap();
+        }
+        let previous = *ocr.last_retry.lock().unwrap();
+        let paths =
+            ocr.metadata_retry_paths(200, |path| path.to_string_lossy().contains("/.tmpbin/"));
+        assert_eq!(paths.len(), 64);
+        assert!(paths
+            .iter()
+            .all(|path| path.to_string_lossy().contains("/.tmpbin/")));
+        assert_eq!(
+            *ocr.last_retry.lock().unwrap(),
+            previous,
+            "metadata selection must not consume GPU cooldown"
+        );
+        assert_eq!(ocr.deferred_count(), 71, "selection must not ACK");
+    }
 
     #[test]
     fn committed_retry_drains_serially_and_failure_restores_backoff() {

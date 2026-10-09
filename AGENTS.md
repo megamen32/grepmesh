@@ -105,3 +105,17 @@ CPU capacity for runner/OS. No fleet capacity or runtime limit changes.
 Keep the full native features and packaging/search acceptance gates; reuse already
 verified native artifacts for fleet deployment rather than rebuilding on
 clients. These restrictions do not authorize any fleet budget change.
+
+
+## Cached energy-recovery build44 — 2026-10-09
+
+The accepted CPU1/high1536MiB/max2GiB/swap0/tasks128/600s/IOWeight20,
+Cargo jobs1 and <2GiB temporary growth/<20GiB project bounds remain unchanged.
+A fresh native check found the server44 user manager delegates memory+pids,
+with no cpu/io controller in its app.slice. Do not call CPUQuota/IOWeight
+properties native enforcement there. The owning build command additionally
+uses one allowed logical CPU via taskset (inherited by Cargo/rustc) and
+ionice best-effort priority7; record affinity and actual memory/swap/pids plus
+measured process/file IO. Cached-only/offline work retains >=10GiB host spare,
+no new OOM/sustained pressure and bounded storage. Global delegation/source
+is the R38 owner's repair, not a GrepMesh host-control mutation.

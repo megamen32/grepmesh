@@ -24,6 +24,57 @@ use std::{
 type IndexMap = BTreeMap<String, BTreeSet<PathBuf>>;
 type DirectoryScan = (usize, IndexMap, Vec<IndexedDocument>, Vec<PathBuf>);
 const MAX_PENDING_OCR: usize = 65_536;
+const MAX_WATCH_RECOVERY_UNITS: usize = 65_536;
+
+fn register_watch_root(
+    root: &Path,
+    excludes: &GlobSet,
+    watch: &mut impl FnMut(&Path) -> notify::Result<()>,
+) -> Vec<(PathBuf, notify::Error)> {
+    let mut failures = Vec::new();
+    let mut remaining = VecDeque::from([root.to_path_buf()]);
+    let root_device = fs::symlink_metadata(root)
+        .ok()
+        .and_then(|meta| device_id(&meta));
+    let mut attempted = 0;
+    while let Some(unit) = remaining.pop_front() {
+        let Ok(meta) = fs::symlink_metadata(&unit) else {
+            continue;
+        };
+        if !meta.is_dir()
+            || meta.file_type().is_symlink()
+            || device_id(&meta) != root_device
+            || excluded(&unit, root, excludes)
+        {
+            continue;
+        }
+        attempted += 1;
+        if attempted > MAX_WATCH_RECOVERY_UNITS {
+            failures.push((
+                unit.clone(),
+                notify::Error::generic("bounded watch recovery exhausted").add_path(unit),
+            ));
+            break;
+        }
+        if let Err(error) = watch(&unit) {
+            // notify6 may have registered a prefix before returning one leaf's
+            // error. Retry its independent children on this SAME watcher.
+            // Resource exhaustion is global; do not multiply failed requests.
+            let exhausted = matches!(error.kind, notify::ErrorKind::MaxFilesWatch);
+            failures.push((unit.clone(), error));
+            if exhausted {
+                break;
+            }
+            if let Ok(children) = fs::read_dir(&unit) {
+                remaining.extend(children.filter_map(|entry| {
+                    let entry = entry.ok()?;
+                    entry.file_type().ok()?.is_dir().then(|| entry.path())
+                }));
+            }
+        }
+    }
+    failures
+}
 
 #[derive(Default)]
 struct PendingIndexEvent {
@@ -820,6 +871,7 @@ impl IndexManager {
             let watcher_pending_paths = Arc::clone(&pending_event_paths);
             let watched_index_storage_path = index_storage_path.clone();
             let watch_roots = ordered_roots(&roots);
+            let watch_excludes = compile_excludes(&excludes).unwrap_or_default();
             thread::spawn(move || {
                 let mut watcher: RecommendedWatcher = match notify::recommended_watcher(
                     move |event: notify::Result<notify::Event>| {
@@ -864,8 +916,10 @@ impl IndexManager {
                     }
                 };
                 for root in watch_roots {
-                    if let Err(error) = watcher.watch(&root, RecursiveMode::Recursive) {
-                        tracing::warn!(root = %root.display(), error = %error, "watch GrepMesh root failed");
+                    for (path, error) in register_watch_root(&root, &watch_excludes, &mut |path| {
+                        watcher.watch(path, RecursiveMode::Recursive)
+                    }) {
+                        tracing::error!(root = %root.display(), path = %path.display(), error = ?error, "watch GrepMesh root failed");
                     }
                 }
                 loop {
@@ -1038,7 +1092,24 @@ impl IndexManager {
                 // weekly full walk. Retry one input serially and preserve
                 // the successful-reconciliation marker until all are served.
                 if let (Some(ocr), Some(index)) = (ocr.as_ref(), persistent_state.as_ref()) {
-                    let retry = ocr.take_retry_paths(1).into_iter().collect::<BTreeSet<_>>();
+                    let metadata_matcher =
+                        compile_excludes(&activity_config.metadata_only_globs).ok();
+                    let configured = ordered_roots(&roots);
+                    let mut retry = ocr.metadata_retry_paths(64, |path| {
+                        configured
+                            .iter()
+                            .filter(|root| path.starts_with(root))
+                            .max_by_key(|root| root.components().count())
+                            .is_some_and(|root| {
+                                metadata_matcher
+                                    .as_ref()
+                                    .is_some_and(|matcher| excluded(path, root, matcher))
+                            })
+                    });
+                    if retry.is_empty() {
+                        retry = ocr.take_retry_paths(1);
+                    }
+                    let retry = retry.into_iter().collect::<BTreeSet<_>>();
                     if !retry.is_empty() {
                         for path in &retry {
                             retry_ocr_path(
@@ -2019,9 +2090,8 @@ fn walk(
             .metadata_only
             .is_some_and(|matcher| excluded(path, context.root, matcher))
         {
-            if let Some(ocr) = context.ocr {
-                ocr.forget_deferred(path);
-            }
+            // Scanning is not a durable ACK. The caller commits the metadata
+            // document/FTS/cache and only then removes the deferred entry.
             documents.push(IndexedDocument {
                 path: path.clone(),
                 body: format!(
@@ -2249,6 +2319,82 @@ fn excluded(path: &Path, root: &Path, excludes: &GlobSet) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn energy_recovery_watch_error_keeps_healthy_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for name in ["healthy-a", "broken", "healthy-b", ".git"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+        }
+        let mut registered = std::collections::BTreeSet::new();
+        let errors = super::register_watch_root(
+            root,
+            &super::compile_excludes(&["**/.git/**".into()]).unwrap(),
+            &mut |path| {
+                if path == root || path == root.join("broken") {
+                    Err(notify::Error::io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "registration boundary",
+                    ))
+                    .add_path(path.to_path_buf()))
+                } else {
+                    registered.insert(path.to_path_buf());
+                    Ok(())
+                }
+            },
+        );
+        assert!(registered.contains(&root.join("healthy-a")));
+        assert!(registered.contains(&root.join("healthy-b")));
+        assert!(!registered.contains(&root.join(".git")));
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn energy_recovery_metadata_scan_waits_for_document_commit() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join(".tmpbin")).unwrap();
+        let path = root.join(".tmpbin/pending.png");
+        std::fs::write(&path, b"metadata input, not an image").unwrap();
+        let index = PersistentIndex::open(dir.path().join("index.sqlite")).unwrap();
+        let ocr = OcrEngine::new(OcrConfig {
+            backend: "mesh".into(),
+            ..OcrConfig::default()
+        })
+        .unwrap();
+        ocr.attach_pending_store(index.clone()).unwrap();
+        ocr.defer_path(&path).unwrap();
+        let matcher = compile_excludes(&[]).unwrap();
+        let metadata = compile_excludes(&["**/.tmpbin/**".into()]).unwrap();
+        let (_, _, documents, _) = scan_directory_unit(
+            &path,
+            &root,
+            &matcher,
+            1024,
+            false,
+            None,
+            Some(&ocr),
+            Some(&index),
+            Some(&metadata),
+        )
+        .unwrap();
+        assert!(
+            ocr.is_deferred(&path),
+            "scan must not acknowledge before the FTS commit"
+        );
+        assert_eq!(index.load_pending_ocr().unwrap().0, vec![path.clone()]);
+        assert_eq!(documents.len(), 1);
+        index.replace_indexed_document(&documents[0]).unwrap();
+        ocr.forget_deferred(&path);
+        assert!(index.load_pending_ocr().unwrap().0.is_empty());
+        assert!(index
+            .cached_body(&path, documents[0].size, documents[0].mtime_ns)
+            .unwrap()
+            .unwrap()
+            .contains("modified_ns:"));
+    }
+
     #[test]
     fn database_size_includes_sidecars_without_opening_database() {
         let dir = tempfile::tempdir().unwrap();
