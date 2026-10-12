@@ -1453,6 +1453,7 @@ dependencies = [
  "globset",
  "http",
  "image",
+ "mesh-core",
  "notify",
  "oar-ocr",
  "ort",
@@ -2305,6 +2306,20 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "mesh-core"
+version = "0.1.0"
+source = "git+https://github.com/megamen32/mesh-core.git?rev=daa657b5a5aae65749d904d1115d4b832fbd9eb6#daa657b5a5aae65749d904d1115d4b832fbd9eb6"
+dependencies = [
+ "anyhow",
+ "futures",
+ "http",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "mime"
