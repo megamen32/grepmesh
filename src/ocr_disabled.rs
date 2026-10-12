@@ -31,6 +31,13 @@ impl OcrEngine {
     pub(crate) fn take_retry_paths(&self, _max: usize) -> Vec<std::path::PathBuf> {
         Vec::new()
     }
+    pub(crate) fn metadata_retry_paths(
+        &self,
+        _max: usize,
+        _accept: impl Fn(&Path) -> bool,
+    ) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
     pub(crate) fn clear_overflow_if_drained(&self) -> bool {
         false
     }
@@ -70,5 +77,13 @@ mod tests {
     #[test]
     fn disabled_build_never_constructs_an_ocr_engine() {
         assert!(OcrEngine::new(OcrConfig::default()).is_none());
+    }
+
+    #[test]
+    fn disabled_metadata_retry_never_reads_or_schedules_work() {
+        let paths = OcrEngine.metadata_retry_paths(64, |_| {
+            panic!("disabled OCR must not inspect paths")
+        });
+        assert!(paths.is_empty());
     }
 }

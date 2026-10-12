@@ -5,7 +5,7 @@ use crate::{
     },
     topology::Topology,
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use futures::{stream::FuturesUnordered, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
