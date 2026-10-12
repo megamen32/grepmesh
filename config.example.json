@@ -147,7 +147,9 @@
     "**/.windsurf/extensions/**",
     "**/.windsurf-server/extensions/**",
     "**/.antigravity/extensions/**",
-    "**/.local/share/zed/extensions/**"
+    "**/.local/share/zed/extensions/**",
+    "**/.tmpbin/**",
+    "**/forensics_out/**"
   ],
   "stt": {
     "enabled": false,

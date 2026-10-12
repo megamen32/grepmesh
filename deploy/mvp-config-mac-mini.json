@@ -175,7 +175,9 @@
     "**/.windsurf/extensions/**",
     "**/.windsurf-server/extensions/**",
     "**/.antigravity/extensions/**",
-    "**/.local/share/zed/extensions/**"
+    "**/.local/share/zed/extensions/**",
+    "**/.tmpbin/**",
+    "**/forensics_out/**"
   ],
   "index_enabled": false,
   "topology_cache_path": "/Users/roomhacker/.cache/grepmesh/topology.json",

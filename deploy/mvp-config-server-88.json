@@ -103,7 +103,9 @@
     "**/.windsurf/extensions/**",
     "**/.windsurf-server/extensions/**",
     "**/.antigravity/extensions/**",
-    "**/.local/share/zed/extensions/**"
+    "**/.local/share/zed/extensions/**",
+    "**/.tmpbin/**",
+    "**/forensics_out/**"
   ],
   "topology_cache_path": "/var/lib/grepmesh-mcp/topology.json",
   "gptadmin_topology_url": "https://u-f1102930.t.gptadmin.bezrabotnyi.com/mcp-relay/agents",

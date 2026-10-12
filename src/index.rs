@@ -1267,16 +1267,22 @@ impl IndexManager {
         path_globs: &[String],
         exclude_globs: &[String],
     ) -> Option<Vec<IndexTextHit>> {
-        if query.as_bytes().len() < 3
-            || !self
-                .ready_roots
-                .read()
-                .ok()
-                .is_some_and(|roots| roots.iter().any(|ready| root.starts_with(ready)))
-        {
+        if query.as_bytes().len() < 3 {
             return None;
         }
         let persistent = self.persistent.as_ref()?;
+        let root_ready = self
+            .ready_roots
+            .read()
+            .ok()
+            .is_some_and(|roots| roots.iter().any(|ready| root.starts_with(ready)));
+        // A safety reconciliation updates the existing durable index in place.
+        // Its last completed baseline remains searchable while the new walk
+        // runs; otherwise every restart can hide cached PDF/OCR text for hours.
+        // Cold, never-completed indexes still use the filesystem fallback.
+        if !root_ready && persistent.last_full_rebuild_ms().ok().flatten().is_none() {
+            return None;
+        }
         let excludes = compile_excludes(exclude_globs).ok()?;
         let positive = path_globs
             .iter()
@@ -2600,11 +2606,24 @@ mod tests {
         }
         let mut manager = IndexManager::disabled();
         manager.persistent = Some(index);
+        manager.snapshot.write().unwrap().state = IndexState::Building;
+        assert!(manager
+            .search_text_hits_filtered(
+                "NATIVE_OCR_FILTER_MARKER",
+                root,
+                1,
+                0,
+                true,
+                &["**/*.pdf".into()],
+                &["**/Android/Sdk/**".into()]
+            )
+            .is_none());
         manager
-            .ready_roots
-            .write()
+            .persistent
+            .as_ref()
             .unwrap()
-            .insert(root.to_path_buf());
+            .mark_full_rebuild_ms(unix_time_ms())
+            .unwrap();
         let hits = manager
             .search_text_hits_filtered(
                 "NATIVE_OCR_FILTER_MARKER",
