@@ -84,7 +84,18 @@
     "**/.rustup/toolchains/**",
     "**/Pods/**",
     "**/vendor/bundle/**",
-    "**/browser-cache/**"
+    "**/browser-cache/**",
+    "**/pkg/mod/**",
+    "**/.nuget/packages/**",
+    "**/.pub-cache/**",
+    "**/.dart_tool/**",
+    "**/Carthage/Checkouts/**",
+    "**/Carthage/Build/**",
+    "**/Library/Developer/Xcode/DerivedData/**",
+    "**/Library/Developer/CoreSimulator/**",
+    "**/.vscode/extensions/**",
+    "**/.vscode-server/extensions/**",
+    "**/.vscode-server/bin/**"
   ],
   "topology_cache_path": "/var/lib/grepmesh-mcp/topology.json",
   "gptadmin_topology_url": "http://127.0.0.1:9001/mcp-relay/agents",
@@ -134,7 +145,19 @@
         "**/.rustup/toolchains/**",
         "**/Pods/**",
         "**/vendor/bundle/**",
-        "**/browser-cache/**"
+        "**/browser-cache/**",
+        "**/go/pkg/mod/**",
+        "**/pkg/mod/**",
+        "**/.nuget/packages/**",
+        "**/.pub-cache/**",
+        "**/.dart_tool/**",
+        "**/Carthage/Checkouts/**",
+        "**/Carthage/Build/**",
+        "**/Library/Developer/Xcode/DerivedData/**",
+        "**/Library/Developer/CoreSimulator/**",
+        "**/.vscode/extensions/**",
+        "**/.vscode-server/extensions/**",
+        "**/.vscode-server/bin/**"
       ],
       "exclude_globs": []
     }

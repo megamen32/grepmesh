@@ -55,7 +55,19 @@
         "**/.rustup/toolchains/**",
         "**/Pods/**",
         "**/vendor/bundle/**",
-        "**/browser-cache/**"
+        "**/browser-cache/**",
+        "**/go/pkg/mod/**",
+        "**/pkg/mod/**",
+        "**/.nuget/packages/**",
+        "**/.pub-cache/**",
+        "**/.dart_tool/**",
+        "**/Carthage/Checkouts/**",
+        "**/Carthage/Build/**",
+        "**/Library/Developer/Xcode/DerivedData/**",
+        "**/Library/Developer/CoreSimulator/**",
+        "**/.vscode/extensions/**",
+        "**/.vscode-server/extensions/**",
+        "**/.vscode-server/bin/**"
       ],
       "exclude_globs": []
     }
@@ -108,7 +120,19 @@
     "**/.rustup/toolchains/**",
     "**/Pods/**",
     "**/vendor/bundle/**",
-    "**/browser-cache/**"
+    "**/browser-cache/**",
+    "**/go/pkg/mod/**",
+    "**/pkg/mod/**",
+    "**/.nuget/packages/**",
+    "**/.pub-cache/**",
+    "**/.dart_tool/**",
+    "**/Carthage/Checkouts/**",
+    "**/Carthage/Build/**",
+    "**/Library/Developer/Xcode/DerivedData/**",
+    "**/Library/Developer/CoreSimulator/**",
+    "**/.vscode/extensions/**",
+    "**/.vscode-server/extensions/**",
+    "**/.vscode-server/bin/**"
   ],
   "stt": {
     "enabled": true,
