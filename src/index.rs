@@ -1208,7 +1208,7 @@ impl IndexManager {
         let deferred = self.ocr.as_ref().map_or(0, |ocr| ocr.deferred_count());
         if deferred > 0 && snapshot.state != IndexState::Building {
             snapshot.state = IndexState::Degraded;
-            let pending = format!("{deferred} OCR inputs await an available GPU");
+            let pending = format!("{deferred} OCR inputs await an available OCR worker");
             snapshot.last_error = Some(match snapshot.last_error {
                 Some(error) => format!("{error}; {pending}"),
                 None => pending,
@@ -2566,7 +2566,7 @@ mod tests {
         assert_eq!(status.state, IndexState::Degraded);
         assert_eq!(
             status.last_error.as_deref(),
-            Some("underlying walk failure; 1 OCR inputs await an available GPU")
+            Some("underlying walk failure; 1 OCR inputs await an available OCR worker")
         );
         assert_eq!(
             manager.snapshot.read().unwrap().last_error.as_deref(),

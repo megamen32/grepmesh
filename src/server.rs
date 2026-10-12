@@ -501,7 +501,7 @@ async fn handle_rpc_inner(state: AppState, payload: Value) -> Result<Value> {
                 tool_meta("list_directory", "List immediate safe directory entries for one host."),
                 tool_meta("search_status", "Report search/status metadata for one or more hosts."),
                 tool_meta("compute_status", "Report live GPU OCR capability and worker admission without inference."),
-                tool_meta("ocr_extract", "Extract text from bounded image/PDF bytes using this host's admitted CUDA worker."),
+                tool_meta("ocr_extract", "Extract text from bounded image/PDF bytes using this host's explicitly configured CPU or CUDA worker."),
             ]
         }),
         "tools/call" => match params.get("name").and_then(Value::as_str) {
