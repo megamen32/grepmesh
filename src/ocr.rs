@@ -30,9 +30,9 @@ fn gpu_detection_config(config: &OcrConfig) -> Option<TextDetectionConfig> {
         // The default 960-side detector exhausted the unchanged 512 MiB ORT
         // arena on ordinary queued screenshots. Bound detector activations;
         // recognition still crops the original-resolution image.
-        limit_side_len: Some(736),
+        limit_side_len: Some(512),
         limit_type: Some(oar_ocr::processors::LimitType::Max),
-        max_side_len: Some(736),
+        max_side_len: Some(512),
         // Preserve OAR's general-text preset while overriding its resize only.
         unclip_ratio: 2.0,
         ..TextDetectionConfig::default()
@@ -407,6 +407,11 @@ impl OcrEngine {
     }
 
     pub fn extract_pdf(&self, path: &Path) -> Result<String> {
+        // A PDF retained after a prior parser failure may still have a native
+        // text layer. Re-check it before spending a worker slot on raster OCR.
+        if let Some(text) = native_pdf_text(path, self.config.min_pdf_text_chars) {
+            return Ok(text);
+        }
         if self.config.backend == "mesh" {
             return self.extract_remote(path, "pdf");
         }
@@ -505,6 +510,61 @@ impl OcrEngine {
         }
         Ok(markdown)
     }
+}
+
+// Real Poppler extraction; missing Poppler or insufficient text retains OCR.
+// The temporary file is unlinked, output is bounded, and an expired subprocess
+// is killed and reaped before returning. No private text reaches diagnostics.
+fn native_pdf_text(path: &Path, minimum_chars: usize) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const MAX_TEXT_BYTES: u64 = 4 * 1024 * 1024;
+    let mut output = tempfile::tempfile().ok()?;
+    let writer = output.try_clone().ok()?;
+    let mut child = Command::new("pdftotext")
+        .arg("-layout")
+        .arg(path)
+        .arg("-")
+        .stdin(Stdio::null())
+        .stdout(writer)
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if output
+            .metadata()
+            .ok()
+            .is_none_or(|m| m.len() > MAX_TEXT_BYTES)
+            || Instant::now() >= deadline
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(_)) => return None,
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(25)),
+        }
+    }
+    output.seek(SeekFrom::Start(0)).ok()?;
+    let mut text = String::new();
+    output
+        .take(MAX_TEXT_BYTES + 1)
+        .read_to_string(&mut text)
+        .ok()?;
+    if text.len() as u64 > MAX_TEXT_BYTES
+        || text.trim().is_empty()
+        || text.chars().filter(|c| !c.is_whitespace()).count() < minimum_chars
+    {
+        return None;
+    }
+    Some(text)
 }
 
 fn remote_image_type(path: &Path) -> Option<&'static str> {
@@ -616,8 +676,8 @@ mod tests {
             ..OcrConfig::default()
         };
         let detection = gpu_detection_config(&config).expect("CUDA needs a bounded detector shape");
-        assert_eq!(detection.limit_side_len, Some(736));
-        assert_eq!(detection.max_side_len, Some(736));
+        assert_eq!(detection.limit_side_len, Some(512));
+        assert_eq!(detection.max_side_len, Some(512));
         assert!(matches!(
             detection.limit_type,
             Some(oar_ocr::processors::LimitType::Max)
