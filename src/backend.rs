@@ -597,18 +597,18 @@ impl LocalBackend {
                 partial = true;
                 break;
             }
-            if path_globs.is_empty()
-                && matches!(
-                    mode,
-                    SearchMode::Literal | SearchMode::CaseInsensitiveLiteral
-                )
-            {
-                if let Some(index_hits) = self.index.search_text_hits(
+            if matches!(
+                mode,
+                SearchMode::Literal | SearchMode::CaseInsensitiveLiteral
+            ) {
+                if let Some(index_hits) = self.index.search_text_hits_filtered(
                     &query,
                     &root,
                     remaining,
                     context_lines,
                     matches!(mode, SearchMode::Literal),
+                    &path_globs,
+                    &exclude_globs,
                 ) {
                     successful_roots += 1;
                     hits.extend(index_hits.into_iter().map(|hit| {

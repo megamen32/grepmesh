@@ -1254,6 +1254,19 @@ impl IndexManager {
         context_lines: usize,
         case_sensitive: bool,
     ) -> Option<Vec<IndexTextHit>> {
+        self.search_text_hits_filtered(query, root, limit, context_lines, case_sensitive, &[], &[])
+    }
+
+    pub fn search_text_hits_filtered(
+        &self,
+        query: &str,
+        root: &Path,
+        limit: usize,
+        context_lines: usize,
+        case_sensitive: bool,
+        path_globs: &[String],
+        exclude_globs: &[String],
+    ) -> Option<Vec<IndexTextHit>> {
         if query.as_bytes().len() < 3
             || !self
                 .ready_roots
@@ -1264,6 +1277,18 @@ impl IndexManager {
             return None;
         }
         let persistent = self.persistent.as_ref()?;
+        let excludes = compile_excludes(exclude_globs).ok()?;
+        let positive = path_globs
+            .iter()
+            .filter(|g| !g.starts_with('!'))
+            .cloned()
+            .collect::<Vec<_>>();
+        let negative = path_globs
+            .iter()
+            .filter_map(|g| g.strip_prefix('!').map(str::to_owned))
+            .collect::<Vec<_>>();
+        let includes = compile_excludes(&positive).ok()?;
+        let rejects = compile_excludes(&negative).ok()?;
         let documents = persistent.matching_documents(query).ok()?;
         let needle = if case_sensitive {
             query.to_string()
@@ -1272,7 +1297,12 @@ impl IndexManager {
         };
         let mut hits = Vec::new();
         for (path, body) in documents {
-            if !path.starts_with(root) {
+            if !path.starts_with(root) || excluded(&path, root, &excludes) {
+                continue;
+            }
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            let matches = |set: &GlobSet| set.is_match(&path) || set.is_match(relative);
+            if (!positive.is_empty() && !matches(&includes)) || matches(&rejects) {
                 continue;
             }
             let mut content_match = false;
@@ -2547,6 +2577,59 @@ mod tests {
             &index,
         );
         assert!(index.candidates("METADATA_GUARD_TOKEN").unwrap().is_empty());
+    }
+
+    // Fast unit: real SQLite rows, only local indexed-filter logic.
+    // Expected <1s/max5s. Catches stale ignored rows and loss of PDF/OCR filters.
+    #[test]
+    fn indexed_ocr_filters_ignore_stale_packages_before_hit_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let index = PersistentIndex::open(root.join("index.sqlite3")).unwrap();
+        let ignored = root.join("Android/Sdk/stale.pdf");
+        let document = root.join("documents/paper.pdf");
+        for path in [ignored.clone(), document.clone()] {
+            index
+                .replace_indexed_document(&IndexedDocument {
+                    path,
+                    size: 1,
+                    mtime_ns: 1,
+                    body: "NATIVE_OCR_FILTER_MARKER".into(),
+                })
+                .unwrap();
+        }
+        let mut manager = IndexManager::disabled();
+        manager.persistent = Some(index);
+        manager
+            .ready_roots
+            .write()
+            .unwrap()
+            .insert(root.to_path_buf());
+        let hits = manager
+            .search_text_hits_filtered(
+                "NATIVE_OCR_FILTER_MARKER",
+                root,
+                1,
+                0,
+                true,
+                &["**/*.pdf".into()],
+                &["**/Android/Sdk/**".into()],
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, document);
+        assert!(manager
+            .search_text_hits_filtered(
+                "NATIVE_OCR_FILTER_MARKER",
+                root,
+                10,
+                0,
+                true,
+                &["**/*.pdf".into(), "!**/documents/**".into()],
+                &["**/Android/Sdk/**".into()]
+            )
+            .unwrap()
+            .is_empty());
     }
 
     #[cfg(feature = "ocr")]
