@@ -323,6 +323,8 @@ fn default_ocr_remote_timeout() -> u64 {
 #[serde(default)]
 pub struct ComputeConfig {
     pub enabled: bool,
+    /// Explicit native execution provider: cuda (default) or cpu.
+    pub execution_provider: String,
     pub gpu_device_id: i32,
     pub max_payload_bytes: usize,
     pub min_free_vram_mb: u64,
@@ -334,6 +336,7 @@ impl Default for ComputeConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            execution_provider: "cuda".into(),
             gpu_device_id: 0,
             max_payload_bytes: 32 * 1024 * 1024,
             min_free_vram_mb: 2560,

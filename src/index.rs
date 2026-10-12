@@ -1130,6 +1130,7 @@ impl IndexManager {
                 if let (Some(ocr), Some(index)) = (ocr.as_ref(), persistent_state.as_ref()) {
                     let metadata_matcher =
                         compile_excludes(&activity_config.metadata_only_globs).ok();
+                    let ignored_matcher = compile_excludes(&excludes).ok();
                     let configured = ordered_roots(&roots);
                     let mut retry = ocr.metadata_retry_paths(64, |path| {
                         configured
@@ -1137,9 +1138,14 @@ impl IndexManager {
                             .filter(|root| path.starts_with(root))
                             .max_by_key(|root| root.components().count())
                             .is_some_and(|root| {
-                                metadata_matcher
+                                // Newly ignored inputs need only a durable index removal,
+                                // never GPU admission or the serial inference cooldown.
+                                ignored_matcher
                                     .as_ref()
                                     .is_some_and(|matcher| excluded(path, root, matcher))
+                                    || metadata_matcher
+                                        .as_ref()
+                                        .is_some_and(|matcher| excluded(path, root, matcher))
                             })
                     });
                     if retry.is_empty() {

@@ -61,11 +61,12 @@ impl ComputeStatus {
 
     fn eligible(&self, host: &str, now: u64) -> bool {
         self.host_id == host
-            && self.backend == "cuda"
+            && matches!(self.backend.as_str(), "cuda" | "cpu")
             && self.admission == "available"
             && self.busy_count == 0
-            && self.gpu_uuid.as_ref().is_some_and(|id| !id.is_empty())
-            && self.gpu_free_bytes.unwrap_or(0) >= MIN_FREE_GPU_BYTES
+            && (self.backend == "cpu"
+                || (self.gpu_uuid.as_ref().is_some_and(|id| !id.is_empty())
+                    && self.gpu_free_bytes.unwrap_or(0) >= MIN_FREE_GPU_BYTES))
             && self.fresh_at(now)
     }
 
@@ -188,7 +189,7 @@ impl ComputeClient {
                 });
             if status.as_ref().is_some_and(|status| {
                 status.host_id != peer.host_id
-                    || status.backend != "cuda"
+                    || !matches!(status.backend.as_str(), "cuda" | "cpu")
                     || matches!(status.admission.as_str(), "ineligible" | "unavailable")
                     || !status.fresh_at(unix_seconds())
             }) {
@@ -213,7 +214,7 @@ impl ComputeClient {
                 .then_with(|| a.host_id.cmp(&b.host_id))
         });
         if candidates.is_empty() || Instant::now() >= deadline {
-            return Err(anyhow!("mesh OCR deferred: no available GPU worker"));
+            return Err(anyhow!("mesh OCR deferred: no available OCR worker"));
         }
         // GPU admission is known before opening potentially large inputs.
         let ceiling = mesh_input_limit(self.config.max_image_bytes);
@@ -264,7 +265,7 @@ impl ComputeClient {
                 }
             };
             if result.get("host_id").and_then(Value::as_str) != Some(peer.host_id.as_str())
-                || result.get("backend").and_then(Value::as_str) != Some("cuda")
+                || result.get("backend").and_then(Value::as_str) != Some(status.backend.as_str())
                 || result.get("gpu_uuid").and_then(Value::as_str) != status.gpu_uuid.as_deref()
             {
                 self.mark_failed(&peer);
@@ -278,7 +279,7 @@ impl ComputeClient {
             self.mark_failed(&peer);
         }
         Err(anyhow!(
-            "mesh OCR deferred: no available GPU worker completed extraction"
+            "mesh OCR deferred: no available OCR worker completed extraction"
         ))
     }
 
@@ -672,7 +673,7 @@ mod tests {
         let error = client
             .extract(Path::new("missing-input.png"), "png")
             .unwrap_err();
-        assert!(error.to_string().contains("no available GPU worker"));
+        assert!(error.to_string().contains("no available OCR worker"));
     }
 
     #[test]
@@ -708,7 +709,7 @@ mod tests {
         assert_eq!(status.gpu_uuid.as_deref(), Some("new-gpu"));
     }
     #[test]
-    fn stale_busy_and_cpu_workers_are_ineligible() {
+    fn stale_busy_and_unknown_workers_are_ineligible() {
         let mut status: ComputeStatus = serde_json::from_value(json!({"host_id":"gpu", "backend":"cuda", "gpu_uuid":"id", "gpu_free_bytes":MIN_FREE_GPU_BYTES, "busy_count":0, "admission":"available", "observed_at":100})).unwrap();
         assert!(status.eligible("gpu", 100));
         assert!(!status.eligible("other", 100));
@@ -716,9 +717,28 @@ mod tests {
         status.busy_count = 1;
         assert!(!status.eligible("gpu", 100));
         status.busy_count = 0;
-        status.backend = "cpu".into();
+        status.backend = "unknown".into();
         assert!(!status.eligible("gpu", 100));
     }
+    // Fast unit; explicit CPU admission must retain host, freshness and busy fences.
+    // Expected <1s, maximum 5s; catches rejecting valid Mac CPU workers.
+    #[test]
+    fn explicit_cpu_worker_needs_no_cuda_but_retains_admission_fences() {
+        let mut status: ComputeStatus = serde_json::from_value(json!({
+            "host_id":"mac-m1", "backend":"cpu", "busy_count":0,
+            "admission":"available", "observed_at":100
+        }))
+        .unwrap();
+        assert!(status.eligible("mac-m1", 100));
+        assert!(!status.eligible("other", 100));
+        assert!(!status.eligible("mac-m1", 111));
+        status.busy_count = 1;
+        assert!(!status.eligible("mac-m1", 100));
+        status.busy_count = 0;
+        status.admission = "ineligible".into();
+        assert!(!status.eligible("mac-m1", 100));
+    }
+
     #[test]
     fn reads_existing_mcp_content_and_rejects_error() {
         assert_eq!(

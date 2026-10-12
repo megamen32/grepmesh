@@ -5,6 +5,7 @@ use anyhow::{anyhow, Context, Result};
 use image::ImageFormat;
 use oar_ocr::{
     core::config::{OrtExecutionProvider, OrtSessionConfig},
+    domain::tasks::TextDetectionConfig,
     oarocr::{OAROCRBuilder, OAROCR},
     utils::load_image,
 };
@@ -23,6 +24,20 @@ use std::{
 
 const MAX_DEFERRED_PATHS: usize = 65_536;
 const RETRY_COOLDOWN: Duration = Duration::from_secs(60);
+
+fn gpu_detection_config(config: &OcrConfig) -> Option<TextDetectionConfig> {
+    (config.execution_provider == "cuda").then(|| TextDetectionConfig {
+        // The default 960-side detector exhausted the unchanged 512 MiB ORT
+        // arena on ordinary queued screenshots. Bound detector activations;
+        // recognition still crops the original-resolution image.
+        limit_side_len: Some(736),
+        limit_type: Some(oar_ocr::processors::LimitType::Max),
+        max_side_len: Some(736),
+        // Preserve OAR's general-text preset while overriding its resize only.
+        unclip_ratio: 2.0,
+        ..TextDetectionConfig::default()
+    })
+}
 
 pub struct OcrEngine {
     config: OcrConfig,
@@ -542,16 +557,20 @@ impl OcrRuntime {
             .build()
             .context("initialize bounded OCR preprocessing pool")?;
         // Both models request the same required, validated CUDA provider.
-        let ocr = OAROCRBuilder::new(
+        let mut builder = OAROCRBuilder::new(
             config.det_model.as_str(),
             config.rec_model.as_str(),
             config.dict.as_str(),
         )
         .ort_session(session)
         .image_batch_size(1)
-        .region_batch_size(1)
-        .build()
-        .map_err(|error| anyhow!("initialize OAR-OCR pipeline: {error}"))?;
+        .region_batch_size(1);
+        if let Some(detection) = gpu_detection_config(config) {
+            builder = builder.text_detection_config(detection);
+        }
+        let ocr = builder
+            .build()
+            .map_err(|error| anyhow!("initialize OAR-OCR pipeline: {error}"))?;
         Ok(Self { ocr, preprocessing })
     }
 }
@@ -589,6 +608,23 @@ fn require_cuda_environment(config: &OcrConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn energy_recovery_gpu_detector_respects_existing_arena_budget() {
+        let config = OcrConfig {
+            execution_provider: "cuda".into(),
+            ..OcrConfig::default()
+        };
+        let detection = gpu_detection_config(&config).expect("CUDA needs a bounded detector shape");
+        assert_eq!(detection.limit_side_len, Some(736));
+        assert_eq!(detection.max_side_len, Some(736));
+        assert!(matches!(
+            detection.limit_type,
+            Some(oar_ocr::processors::LimitType::Max)
+        ));
+        assert_eq!(config.gpu_mem_limit_bytes, 512 * 1024 * 1024);
+        assert!(gpu_detection_config(&OcrConfig::default()).is_none());
+    }
 
     #[test]
     fn energy_recovery_metadata_batch_is_bounded_without_gpu_retry() {

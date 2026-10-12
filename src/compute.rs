@@ -58,7 +58,7 @@ impl ComputeWorker {
     ) -> Self {
         ocr.enabled = config.enabled;
         ocr.backend = "local".into();
-        ocr.execution_provider = "cuda".into();
+        ocr.execution_provider = config.execution_provider.clone();
         ocr.gpu_device_id = config.gpu_device_id;
         ocr.gpu_mem_limit_bytes = ocr.gpu_mem_limit_bytes.min(GPU_ARENA_LIMIT);
         let timeout = Duration::from_millis(ocr.remote_timeout_ms.clamp(1_000, 300_000));
@@ -94,12 +94,14 @@ impl ComputeWorker {
 
     fn eligibility_error(&self) -> Option<&'static str> {
         if !self.config.enabled {
-            Some("GPU compute worker is disabled")
-        } else if !cfg!(feature = "ocr-cuda") {
+            Some("OCR compute worker is disabled")
+        } else if !matches!(self.config.execution_provider.as_str(), "cuda" | "cpu") {
+            Some("unsupported OCR worker execution provider")
+        } else if self.config.execution_provider == "cuda" && !cfg!(feature = "ocr-cuda") {
             Some("CUDA OCR support is absent from this build")
         } else if self.engine.is_none() {
             Some("OCR engine is unavailable")
-        } else if self.config.gpu_device_id < 0 {
+        } else if self.config.execution_provider == "cuda" && self.config.gpu_device_id < 0 {
             Some("invalid GPU device index")
         } else {
             None
@@ -139,6 +141,13 @@ impl ComputeWorker {
         if let Some(reason) = self.eligibility_error() {
             return self.unavailable("ineligible", reason);
         }
+        if self.config.execution_provider == "cpu" {
+            return json!({"host_id": self.host_id, "backend": "cpu", "gpu_uuid": null,
+                "busy_count": usize::from(self.slots.available_permits() == 0),
+                "admission": if self.slots.available_permits() == 0 { "busy" } else { "available" },
+                "observed_at": observed_at(), "performance_score": 50,
+                "performance_score_approximate": true});
+        }
         match self.probe_gpu(false).await {
             Ok(gpu) => json!({
                 "host_id": self.host_id, "backend": "cuda", "gpu_uuid": gpu.uuid,
@@ -154,7 +163,7 @@ impl ComputeWorker {
     }
 
     fn unavailable(&self, admission: &str, reason: &str) -> Value {
-        json!({"host_id": self.host_id, "backend": "cuda", "gpu_uuid": null,
+        json!({"host_id": self.host_id, "backend": self.config.execution_provider, "gpu_uuid": null,
             "gpu_name": null, "compute_capability": null, "gpu_total_bytes": 0,
             "gpu_free_bytes": 0, "gpu_utilization_percent": 100,
             "busy_count": usize::from(self.slots.available_permits() == 0),
@@ -203,11 +212,16 @@ impl ComputeWorker {
         let permit = Arc::clone(&self.slots)
             .try_acquire_owned()
             .map_err(|_| anyhow!("GPU worker is busy"))?;
-        let gpu = self.probe_gpu(true).await?;
-        let admission = self.gpu_admission(&gpu);
-        if admission != "available" {
-            return Err(anyhow!("GPU worker rejected admission: {admission}"));
-        }
+        let gpu = if self.config.execution_provider == "cuda" {
+            let gpu = self.probe_gpu(true).await?;
+            let admission = self.gpu_admission(&gpu);
+            if admission != "available" {
+                return Err(anyhow!("GPU worker rejected admission: {admission}"));
+            }
+            Some(gpu)
+        } else {
+            None
+        };
         let worker = Arc::clone(self);
         let engine = Arc::clone(
             self.engine
@@ -243,8 +257,8 @@ impl ComputeWorker {
                     .extract_image(&path)
                     .map_err(classify_image_failure)?
             };
-            let result = json!({"text": text, "host_id": worker.host_id, "gpu_uuid": gpu.uuid,
-                "gpu_name": gpu.name, "backend": "cuda"});
+            let result = json!({"text": text, "host_id": worker.host_id, "gpu_uuid": gpu.as_ref().map(|gpu| &gpu.uuid),
+                "gpu_name": gpu.as_ref().map(|gpu| &gpu.name), "backend": worker.config.execution_provider});
             if serde_json::to_vec(&result)?.len() > worker.max_output_bytes {
                 return Err(anyhow!("OCR output exceeds worker response limit"));
             }
