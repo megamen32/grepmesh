@@ -23,4 +23,4 @@ Plans:
 ## Progress
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Distributed OCR recovery | 0/1 | In progress | - |
+| 1. Distributed OCR recovery | 0/1 | Native software accepted; external transport/physical dependencies | - |
