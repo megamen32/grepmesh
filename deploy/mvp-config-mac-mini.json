@@ -73,7 +73,9 @@
         "**/Library/Developer/CoreSimulator/**",
         "**/.vscode/extensions/**",
         "**/.vscode-server/extensions/**",
-        "**/.vscode-server/bin/**"
+        "**/.vscode-server/bin/**",
+        "**/.android/**",
+        "**/Android/SDK/**"
       ]
     }
   },
@@ -155,7 +157,9 @@
     "**/Library/Developer/CoreSimulator/**",
     "**/.vscode/extensions/**",
     "**/.vscode-server/extensions/**",
-    "**/.vscode-server/bin/**"
+    "**/.vscode-server/bin/**",
+    "**/.android/**",
+    "**/Android/SDK/**"
   ],
   "index_enabled": false,
   "topology_cache_path": "/Users/roomhacker/.cache/grepmesh/topology.json",

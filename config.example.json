@@ -74,7 +74,9 @@
         "**/Library/Developer/CoreSimulator/**",
         "**/.vscode/extensions/**",
         "**/.vscode-server/extensions/**",
-        "**/.vscode-server/bin/**"
+        "**/.vscode-server/bin/**",
+        "**/.android/**",
+        "**/Android/SDK/**"
       ],
       "exclude_globs": [
         "scratch/**"
@@ -127,7 +129,9 @@
     "**/Library/Developer/CoreSimulator/**",
     "**/.vscode/extensions/**",
     "**/.vscode-server/extensions/**",
-    "**/.vscode-server/bin/**"
+    "**/.vscode-server/bin/**",
+    "**/.android/**",
+    "**/Android/SDK/**"
   ],
   "stt": {
     "enabled": false,

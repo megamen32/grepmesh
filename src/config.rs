@@ -15,6 +15,8 @@ pub fn default_exclude_globs() -> Vec<String> {
         "**/captcha-train-*/**",
         "**/captcha_train/**",
         "**/Android/Sdk/**",
+        "**/Android/SDK/**",
+        "**/.android/**",
         "**/Android/sdk/**",
         "**/android-sdk/**",
         "**/android-sdk-*/**",

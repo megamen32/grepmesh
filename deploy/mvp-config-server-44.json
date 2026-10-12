@@ -90,7 +90,9 @@
     "**/Library/Developer/CoreSimulator/**",
     "**/.vscode/extensions/**",
     "**/.vscode-server/extensions/**",
-    "**/.vscode-server/bin/**"
+    "**/.vscode-server/bin/**",
+    "**/.android/**",
+    "**/Android/SDK/**"
   ],
   "topology_cache_path": "/var/lib/grepmesh-mcp/topology.json",
   "limits": {
@@ -142,7 +144,9 @@
         "**/Library/Developer/CoreSimulator/**",
         "**/.vscode/extensions/**",
         "**/.vscode-server/extensions/**",
-        "**/.vscode-server/bin/**"
+        "**/.vscode-server/bin/**",
+        "**/.android/**",
+        "**/Android/SDK/**"
       ]
     }
   },
