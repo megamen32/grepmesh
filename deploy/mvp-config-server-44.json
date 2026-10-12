@@ -92,7 +92,15 @@
     "**/.vscode-server/extensions/**",
     "**/.vscode-server/bin/**",
     "**/.android/**",
-    "**/Android/SDK/**"
+    "**/Android/SDK/**",
+    "**/.qoder-server/extensions/**",
+    "**/.qoder/extensions/**",
+    "**/.cursor/extensions/**",
+    "**/.cursor-server/extensions/**",
+    "**/.windsurf/extensions/**",
+    "**/.windsurf-server/extensions/**",
+    "**/.antigravity/extensions/**",
+    "**/.local/share/zed/extensions/**"
   ],
   "topology_cache_path": "/var/lib/grepmesh-mcp/topology.json",
   "limits": {
@@ -146,7 +154,15 @@
         "**/.vscode-server/extensions/**",
         "**/.vscode-server/bin/**",
         "**/.android/**",
-        "**/Android/SDK/**"
+        "**/Android/SDK/**",
+        "**/.qoder-server/extensions/**",
+        "**/.qoder/extensions/**",
+        "**/.cursor/extensions/**",
+        "**/.cursor-server/extensions/**",
+        "**/.windsurf/extensions/**",
+        "**/.windsurf-server/extensions/**",
+        "**/.antigravity/extensions/**",
+        "**/.local/share/zed/extensions/**"
       ]
     }
   },

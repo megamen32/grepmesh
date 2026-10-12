@@ -95,7 +95,15 @@
     "**/.vscode-server/extensions/**",
     "**/.vscode-server/bin/**",
     "**/.android/**",
-    "**/Android/SDK/**"
+    "**/Android/SDK/**",
+    "**/.qoder-server/extensions/**",
+    "**/.qoder/extensions/**",
+    "**/.cursor/extensions/**",
+    "**/.cursor-server/extensions/**",
+    "**/.windsurf/extensions/**",
+    "**/.windsurf-server/extensions/**",
+    "**/.antigravity/extensions/**",
+    "**/.local/share/zed/extensions/**"
   ],
   "topology_cache_path": "/var/lib/grepmesh-mcp/topology.json",
   "gptadmin_topology_url": "https://u-f1102930.t.gptadmin.bezrabotnyi.com/mcp-relay/agents",
@@ -157,7 +165,15 @@
         "**/.vscode-server/extensions/**",
         "**/.vscode-server/bin/**",
         "**/.android/**",
-        "**/Android/SDK/**"
+        "**/Android/SDK/**",
+        "**/.qoder-server/extensions/**",
+        "**/.qoder/extensions/**",
+        "**/.cursor/extensions/**",
+        "**/.cursor-server/extensions/**",
+        "**/.windsurf/extensions/**",
+        "**/.windsurf-server/extensions/**",
+        "**/.antigravity/extensions/**",
+        "**/.local/share/zed/extensions/**"
       ],
       "exclude_globs": []
     }
@@ -190,6 +206,7 @@
     "max_payload_bytes": 33554432,
     "min_free_vram_mb": 2560,
     "max_gpu_utilization_percent": 70,
-    "temp_dir": "/var/lib/grepmesh-mcp/.tmp/compute"
+    "temp_dir": "/var/lib/grepmesh-mcp/.tmp/compute",
+    "execution_provider": "cpu"
   }
 }
