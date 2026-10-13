@@ -187,6 +187,10 @@ impl PersistentIndex {
                    path TEXT PRIMARY KEY, size INTEGER NOT NULL, mtime_ns TEXT NOT NULL,\
                    failures INTEGER NOT NULL CHECK(failures BETWEEN 0 AND 4)\
                  );\
+                 CREATE TABLE IF NOT EXISTS grepmesh_ocr_empty_results (\
+                   path TEXT PRIMARY KEY, size INTEGER NOT NULL, mtime_ns TEXT NOT NULL,\
+                   disposition TEXT NOT NULL CHECK(disposition IN ('empty_output','empty_input'))\
+                 );\
                  CREATE TABLE IF NOT EXISTS grepmesh_document_rows (\
                    path TEXT PRIMARY KEY,\
                    fts_rowid INTEGER NOT NULL UNIQUE\
@@ -351,6 +355,15 @@ impl PersistentIndex {
         ).map_err(|error| error.to_string())
     }
 
+    pub(crate) fn ocr_terminal_empty(
+        &self,
+        path: &Path,
+        size: u64,
+        mtime_ns: u128,
+    ) -> Result<bool, String> {
+        self.connection()?.query_row("SELECT EXISTS(SELECT 1 FROM grepmesh_ocr_empty_results WHERE path=?1 AND size=?2 AND mtime_ns=?3)",params![path.display().to_string(),size as i64,mtime_ns.to_string()],|row|row.get(0)).map_err(|error|error.to_string())
+    }
+
     pub(crate) fn record_ocr_failures(
         &self,
         path: &Path,
@@ -431,13 +444,14 @@ impl PersistentIndex {
                     params![path],
                 )
                 .map_err(|error| error.to_string())?;
+            let empty_cleared = transaction.execute("DELETE FROM grepmesh_ocr_empty_results WHERE path=?1 AND size=?2 AND mtime_ns=?3",params![path,document.size as i64,document.mtime_ns.to_string()]).map_err(|error|error.to_string())?;
             let cleared = transaction
                 .execute(
                     "DELETE FROM grepmesh_ocr_attempts WHERE path=?1 AND size=?2 AND mtime_ns=?3",
                     params![path, document.size as i64, document.mtime_ns.to_string()],
                 )
                 .map_err(|error| error.to_string())?;
-            if acknowledged != 0 || cleared != 0 {
+            if acknowledged != 0 || cleared != 0 || empty_cleared != 0 {
                 transaction.commit().map_err(|error| error.to_string())?;
             }
             return Ok(());
@@ -496,6 +510,12 @@ impl PersistentIndex {
         transaction
             .execute(
                 "DELETE FROM grepmesh_ocr_attempts WHERE path=?1 AND size=?2 AND mtime_ns=?3",
+                params![path, document.size as i64, document.mtime_ns.to_string()],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM grepmesh_ocr_empty_results WHERE path=?1 AND size=?2 AND mtime_ns=?3",
                 params![path, document.size as i64, document.mtime_ns.to_string()],
             )
             .map_err(|error| error.to_string())?;
@@ -592,6 +612,14 @@ impl PersistentIndex {
     }
 
     fn remove_document(&self, path: &Path) -> Result<(), String> {
+        self.remove_document_with_empty(path, None)
+    }
+
+    fn remove_document_with_empty(
+        &self,
+        path: &Path,
+        empty: Option<(u64, u128)>,
+    ) -> Result<(), String> {
         let mut connection = self.connection()?;
         let transaction = connection
             .transaction()
@@ -652,6 +680,13 @@ impl PersistentIndex {
                 params![path],
             )
             .map_err(|error| error.to_string())?;
+        if let Some((size, mtime_ns)) = empty {
+            let (exists,count):(bool,usize) = transaction.query_row("SELECT EXISTS(SELECT 1 FROM grepmesh_ocr_empty_results WHERE path=?1),(SELECT count(*) FROM grepmesh_ocr_empty_results)",params![path],|row|Ok((row.get(0)?,row.get(1)?))).map_err(|error|error.to_string())?;
+            if !exists && count >= MAX_PENDING_OCR {
+                return Err("OCR empty-result ledger is full".into());
+            }
+            transaction.execute("INSERT INTO grepmesh_ocr_empty_results(path,size,mtime_ns,disposition) VALUES (?1,?2,?3,?4) ON CONFLICT(path) DO UPDATE SET size=excluded.size,mtime_ns=excluded.mtime_ns,disposition=excluded.disposition",params![path,size as i64,mtime_ns.to_string(),if size==0 {"empty_input"} else {"empty_output"}]).map_err(|error|error.to_string())?;
+        }
         transaction.commit().map_err(|error| error.to_string())
     }
 
@@ -2439,7 +2474,19 @@ fn complete_empty_ocr(
     }
     if ocr.is_mesh() {
         if let Some(index) = context.persistent {
-            if let Err(error) = index.remove_document(path) {
+            let empty = match expected {
+                Some(metadata)
+                    if index.ocr_failure_count(
+                        path,
+                        metadata.len(),
+                        metadata_mtime_ns(metadata),
+                    )? < crate::compute_client::MAX_RECOGNITION_FAILURES =>
+                {
+                    Some((metadata.len(), metadata_mtime_ns(metadata)))
+                }
+                _ => None,
+            };
+            if let Err(error) = index.remove_document_with_empty(path, empty) {
                 let _ = ocr.defer_path(path);
                 return Err(error);
             }
@@ -2764,6 +2811,49 @@ fn excluded(path: &Path, root: &Path, excludes: &GlobSet) -> bool {
 mod tests {
     #[cfg(feature = "ocr")]
     #[cfg(feature = "ocr")]
+    #[test]
+    fn empty_ocr_disposition_is_atomic_versioned_and_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty-result.png");
+        fs::write(&path, b"unchanged source").unwrap();
+        let database = dir.path().join("index.sqlite3");
+        let store = PersistentIndex::open(database.clone()).unwrap();
+        store
+            .replace_document(&path, "old searchable body")
+            .unwrap();
+        store.defer_ocr(&path).unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        let version = (metadata.len(), metadata_mtime_ns(&metadata));
+        let connection = store.connection().unwrap();
+        connection.execute_batch("CREATE TRIGGER empty_receipt_failure BEFORE INSERT ON grepmesh_ocr_empty_results BEGIN SELECT RAISE(ABORT,'controlled receipt failure'); END;").unwrap();
+        assert!(store
+            .remove_document_with_empty(&path, Some(version))
+            .is_err());
+        assert_eq!(store.load_pending_ocr().unwrap().0, vec![path.clone()]);
+        assert_eq!(store.candidates("searchable").unwrap(), vec![path.clone()]);
+        assert!(!store
+            .ocr_terminal_empty(&path, version.0, version.1)
+            .unwrap());
+        connection
+            .execute_batch("DROP TRIGGER empty_receipt_failure;")
+            .unwrap();
+        store
+            .remove_document_with_empty(&path, Some(version))
+            .unwrap();
+        drop(connection);
+        drop(store);
+        let store = PersistentIndex::open(database).unwrap();
+        assert!(store
+            .ocr_terminal_empty(&path, version.0, version.1)
+            .unwrap());
+        assert!(!store
+            .ocr_terminal_empty(&path, version.0, version.1 + 1)
+            .unwrap());
+        assert!(store.load_pending_ocr().unwrap().0.is_empty());
+        assert!(store.candidates("searchable").unwrap().is_empty());
+        assert_eq!(fs::read(&path).unwrap(), b"unchanged source");
+    }
+
     #[test]
     fn ocr_failure_ledger_survives_reopen_and_resets_for_new_version() {
         let dir = tempfile::tempdir().unwrap();

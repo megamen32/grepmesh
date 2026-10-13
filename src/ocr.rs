@@ -598,9 +598,12 @@ impl OcrEngine {
             .clone();
         match store {
             Some(store) => Ok(store
-                .ocr_failure_count(path, size, mtime_ns)
+                .ocr_terminal_empty(path, size, mtime_ns)
                 .map_err(anyhow::Error::msg)?
-                >= crate::compute_client::MAX_RECOGNITION_FAILURES),
+                || store
+                    .ocr_failure_count(path, size, mtime_ns)
+                    .map_err(anyhow::Error::msg)?
+                    >= crate::compute_client::MAX_RECOGNITION_FAILURES),
             None => Ok(false),
         }
     }
@@ -621,7 +624,14 @@ impl OcrEngine {
                 .map_err(anyhow::Error::msg)?,
             None => 0,
         };
-        if failures >= MAX_RECOGNITION_FAILURES {
+        if failures >= MAX_RECOGNITION_FAILURES
+            || store
+                .as_ref()
+                .map(|store| store.ocr_terminal_empty(path, size, mtime_ns))
+                .transpose()
+                .map_err(anyhow::Error::msg)?
+                .unwrap_or(false)
+        {
             return Ok(String::new());
         }
         let result = (|| {

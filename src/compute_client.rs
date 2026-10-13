@@ -395,6 +395,7 @@ impl ComputeClient {
             let result = match result {
                 Ok(value) => value,
                 Err(error) if error.is::<InvalidOcrInput>() => {
+                    tracing::info!(worker_host = %peer.host_id, input = %path.display(), backend = %status.backend, elapsed_ms = started.elapsed().as_millis() as u64, "mesh OCR processing failed");
                     return Err(anyhow!(OcrRecognitionFailure {
                         attempts: recognition_failures + 1
                     }));
@@ -405,7 +406,10 @@ impl ComputeClient {
                 }
                 Err(error) if error.is::<OcrRecognitionFailure>() => {
                     recognition_failures += 1;
-                    self.mark_failed(&peer);
+                    tracing::info!(worker_host = %peer.host_id, input = %path.display(), backend = %status.backend, elapsed_ms = started.elapsed().as_millis() as u64, "mesh OCR processing failed");
+                    // A completed input failure does not make this healthy
+                    // host unavailable for other queue files.
+                    self.statuses.remove(&peer_key(&peer));
                     if recognition_failures >= remaining {
                         return Err(anyhow!(OcrRecognitionFailure {
                             attempts: recognition_failures
