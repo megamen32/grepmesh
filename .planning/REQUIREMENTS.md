@@ -27,3 +27,10 @@
 **Coverage:** 4 requirements; all mapped.
 
 **2026-10-13 accepted steering:** strict exclusion for training/Android/Node/Python/editor/temp paths; no OCR or new queue entries, retained files preserved. M1 CPU extraction through the repaired original Hub route passed7.03s. Mini background Grep and its original ShellMCP are restored; reviewed native x86 release applied, real catalog/file search accepted. Final five-host status has no failed hosts and partial=false. Historical failed/queued calls were preserved and not replayed; the same Mini metadata job was retrieved after completion.
+
+## Parallel queue request — 2026-10-13
+- [ ] **PAR-01**: Up to3 different durable inputs run independently on free44/M1/88; one actual host job, fresh measured admission, no100 scope fallback.
+- [ ] **PAR-02**: Same-class/device measured performance only; unknown startsNone and gets useful work; no hardware-score substitute.
+- [ ] **PAR-03**: Real installed queue shows actual per-worker output/SQLite commit, not only unit/canary status.
+- [ ] **PAR-04**: Excluded training/Android/Node/Python paths do not enter decoding/inference; older excluded queue/cache entries retire without reading content, files remain.
+- [ ] **PAR-05**: Changes during asynchronous inference cannot ACK a newer input or publish stale completion.

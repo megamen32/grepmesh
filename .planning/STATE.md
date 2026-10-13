@@ -3,24 +3,24 @@
 ## Project Reference
 See: .planning/PROJECT.md (updated 2026-10-13)
 **Core value:** Find real file contents across configured computers with explicit coverage.
-**Current focus:** Distributed OCR recovery
+**Current focus:** Parallel resource-admitted OCR queue
 
 ## Current Position
-Phase: 1 of 1 (Distributed OCR recovery)
+Phase: 2 of 2 (Parallel resource-admitted OCR queue)
 Plan: 1 of 1 in current phase
-Status: Complete — native consumer acceptance
-Last activity: 2026-10-13 — both Mac Hub routes and five-host mesh search accepted
-Progress: 100%
+Status: In progress — production queue and Mac Hub acceptance
+Last activity: 2026-10-13 — bounded3 dispatcher installed; measured task/device consumer and missing captcha_dataset exclusions published
+Progress: Phase1 complete; Phase2 production acceptance in progress
 
 ## Accumulated Context
 ### Decisions
 Preserve retained queue and foreign src/ocr.rs; CPU execution is explicitly authorized for Mac M1.
 ### Blockers/Concerns
-No remaining blockers for this requested GrepMesh repair. Mini Herder hostname/native integration is independently owned by owner55 and is not a Grep search dependency. Source100 index reconciliation may remain Building with no error; no full-index completeness claim.
+Prior Mac repair accepted at its snapshot; new Phase2 route repair is verified; coherent worker publication and actual M1 queue acceptance remain owned by55/root. Mini Herder hostname/native integration is independently owned by owner55 and is not a Grep search dependency. Source100 index reconciliation may remain Building with no error; no full-index completeness claim.
 ### Pending Todos
-None for the requested repair. Native owned repair, strict excludes, foreignCPU88 durable indexed text, real filtered PDF search, M1 CPU extraction through Hub7.03s, Mini original Hub file search0.46s and final server100→Mini search/five-host status4.15s verified. Background legitimate index reconciliation continues under existing budgets; retained historical calls are not replayed.
+Finish coherent per-device worker source integration and preserve explicit OCR route configuration; install the final Linux artifact; verify real44/M1/88 completions/SQLite ACK and excluded-path withdrawal. The new original-caller M1 native Hub route responds in0.41s; current native admission reports CPU busy. Historical queued joba9 is preserved. Legitimate very large PNG queue work remains under investigation by worker owner55.
 
 ## Session Continuity
 Last session: 2026-10-13
-Stopped at: Both Mac native consumers and all five mesh routes accepted; reviewed Mini x86 artifact installed
+Stopped at: Active parallel queue delivery; M1 original Hub route still blocked, acceptance is not complete
 Resume file: None

@@ -583,8 +583,25 @@ fn peer_key(peer: &PeerConfig) -> String {
     )
 }
 
-fn merge_compute_peers(mut topology: Topology, configured: &[PeerConfig]) -> Vec<PeerConfig> {
+pub(crate) fn merge_compute_peers(
+    mut topology: Topology,
+    configured: &[PeerConfig],
+) -> Vec<PeerConfig> {
     topology.retain_known_peers(configured);
+    // A configured OCR-only Hub route is an explicit pin. Registry discovery
+    // may still retain the older ShellMCP route for the same host's searches.
+    for configured_peer in configured
+        .iter()
+        .filter(|peer| peer.gptadmin_relay_url.as_deref() == Some(peer.routable_url.as_str()))
+    {
+        if let Some(peer) = topology
+            .peers
+            .iter_mut()
+            .find(|peer| peer.host_id == configured_peer.host_id)
+        {
+            *peer = configured_peer.clone();
+        }
+    }
     // Search topology intentionally excludes self. An enabled compute worker
     // may still serve its own index through the explicitly configured MCP
     // loopback route, while its inference engine always uses backend=local.
@@ -636,6 +653,24 @@ fn unix_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_ocr_relay_replaces_a_stale_cached_route() {
+        let old_url = "http://127.0.0.1:9001/server/mac-m1-grepmesh/mcp";
+        let new_url = "http://127.0.0.1:9001/server/mac-m1-native-grepmesh/mcp";
+        let peer = |url: &str| PeerConfig {
+            host_id: "mac-m1".into(),
+            local_url: url.into(),
+            routable_url: url.into(),
+            gptadmin_proxy_url: None,
+            gptadmin_relay_url: Some(url.into()),
+        };
+        let topology = Topology::new("server-100", vec![peer(old_url)]);
+        let actual = merge_compute_peers(topology, &[peer(new_url)]);
+        assert_eq!(actual.len(), 1);
+        assert_eq!(actual[0].routable_url, new_url);
+        assert_eq!(actual[0].gptadmin_relay_url.as_deref(), Some(new_url));
+    }
 
     #[test]
     fn task_ratings_are_unknown_until_same_class_warm_measurement() {

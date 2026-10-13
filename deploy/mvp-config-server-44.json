@@ -196,6 +196,14 @@
       "server-44",
       "mac-m1",
       "server-88"
+    ],
+    "mesh_peers": [
+      {
+        "host_id": "mac-m1",
+        "local_url": "https://u-f1102930.t.gptadmin.bezrabotnyi.com/server/mac-m1-native-grepmesh/mcp",
+        "routable_url": "https://u-f1102930.t.gptadmin.bezrabotnyi.com/server/mac-m1-native-grepmesh/mcp",
+        "gptadmin_relay_url": "https://u-f1102930.t.gptadmin.bezrabotnyi.com/server/mac-m1-native-grepmesh/mcp"
+      }
     ]
   },
   "gptadmin_topology_url": "https://u-f1102930.t.gptadmin.bezrabotnyi.com/mcp-relay/agents",

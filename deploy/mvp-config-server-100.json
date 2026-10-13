@@ -212,6 +212,14 @@
       "server-44",
       "mac-m1",
       "server-88"
+    ],
+    "mesh_peers": [
+      {
+        "host_id": "mac-m1",
+        "local_url": "http://127.0.0.1:9001/server/mac-m1-native-grepmesh/mcp",
+        "routable_url": "http://127.0.0.1:9001/server/mac-m1-native-grepmesh/mcp",
+        "gptadmin_relay_url": "http://127.0.0.1:9001/server/mac-m1-native-grepmesh/mcp"
+      }
     ]
   },
   "userio": {
