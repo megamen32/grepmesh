@@ -268,3 +268,73 @@ Evidence under `.tmp/ocr-queue-completion-20261013/`:
 `task-rating-source4/{input-manifest,unit-result}.json`,
 `m1-device0d-build-result.json`, `m1-device0d-activation-receipt.json`, and
 `original-caller-m1-device0d-status.json`.
+
+### Final Linux retry delivery and Mac checkpoint — 13 October 21:45 UTC
+
+The reviewed Linux application source `a6cea47fa0aa5b8b5155da535537573728afdfbc`
+is installed on 100/44/88. Ordinary queued work produced a current-version
+68-character extraction on server-44 CUDA and a 170-character extraction on
+server-88 CPU, followed by the actual SQLite/index ACK. No synthetic OCR input
+was submitted for this observation. Each of nine original failing PNG versions
+has four completed processing failures and no pending row. The real restart
+check found no fifth dispatch; original file hashes remained unchanged.
+Admission, unavailable transport and still-running native work are not counted
+as completed recognition failures.
+
+A new read-only transaction against the individually identified original cohort
+at Unix time 1791927183 found:
+
+| Current original-cohort disposition | Inputs |
+| --- | ---: |
+| Nonempty extraction equal to FTS, current size/mtime | 1,002 |
+| Four completed failures; version skipped, source file preserved | 9 |
+| Still pending | 1 |
+| No verified historical extraction/disposition | 24 |
+
+The remaining pending input is a 19,598,972-byte PNG and has no completed failure
+record for its current version at this checkpoint. It is not silently counted
+as skipped or indexed. The 24 historical gaps remain unverified; an empty
+queue, a metadata-only cache row, or a successful image decode would not prove
+their OCR text was indexed. **Complete media coverage remains open.**
+
+Five fresh real searches on the installed Linux service found the expected
+extracted text: three PNG queries took 49.7–53.2 ms, and two PDF queries took
+57.7–58.4 ms. All completed without partial/truncated results. These scoped
+queries reused the existing index and submitted no OCR or model request;
+they do not replace the earlier independent full-root census.
+
+Public [all-platform CI run 38468089750](https://github.com/megamen32/grepmesh/actions/runs/38468089750)
+completed successfully for this source. Its native Intel macOS archive was
+installed on Mini, replacing only the owned Grep binary and adding its packaged
+ONNX companion library. The same shared-core revision
+`baebb913c018a6de26f3dac584eb65ba0033c5b6` is included. Configuration, launch
+plist and wrapper hashes are preserved; Mini remains index-disabled with its
+compute worker disabled. No GUI, session, model or other-service operation was
+performed. The original server-100 mesh caller found the existing Mini file
+and expected text in 331.8 ms, with `partial=false` and `truncated=false`.
+The initial verifier inspected only legacy `text`; the actual compact result
+uses `data`. That verifier failure is retained separately from the corrected
+real search proof.
+
+M1 keeps its functioning device/task worker from source `0d3381c`. The final
+`b6f6c44` native CoreML candidate compiled successfully in 142.282 seconds,
+with peak owned RSS 1,019,494,400 bytes and one Cargo job under its finite
+2-GiB observation ceiling. It is sealed and ready, but has **not** been installed.
+The last M1 read found zero active inference and 20 retained successful results
+(4,768 bytes). Its existing public API exports counts, not the exact retained
+receipt keys; only one prior ordinary CoreML/SQLite commit is independently
+confirmed. The retention TTL is two hours, and new results are still arriving.
+Zero active inference does not authorize discarding these results. The current
+process and rollback state remain preserved until real consumer reconciliation
+or a quiet interval permits natural retention expiry. The attempted coordination
+handoff returned `skipped_inactive`; it did not stop intake or authorize a switch.
+Fresh all-three queue acceptance and final M1 error-marker activation remain
+open; Linux and Mini acceptance are not expanded into that claim.
+
+Evidence: `.tmp/parallel-queue-20261013/{retry-release-manifest,
+four-failures-restart-proof,ordinary-final-queue-observation}.json` and
+`.tmp/ocr-queue-completion-20261013/{cohort-final-policy-audit,
+last-pending-policy-metadata,final-a6-png-pdf-search-latencies,
+mini-final-a6-activation-receipt,mini-final-a6-original-search-corrected,
+m1-final-b6-build-result,m1-final-retained-boundary,
+m1-retained-arrival-comparison}.json`.
