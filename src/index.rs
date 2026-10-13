@@ -868,6 +868,22 @@ pub struct IndexManager {
 }
 
 impl IndexManager {
+    #[cfg(test)]
+    pub(crate) fn cached_test_index(root: &Path, db: PathBuf, documents: &[(&Path, &str)]) -> Self {
+        let persistent = PersistentIndex::open(db).unwrap();
+        for (path, body) in documents {
+            persistent.replace_document(path, body).unwrap();
+        }
+        let mut index = Self::disabled();
+        index
+            .ready_roots
+            .write()
+            .unwrap()
+            .insert(root.to_path_buf());
+        index.persistent = Some(persistent);
+        index
+    }
+
     pub fn disabled() -> Self {
         Self {
             snapshot: Arc::new(RwLock::new(IndexSnapshot {

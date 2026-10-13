@@ -585,6 +585,7 @@ impl LocalBackend {
         let mut failed_roots = 0usize;
         let mut first_root_error = None;
         for root in roots {
+            let mut index_miss = false;
             let remaining = limit.saturating_sub(hits.len());
             if remaining == 0 {
                 truncated = true;
@@ -636,7 +637,10 @@ impl LocalBackend {
                         continue;
                     }
                 };
-                if let Some(index_page) = index_page {
+                if let Some(index_page) = index_page.filter(|page| {
+                    index_miss = page.hits.is_empty() && !page.truncated;
+                    !index_miss
+                }) {
                     truncated |= index_page.truncated;
                     let index_hits = index_page.hits;
                     successful_roots += 1;
@@ -663,7 +667,11 @@ impl LocalBackend {
                     continue;
                 }
             }
-            let candidate_paths = if path_globs.is_empty()
+            // The persistent index is eventually consistent: an empty page must
+            // not suppress a real file omitted by an older reconciliation. Do
+            // not feed the same empty index candidates back into the live scan.
+            let candidate_paths = if !index_miss
+                && path_globs.is_empty()
                 && matches!(
                     mode,
                     SearchMode::Literal | SearchMode::CaseInsensitiveLiteral
@@ -690,7 +698,11 @@ impl LocalBackend {
                 &exclude_globs,
                 max_file_bytes,
                 max_response_bytes,
-                deadline,
+                if index_miss {
+                    deadline.min(Instant::now() + Duration::from_secs(2))
+                } else {
+                    deadline
+                },
                 candidate_paths,
             )
             .await;
@@ -1548,6 +1560,87 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn empty_cached_index_does_not_hide_existing_live_text() {
+        // Focused integration, expected <1s/max5s. Real SQLite+rg, no watcher
+        // timing: model a retained index whose completed baseline missed a file.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("scope");
+        std::fs::create_dir(&root).unwrap();
+        let hostname = root.join("hostname");
+        std::fs::write(&hostname, "server-100\n").unwrap();
+        let backend = super::LocalBackend {
+            host_id: "test".into(),
+            root: root.clone(),
+            root_paths: std::collections::BTreeMap::from([("local".into(), vec![root.clone()])]),
+            limits: Default::default(),
+            exclude_globs: Vec::new(),
+            index: crate::index::IndexManager::cached_test_index(
+                &root,
+                temp.path().join("index.sqlite"),
+                &[],
+            ),
+        };
+        for globs in [vec![], vec!["**/hostname".into()]] {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                backend.search_text_bounded(
+                    "server",
+                    5,
+                    0,
+                    super::SearchMode::CaseInsensitiveLiteral,
+                    globs,
+                    vec!["local".into()],
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(!result.partial);
+            assert_eq!(result.hits.len(), 1);
+            assert_eq!(result.hits[0].path, hostname.display().to_string());
+            assert_eq!(result.hits[0].text, "server-100");
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_pdf_text_does_not_fall_back_to_binary_scan() {
+        // Focused integration, expected <1s/max5s. Real SQLite cached extraction
+        // over a real non-text PDF fixture; success cannot come from raw rg.
+        let temp = tempfile::tempdir().unwrap();
+        let pdf = temp.path().join("scan.pdf");
+        std::fs::write(&pdf, b"%PDF\0raw bytes without extracted text").unwrap();
+        let backend = super::LocalBackend {
+            host_id: "test".into(),
+            root: temp.path().into(),
+            root_paths: std::collections::BTreeMap::from([(
+                "local".into(),
+                vec![temp.path().into()],
+            )]),
+            limits: Default::default(),
+            exclude_globs: Vec::new(),
+            index: crate::index::IndexManager::cached_test_index(
+                temp.path(),
+                temp.path().join("index.sqlite"),
+                &[(&pdf, "needle cached PDF extraction")],
+            ),
+        };
+        let result = backend
+            .search_text_bounded(
+                "needle",
+                5,
+                0,
+                super::SearchMode::Literal,
+                vec!["**/*.pdf".into()],
+                vec!["local".into()],
+            )
+            .await
+            .unwrap();
+        assert!(!result.partial);
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].text, "needle cached PDF extraction");
+    }
+
     #[tokio::test]
     async fn preview_reads_primary_search_result_with_named_roots_and_rejects_escape() {
         let temp = tempfile::tempdir().unwrap();
