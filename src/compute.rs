@@ -619,22 +619,14 @@ impl ComputeWorker {
                 .prefix("ocr-")
                 .tempdir_in(&worker.config.temp_dir)
                 .context("create worker job directory")?;
-            let path = directory.path().join(format!("input.{extension}"));
+            // Caller and worker classify the exact bytes identically. A source
+            // filename may say PNG while the supported image content is JPEG.
+            // The declared task type stays stable; only the owned temporary
+            // decoder suffix follows verified content, never the source file.
+            let descriptor = crate::compute_client::task_descriptor(&bytes, &extension);
+            let stored_extension = worker_input_extension(&bytes, &extension);
+            let path = directory.path().join(format!("input.{stored_extension}"));
             fs::write(&path, bytes).context("store worker input")?;
-            #[cfg(feature = "ocr")]
-            let dimensions = if extension != "pdf" {
-                image::image_dimensions(&path).ok()
-            } else {
-                None
-            };
-            #[cfg(not(feature = "ocr"))]
-            let dimensions: Option<(u32, u32)> = None;
-            let descriptor = mesh_core::placement::TaskDescriptor {
-                input_type: extension.clone(),
-                input_bytes: fs::metadata(&path)?.len(),
-                width: dimensions.map(|v| v.0),
-                height: dimensions.map(|v| v.1),
-            };
             let task_class = descriptor.task_class();
             if requested_class
                 .as_deref()
@@ -644,7 +636,7 @@ impl ComputeWorker {
             }
             #[cfg(feature = "ocr")]
             let image_pixels = if extension != "pdf" {
-                image::image_dimensions(&path).ok().and_then(|(w, h)| {
+                descriptor.width.zip(descriptor.height).and_then(|(w, h)| {
                     let pixels = w as u64 * h as u64;
                     (pixels > 0 && pixels <= 64_000_000).then_some(pixels)
                 })
@@ -801,6 +793,31 @@ fn image_decoder_io_kind(error: &anyhow::Error) -> &'static str {
     }
     let _ = error;
     "not_io"
+}
+
+fn worker_input_extension(bytes: &[u8], declared: &str) -> String {
+    if declared == "pdf" {
+        return declared.into();
+    }
+    #[cfg(feature = "ocr")]
+    if let Ok(format) = image::guess_format(bytes) {
+        let suffix = match format {
+            image::ImageFormat::Png => Some("png"),
+            image::ImageFormat::Jpeg => Some("jpg"),
+            image::ImageFormat::WebP => Some("webp"),
+            image::ImageFormat::Tiff => Some("tiff"),
+            image::ImageFormat::Bmp => Some("bmp"),
+            image::ImageFormat::Gif => Some("gif"),
+            image::ImageFormat::Avif => Some("avif"),
+            _ => None,
+        };
+        if let Some(suffix) = suffix {
+            return suffix.into();
+        }
+    }
+    // Unknown/corrupt bytes still enter the actual bounded decoder and its
+    // typed processing-failure path; do not invent an empty extraction.
+    declared.into()
 }
 
 fn classify_image_failure(error: anyhow::Error) -> anyhow::Error {
@@ -1173,6 +1190,29 @@ mod tests {
             cache.lock().unwrap().get(&key, Instant::now()),
             Some(json!({"text":"late native result"}))
         );
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn misnamed_jpeg_has_same_task_class_and_correct_owned_decoder_suffix() {
+        let image = image::RgbImage::new(32, 16);
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut bytes).encode_image(&image).unwrap();
+        let caller = crate::compute_client::task_descriptor(&bytes, "png");
+        assert_eq!(caller.width, Some(32));
+        assert_eq!(caller.height, Some(16));
+        let folder = tempfile::tempdir().unwrap();
+        let old_path = folder.path().join("input.png");
+        std::fs::write(&old_path, &bytes).unwrap();
+        assert!(image::image_dimensions(&old_path).is_err());
+        let suffix = super::worker_input_extension(&bytes, "png");
+        assert_eq!(suffix, "jpg");
+        let owned_path = folder.path().join(format!("input.{suffix}"));
+        std::fs::write(&owned_path, &bytes).unwrap();
+        assert_eq!(image::image_dimensions(&owned_path).unwrap(), (32, 16));
+        assert_eq!(crate::compute_client::task_descriptor(&bytes, "png").task_class(), caller.task_class());
+        assert_eq!(super::worker_input_extension(&bytes, "pdf"), "pdf");
+        assert_eq!(super::worker_input_extension(b"not an image", "png"), "png");
     }
 
     #[cfg(feature = "ocr")]

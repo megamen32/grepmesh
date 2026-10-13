@@ -128,7 +128,7 @@ fn device_statuses(value: Value) -> Vec<ComputeStatus> {
         serde_json::from_value(value).ok().into_iter().collect()
     }
 }
-fn task_descriptor(bytes: &[u8], input_type: &str) -> mesh_core::placement::TaskDescriptor {
+pub(crate) fn task_descriptor(bytes: &[u8], input_type: &str) -> mesh_core::placement::TaskDescriptor {
     #[cfg(feature = "ocr")]
     let dimensions = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
