@@ -698,11 +698,10 @@ impl LocalBackend {
                 &exclude_globs,
                 max_file_bytes,
                 max_response_bytes,
-                if index_miss {
-                    deadline.min(Instant::now() + Duration::from_secs(2))
-                } else {
-                    deadline
-                },
+                // An empty retained index is not proof of an empty live tree.
+                // Give its verification the remaining request budget; a new
+                // two-second cap prematurely abandoned large configured roots.
+                deadline,
                 candidate_paths,
             )
             .await;
