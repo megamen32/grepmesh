@@ -448,6 +448,9 @@ async fn handle_rpc(
         Err(err) if err.is::<crate::compute_client::InvalidOcrInput>() => {
             json!({"jsonrpc":"2.0","error":{"code":-32042,"message":"OCR input cannot be decoded"},"id":id})
         }
+        Err(err) if err.is::<crate::compute_client::OcrRecognitionFailure>() => {
+            json!({"jsonrpc":"2.0","error":{"code":-32043,"message":"OCR processing failed"},"id":id})
+        }
         Err(err) => {
             json!({"jsonrpc":"2.0","error":{"code":-32000,"message":err.to_string()},"id":id})
         }

@@ -663,7 +663,7 @@ impl ComputeWorker {
                         input_bytes = descriptor.input_bytes,
                         elapsed_ms = inference_started.elapsed().as_millis() as u64,
                         "Native OCR PDF pipeline failed");
-                        error
+                        completed_recognition_failure(error)
                     })?;
                 #[cfg(not(feature = "ocr"))]
                 let text = engine.extract_pdf(&path)?;
@@ -676,7 +676,11 @@ impl ComputeWorker {
                         input_bytes = descriptor.input_bytes,
                         elapsed_ms = inference_started.elapsed().as_millis() as u64,
                         "Native OCR image pipeline failed");
-                    classify_image_failure(error)
+                    let error = classify_image_failure(error);
+                    #[cfg(feature = "ocr")]
+                    return completed_recognition_failure(error);
+                    #[cfg(not(feature = "ocr"))]
+                    error
                 })?
             };
             let result = json!({"text": text, "host_id": worker.host_id, "gpu_uuid": gpu.as_ref().map(|gpu| &gpu.uuid),
@@ -752,6 +756,17 @@ fn image_failure_stage(error: &anyhow::Error) -> &'static str {
     }
     let _ = error;
     "native_ocr"
+}
+
+#[cfg(feature = "ocr")]
+fn completed_recognition_failure(error: anyhow::Error) -> anyhow::Error {
+    if error.is::<crate::compute_client::InvalidOcrInput>()
+        || error.is::<crate::compute_client::OcrRecognitionFailure>()
+    {
+        error
+    } else {
+        error.context(crate::compute_client::OcrRecognitionFailure { attempts: 1 })
+    }
 }
 
 fn image_decoder_failure_class(error: &anyhow::Error) -> &'static str {
@@ -997,6 +1012,23 @@ mod tests {
             )));
             assert_eq!(super::image_decoder_io_kind(&eof), "unexpected_eof");
         }
+    }
+    #[test]
+    #[cfg(feature = "ocr")]
+    fn completed_processing_failure_marks_one_attempt_and_preserves_invalid_input() {
+        let error = super::completed_recognition_failure(anyhow::anyhow!(
+            "private native pipeline details"
+        ));
+        assert_eq!(
+            error.downcast_ref::<crate::compute_client::OcrRecognitionFailure>().unwrap().attempts,
+            1
+        );
+        assert_eq!(error.to_string(), "OCR processing failed");
+        let invalid = super::completed_recognition_failure(anyhow::anyhow!(
+            crate::compute_client::InvalidOcrInput
+        ));
+        assert!(invalid.is::<crate::compute_client::InvalidOcrInput>());
+        assert!(!invalid.is::<crate::compute_client::OcrRecognitionFailure>());
     }
     use super::*;
     #[test]
