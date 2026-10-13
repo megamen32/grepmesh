@@ -1051,6 +1051,33 @@ mod tests {
         assert_eq!(status["results"].as_array().unwrap().len(), 1);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn owned_private_directory_does_not_repeat_metadata_writes() {
+        // Fast unit expected <1s/max2s. Real filesystem ctime distinguishes a
+        // redundant chmod from preserving existing same-owner private mode.
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let temp = tempfile::tempdir().unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let before = fs::metadata(temp.path()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        set_private_dir_permissions(temp.path()).unwrap();
+        let after = fs::metadata(temp.path()).unwrap();
+        assert_eq!(
+            (after.ctime(), after.ctime_nsec()),
+            (before.ctime(), before.ctime_nsec())
+        );
+        assert!(has_owned_private_mode(&after, 0o700));
+        // Group access must still be removed; the shortcut only accepts exact
+        // private permissions, not merely a readable directory.
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o750)).unwrap();
+        set_private_dir_permissions(temp.path()).unwrap();
+        assert!(has_owned_private_mode(
+            &fs::metadata(temp.path()).unwrap(),
+            0o700
+        ));
+    }
+
     #[cfg(unix)]
     #[test]
     fn private_store_and_artifact_modes_ignore_umask() {
@@ -1108,8 +1135,20 @@ fn fresh_handle(prefix: &str) -> Result<String> {
 #[cfg(unix)]
 fn set_private_dir_permissions(path: &std::path::Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(target_os = "macos")]
+    if has_owned_private_mode(&fs::metadata(path)?, 0o700) {
+        // A redundant chmod on a FileProvider-backed directory can block
+        // startup indefinitely. Keep the already enforced owner/private mode.
+        return Ok(());
+    }
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn has_owned_private_mode(metadata: &fs::Metadata, mode: u32) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    metadata.uid() == unsafe { libc::geteuid() } && metadata.permissions().mode() & 0o7777 == mode
 }
 
 #[cfg(not(unix))]
@@ -1132,6 +1171,10 @@ fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        #[cfg(target_os = "macos")]
+        if has_owned_private_mode(&file.metadata()?, 0o600) {
+            return Ok(());
+        }
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
