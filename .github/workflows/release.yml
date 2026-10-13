@@ -48,6 +48,10 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ matrix.target }}" == "macos-x86_64" ]]; then
+            bash scripts/prepare-macos-intel-runtime.sh
+            export ORT_LIB_PATH="$PWD/.tmp/macos-intel-runtime/lib"
+            export ORT_PREFER_DYNAMIC_LINK=1 ORT_SKIP_DOWNLOAD=1
+            export RUSTFLAGS='-C link-arg=-Wl,-rpath,@executable_path/lib'
             cargo build --release --locked --target "${{ matrix.rust_target }}" --no-default-features --features ocr
           elif [[ "${{ matrix.target }}" == "macos-aarch64" ]]; then
             cargo build --release --locked --target "${{ matrix.rust_target }}" --features ocr-coreml
@@ -81,11 +85,15 @@ jobs:
       - name: Package platform bundle
         shell: bash
         run: |
+          runtime_args=()
+          if [[ "${{ matrix.target }}" == "macos-x86_64" ]]; then
+            runtime_args=(--runtime-dir "$PWD/.tmp/macos-intel-runtime")
+          fi
           python3 scripts/package-release.py \
             --target "${{ matrix.target }}" \
             --binary "target/${{ matrix.rust_target }}/release/$(basename '${{ matrix.binary }}')" \
             --rg "${RG_BIN:-$(command -v rg)}" \
-            --output dist
+            --output dist "${runtime_args[@]}"
       - name: Smoke packaged MCP and search
         shell: bash
         run: |

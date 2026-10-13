@@ -40,23 +40,23 @@ fi
 tar -xzf "$tmp/$asset" -C "$tmp"
 
 install -d "$prefix/bin" "$config_dir"
-if [[ "$os" == Linux ]]; then
-  if [[ -d "$tmp/lib" ]]; then
+if [[ -d "$tmp/lib" ]]; then
     install -d "$prefix/bin/lib" "$prefix/share/grepmesh"
     for library in "$tmp/lib/"*; do
       name="$(basename "$library")"
       cp -a "$library" "$prefix/bin/lib/.$name.new"
-      mv -Tf "$prefix/bin/lib/.$name.new" "$prefix/bin/lib/$name"
+      if [[ "$os" == Linux ]]; then
+        mv -Tf "$prefix/bin/lib/.$name.new" "$prefix/bin/lib/$name"
+      else
+        mv -f "$prefix/bin/lib/.$name.new" "$prefix/bin/lib/$name"
+      fi
     done
     cp -a "$tmp/licenses" "$prefix/share/grepmesh/"
     cp "$tmp/onnxruntime-manifest.txt" "$prefix/share/grepmesh/"
-  fi
-  install -m 0755 "$tmp/grepmesh-mcp" "$prefix/bin/.grepmesh-mcp.new"
-  "$prefix/bin/.grepmesh-mcp.new" --help >/dev/null
-  mv -f "$prefix/bin/.grepmesh-mcp.new" "$prefix/bin/grepmesh-mcp"
-else
-  install -m 0755 "$tmp/grepmesh-mcp" "$prefix/bin/grepmesh-mcp"
 fi
+install -m 0755 "$tmp/grepmesh-mcp" "$prefix/bin/.grepmesh-mcp.new"
+"$prefix/bin/.grepmesh-mcp.new" --help >/dev/null
+mv -f "$prefix/bin/.grepmesh-mcp.new" "$prefix/bin/grepmesh-mcp"
 if [[ -x "$tmp/rg" ]]; then
   install -m 0755 "$tmp/rg" "$prefix/bin/rg"
 elif command -v rg >/dev/null; then
@@ -105,16 +105,23 @@ else
   launch_agents="$HOME/Library/LaunchAgents"
   plist="$launch_agents/com.grepmesh.mcp.plist"
   install -d "$launch_agents"
-  sed \
+  if [[ -e "$plist" ]]; then
+    # Existing wrappers carry the approved auth/model environment. Preserve them.
+    /usr/bin/plutil -lint "$plist" >/dev/null
+  else
+    sed \
     -e "s|@GREPMESH_BIN@|$prefix/bin/grepmesh-mcp|g" \
     -e "s|@GREPMESH_CONFIG@|$config_dir/config.json|g" \
     -e "s|@GREPMESH_PATH@|$prefix/bin:/usr/local/bin:/usr/bin:/bin|g" \
     -e "s|@GREPMESH_LOG@|$config_dir/grepmesh.log|g" \
     "$tmp/grepmesh-user.plist" > "$plist"
+  fi
   # Retain an already loaded GrepMesh domain; SSH-only Macs have no GUI domain.
   grepmesh_uid="$(id -u)"
   if launchctl print "user/$grepmesh_uid/com.grepmesh.mcp" >/dev/null 2>&1; then
     grepmesh_domain="user/$grepmesh_uid"
+  elif launchctl print "gui/$grepmesh_uid/com.grepmesh.mcp" >/dev/null 2>&1; then
+    grepmesh_domain="gui/$grepmesh_uid"
   elif launchctl print "gui/$grepmesh_uid" >/dev/null 2>&1; then
     grepmesh_domain="gui/$grepmesh_uid"
   else

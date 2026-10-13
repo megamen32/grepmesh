@@ -25,7 +25,12 @@ else
   if [[ "$target" == macos-aarch64 ]]; then
     cargo build --release --locked --features ocr-coreml --manifest-path "$repo_root/Cargo.toml"
   else
+    bash "$repo_root/scripts/prepare-macos-intel-runtime.sh"
+    export ORT_LIB_PATH="$repo_root/.tmp/macos-intel-runtime/lib"
+    export ORT_PREFER_DYNAMIC_LINK=1 ORT_SKIP_DOWNLOAD=1
+    export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-rpath,@executable_path/lib"
     cargo build --release --locked --no-default-features --features ocr --manifest-path "$repo_root/Cargo.toml"
+    runtime_args=(--runtime-dir "$repo_root/.tmp/macos-intel-runtime")
   fi
   binary="$CARGO_TARGET_DIR/release/grepmesh-mcp"
 fi
