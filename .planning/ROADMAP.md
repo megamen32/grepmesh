@@ -4,7 +4,7 @@
 Repair the user's current distributed OCR failure on the existing real fleet, preserving retained work.
 
 ## Phases
-- [ ] **Phase 1: Distributed OCR recovery** - Diagnose retained work, enable explicit CPU execution, and verify extraction and mesh reachability.
+- [x] **Phase 1: Distributed OCR recovery** - Diagnose retained work, enable explicit CPU execution, and verify extraction and mesh reachability.
 
 ## Phase Details
 ### Phase 1: Distributed OCR recovery
@@ -18,9 +18,9 @@ Repair the user's current distributed OCR failure on the existing real fleet, pr
   4. Mac mini catalog is verified or its physical dependency is explicit.
 **Plans**: 1
 Plans:
-- [ ] 01-01: Diagnose, implement, deliver, and verify the authorized recovery.
+- [x] 01-01: Diagnose, implement, deliver, and verify the authorized recovery.
 
 ## Progress
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Distributed OCR recovery | 0/1 | Native software accepted; external transport/physical dependencies | - |
+| 1. Distributed OCR recovery | 1/1 | Real CPU extraction, durable indexed readback and all five mesh routes accepted | 2026-10-13 |

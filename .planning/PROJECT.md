@@ -15,7 +15,7 @@ Find real file contents across the configured computers with explicit coverage a
 ### Active
 - [x] Explain and repair the retained OCR queue on server-44.
 - [x] Allow explicitly configured M1/88 CPU OCR; real local and foreign extraction verified.
-- [ ] Restore the Mac mini route when its physical host is reachable.
+- [x] Restore the Mac mini route when its physical host is reachable.
 
 ### Out of Scope
 - Clearing non-excluded work or claiming index completeness without durable commits.
@@ -38,4 +38,4 @@ On 2026-10-12 server-100 reports 8 pending OCR inputs, server-44 26897, Mac M1 1
 ---
 Last updated: 2026-10-12 after authorized OCR recovery request.
 
-2026-10-13: source0765d19 delivered100/44/88/M1; strict excludes56rules and warm-index search verified. External gaps: physical Macmini, intermittent M1 Hub shell transport; no full-five-host completion claim.
+2026-10-13: source0765d19 delivered100/44/88/M1; strict excludes56rules and warm-index search verified. Both Mac Hub routes are now restored. Real M1 CPU extraction through ComputeClient passed7.03s; Mini native file search through Hub passed0.46s. Mini received reviewed x86 release6ae7ec7 (same Rust inputs0765d19, mesh-core daa657). Final server100→Mini mesh file search and fresh five-host status passed4.15s, partial=false. All five configurations include the56ignore rules. Background index reconciliation is not a claim of complete indexing.
