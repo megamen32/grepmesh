@@ -8,19 +8,19 @@ See: .planning/PROJECT.md (updated 2026-10-13)
 ## Current Position
 Phase: 2 of 2 (Parallel resource-admitted OCR queue)
 Plan: 1 of 1 in current phase
-Status: In progress — Linux queue delivered; fresh M1 closure remains
-Last activity: 2026-10-14 — per-input backoff and durable four-failure/empty dispositions installed on Linux100/44/88; real queue and exclusions verified
-Progress: Phase1 complete; Phase2 production acceptance in progress
+Status: Requested queue acceptance verified — mapped cohort complete; broader historical coverage remains bounded
+Last activity: 2026-10-14 — preserved22+12 native replies, installed M1 final worker, verified all24 historical dispositions and zero mapped pending
+Progress: Phase1 complete; Phase2 requested consumer acceptance verified; historical unmapped coverage retained explicitly
 
 ## Accumulated Context
 ### Decisions
 Preserve retained jobs and foreign ownership. Root owns client/index/OCR queue and Linux delivery; owner55 owns compute/server/PNG and Mac delivery. CPU execution on M1 is authorized; GUI remains forbidden. Four completed processing failures exhaust one path/size/mtime generation; transport/admission uncertainty does not count. Independent files never inherit another file’s retry delay.
 ### Blockers/Concerns
-M1 current native worker produced a real ordinary CoreML result and index commit at20:41:26UTC; final continuous observation verified new CUDA44/CPU88 commits but no new M1 commit. Owner55 preserves M1 retained outputs during its separate worker activation; Root does not clear those results or compete for Mac runtime. Historical24 no-cache/no-pending outcomes remain unproven and are not replayed. Full index coverage is not claimed. Mini integration remains independently owned by55.
+The initial1142count had already fallen by106 before the exact1036path snapshot. Those106remain count-only history, not per-path verified coverage; existing full-media recovery marker is not manually cleared. Broader Rust/P2P/legacyHub migration is separate. Linux44/88 preserve accepted a6workers and their retained outputs; published0dd byte-format fix is live onM1, not claimed installed there.
 ### Pending Todos
-Owner55 finishes the Mac worker/error-marker/exclusion activation while preserving existing native results. Verify one fresh ordinary M1 queue completion after that activation. Root Linux source a6cea47 is installed as exact8e491443 artifact on100/44/88. Nine unchanged real PNGs have4 completed failure receipts each, pending0, original hashes preserved, no fifth dispatch across a real service restart.21 excluded fixtures across Linux100/44/88 have pending/cache/index/events0; actual empty-input dispositions survived restart. Native144 units passed; no unit or metadata status replaces the remaining M1 consumer proof.
+The requested exact24 recovery and heldM1 activation are CLOSED with realconsumer evidence:20nonempty currentcache=FTS,1empty_input,3completedempty_output; sourceSHA/size/mtime unchanged; pending0. OriginallastPNG has4completedprocessingfailures, filepreserved and no fifth during subsequent observation. Wholeknown1036=1022nonemptyFTS+10failure4+1emptyinput+3emptyoutput. Native M1 ordinaryCoreML completed after final0dd install; verifiedempty_output is not inventedtext. Existingnonempty M1 CPU/CoreML ordinary results and44/88 commits remain distinct proof. Both Mac output backups (22old/12new complete replies) are private/disk-backed/hashchecked, no workingcache reconstruction. Root100 sourceb2 installed through stockguard/helper0/nativecleanup; M1 source0dd/PID4770, ownHTTPchild enabled, sharednative/Chrome/Hub untouched. New realPNG39.6–50.7ms/PDF41.4–47.7ms queries passed. Larger historical/media-marker and later Linuxworker-format delivery remain outside this exact recovery claim.
 
 ## Session Continuity
 Last session: 2026-10-14
-Stopped at: Root Linux slice delivered and verified; Mac worker activation and fresh M1 ordinary acceptance remain in owner55 scope
+Stopped at: Exact recovered24 and known1036 outcomes independently verified; final M1 active and ordinary route proven; broader coverage boundaries recorded
 Resume file: None

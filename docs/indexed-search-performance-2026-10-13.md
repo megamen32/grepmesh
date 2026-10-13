@@ -338,3 +338,109 @@ last-pending-policy-metadata,final-a6-png-pdf-search-latencies,
 mini-final-a6-activation-receipt,mini-final-a6-original-search-corrected,
 m1-final-b6-build-result,m1-final-retained-boundary,
 m1-retained-arrival-comparison}.json`.
+
+
+## Preserved-results and exact historical24 closure — 14 October
+
+The requested known-cohort recovery is verified. Before the first M1 switch,
+22 complete native responses from the old process were saved privately on both
+server-100 and M1, fsynced, reparsed and checked per response and whole-file SHA.
+They cover21 retained results plus one actual cache hit (5,264 response bytes
+minus the225-byte hit =5,039 retained bytes); equal response values from different
+jobs were kept separately. This preserves actual output and receipt history,
+not a reconstructed working cache or fabricated index ACK. No accepted OCR input
+was resubmitted to produce the backup. Before the later narrow JPEG correction,
+another12 complete responses were preserved in both locations; one cached291-byte
+reply accounts for11 retained results and2,950 bytes. Independent file review
+verified all34 native values and their hashes/sizes. Neither backup contains MCP
+credentials. Previous unavailable cache-key export remains an honest limitation.
+
+Two defects prevented the final queue from terminating:
+
+- The client stopped waiting for images at45 seconds, while the real last
+  19,598,972-byte PNG decoder finished with typed UnexpectedEof near50 seconds.
+  `b2a5020` keeps the existing90-second overall allowance and durably acknowledges
+  the first completed processing failure before another fallback inference.
+  Admission, transport failures and still-running work remain uncounted. The
+  original PNG now has exactly4 completed failures, no pending row and no fifth
+  dispatch in the subsequent observation; its source remains preserved.
+- One191,231-byte file named `.png` contains valid JPEG bytes. The caller guessed
+  geometry from content, but the worker read dimensions using the PNG temporary
+  suffix and rejected the task-class before inference. `0dd69a7` shares the
+  byte-based descriptor and uses the recognized format only for its owned temp
+  suffix; declared task type, original file and PDF handling are unchanged.
+  The distinguishing native JPEG unit failed with the old suffix;16 compute
+  and17 client units passed after correction. A review caught an optional-image
+  test cfg regression; that was fixed before the accepted build. An earlier
+  generated-controller SyntaxError started no Cargo payload and is retained.
+
+The first new server100 rollout refused before payload because its registration
+still referenced session81106. Admin `8abb23f6` enrolls only that existing profile
+in the current managed parent, preserving all child/UID/host budgets and other
+profiles. Three affected fast units passed; three unrelated stale assertions in
+its full10-unit module remain failures and were not relabelled GREEN. The fresh
+ordinary stock rollout completed with peak164,716,544B, swap/OOM0 and independently
+verified same-generation unit/cgroup/PID cleanup. No unsafe guard bypass occurred.
+
+M1's CoreML candidate `b2a5020` built in82.179s, peak1,007,828,992B. The corrected
+JPEG candidate `0dd69a7` passed native RED/GREEN and built in246.446s, peak
+1,171,963,904B, within the measured2GiB/CPU1/64-process observation boundary and
+1800-second emergency ceiling. Expected180 seconds was nonfatal. Mac limits are
+observed userspace bounds, not kernel cgroups. Only the owned Grep LaunchAgent
+switched; source `0dd69a7`, binary49e2ae077203b22694e58d2be9a385c1598444983808ff2d656d79cb52616bbf,
+PID4770/birth14Oct02:08:43MSK. Plist, wrapper, config, models, shared native Codex,
+Chrome and Hub remain preserved. All six captcha corpus aliases are active.
+The exact owned HTTP child was disabled for preservation and enabled afterwards;
+both final actions are durably completed. No old queued job, model prompt or
+foreign business action was replayed.
+
+### Final mapped media dispositions
+
+A read-only transactional audit at Unix1791932989 found:
+
+| Known original-cohort disposition | Files |
+| --- | ---: |
+| Current nonempty extraction equals exact FTS body |1,022 |
+| Exactly4 completed processing failures; version skipped |10 |
+| Verified empty input |1 |
+| Actual completed OCR with empty output |3 |
+| Pending / no verified disposition |0 |
+| Total individually mapped original paths |1,036 |
+
+The specifically requested historical24 are20 nonempty FTS records,1 empty file
+and3 actual empty OCR outcomes. All24 source SHA/size/mtime values are unchanged.
+The final misnamed JPEG completed through the ordinary M1/CoreML route at
+23:09:34UTC in6,147ms, then has a durable current-version `empty_output` receipt
+and no pending row. It is not described as searchable text. Earlier fresh M1
+nonempty ordinary outputs are joined to the same current-version FTS records.
+The independent reviewer queried the exact24 and confirmed these outcomes.
+No fake success was restored from metadata-only cache rows or queue size.
+
+Three real indexed searches on newly recovered PNG texts took39.6–50.7ms;
+two preserved PDF text searches took41.4–47.7ms. Each found the exact expected
+file/text and completed without partial/truncated results; no extra OCR request
+was submitted for search validation. Earlier full default-root query and accessible
+path census evidence remain separate and are not repeated.
+
+**Coverage boundary:** this closes all1,036 individually captured outstanding
+paths and the exact24 recovery. The earlier1,142 count had already fallen by106
+before that capture; those106 have no retained per-path cohort map and are not
+invented as verified results. The existing full-media recovery marker is not
+manually cleared. This is not a new claim that every inaccessible/unmapped media
+file in the fleet is indexed. Search/index correctness and the finite recovered
+queue are proven; broader inventory boundaries remain explicitly recorded.
+
+Runtime sources:100 usesb2a5020;44/88 preserve the previously accepteda6cea47
+workers;M1 uses0dd69a7;Mini preservesa6cea47. The shared mesh-core pin remains
+baebb913c018a6de26f3dac584eb65ba0033c5b6. No second Linux worker switch discards
+unreconciled retained outputs; the byte-format source is published for their next
+coherent retained-state-safe delivery. No full P2P/failover/global-MCP claim is
+made by this queue acceptance.
+
+Evidence under `.tmp/ocr-queue-completion-20261013/`: `m1-native-results-backup-v1.json`,
+`m1-b2-results-before-misnamed-v1.json`, `m1-final-b2-activation-receipt.json`,
+`m1-misnamed-image-v2-activation-receipt.json`, `misnamed-image-worker-v2/build-result.json`,
+`client-native-finish-deadline/rollout100-receipt.json`,
+`client-native-finish-deadline/rollout-managed-case/resource-*.json`,
+`final-recovery-cohort-proof.json`, `recovery24-source-integrity-after.json`,
+`m1-final-misnamed-ordinary-events.json`, and `final-b2-real-search-proof.json`.
