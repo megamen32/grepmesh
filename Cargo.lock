@@ -1456,6 +1456,7 @@ dependencies = [
  "libc",
  "mesh-core",
  "notify",
+ "png",
  "oar-ocr",
  "ort",
  "rayon",
@@ -2312,7 +2313,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "mesh-core"
 version = "0.1.0"
-source = "git+https://github.com/megamen32/mesh-core.git?rev=daa657b5a5aae65749d904d1115d4b832fbd9eb6#daa657b5a5aae65749d904d1115d4b832fbd9eb6"
+source = "git+https://github.com/megamen32/mesh-core.git?rev=abeb90bab6ec3f21ff5574195815ec7ce893277f#abeb90bab6ec3f21ff5574195815ec7ce893277f"
 dependencies = [
  "anyhow",
  "futures",

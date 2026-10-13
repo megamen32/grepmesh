@@ -109,6 +109,8 @@ pub struct ComputeWorker {
     retained: StdMutex<RetainedResults>,
     retained_hits: AtomicU64,
     retained_late: AtomicU64,
+    load: Mutex<Option<(Instant, crate::compute_load::HostLoad)>>,
+    image_rates: StdMutex<VecDeque<(Instant, f64)>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -155,6 +157,8 @@ impl ComputeWorker {
             retained: StdMutex::new(RetainedResults::default()),
             retained_hits: AtomicU64::new(0),
             retained_late: AtomicU64::new(0),
+            load: Mutex::new(None),
+            image_rates: StdMutex::new(VecDeque::new()),
         }
     }
 
@@ -179,10 +183,21 @@ impl ComputeWorker {
     fn eligibility_error(&self) -> Option<&'static str> {
         if !self.config.enabled {
             Some("OCR compute worker is disabled")
-        } else if !matches!(self.config.execution_provider.as_str(), "cuda" | "cpu") {
+        } else if !matches!(
+            self.config.execution_provider.as_str(),
+            "cuda" | "cpu" | "coreml"
+        ) {
             Some("unsupported OCR worker execution provider")
         } else if self.config.execution_provider == "cuda" && !cfg!(feature = "ocr-cuda") {
             Some("CUDA OCR support is absent from this build")
+        } else if self.config.execution_provider == "coreml"
+            && !cfg!(all(
+                feature = "ocr-coreml",
+                target_os = "macos",
+                target_arch = "aarch64"
+            ))
+        {
+            Some("Apple CoreML OCR support is absent from this build")
         } else if self.engine.is_none() {
             Some("OCR engine is unavailable")
         } else if self.config.execution_provider == "cuda" && self.config.gpu_device_id < 0 {
@@ -223,6 +238,62 @@ impl ComputeWorker {
 
     pub async fn status(&self) -> Value {
         let mut result = self.capability_status().await;
+        result["hardware_performance_score"] = result["performance_score"].clone();
+        match self.host_load().await {
+            Ok(load) => {
+                let utilization = load
+                    .utilization()
+                    .max(result["gpu_utilization_percent"].as_f64().unwrap_or(0.0))
+                    .max(if self.config.execution_provider == "coreml" {
+                        load.apple_gpu_utilization_percent.unwrap_or(100.0)
+                    } else {
+                        0.0
+                    });
+                result["utilization_percent"] = json!(utilization);
+                if result["admission"] == "available" && load.admission() != "available" {
+                    result["admission"] = json!(load.admission());
+                }
+                if self.config.execution_provider == "coreml" {
+                    result["gpu_utilization_percent"] = json!(load.apple_gpu_utilization_percent);
+                    if load.apple_gpu_utilization_percent.is_none() {
+                        result["admission"] = json!("gpu_load_unavailable");
+                    } else if load.apple_gpu_utilization_percent.unwrap()
+                        > self.config.max_gpu_utilization_percent.min(100) as f64
+                    {
+                        result["admission"] = json!("gpu_busy");
+                    }
+                    // Architecture estimate only, replaced by observed OCR throughput.
+                    result["hardware_performance_score"] =
+                        json!(load.apple_gpu_core_count.unwrap_or(0) * 5);
+                    result["performance_score"] = result["hardware_performance_score"].clone();
+                }
+                result["host_load"] = json!(load);
+            }
+            Err(_) => {
+                result["admission"] = json!("load_unavailable");
+                result["utilization_percent"] = Value::Null;
+            }
+        }
+        if let Ok(mut rates) = self.image_rates.lock() {
+            while rates
+                .front()
+                .is_some_and(|(at, _)| at.elapsed() > Duration::from_secs(1800))
+            {
+                rates.pop_front();
+            }
+            result["performance_observations"] = json!(rates.len());
+            if !rates.is_empty() {
+                let mut sorted: Vec<_> = rates.iter().map(|(_, rate)| *rate).collect();
+                sorted.sort_by(f64::total_cmp);
+                result["performance_score"] = json!(sorted[sorted.len() / 2] * 100.0);
+                result["performance_basis"] = json!("native_image_megapixels_per_second_x100");
+                result["performance_score_approximate"] = json!(true);
+                result["performance_sample_age_seconds"] =
+                    json!(rates.back().unwrap().0.elapsed().as_secs());
+            } else {
+                result["performance_basis"] = json!("hardware_estimate");
+            }
+        }
         if let Ok(mut cache) = self.retained.lock() {
             cache.prune(Instant::now());
             result["retained_result_count"] = json!(cache.rows.len());
@@ -234,15 +305,33 @@ impl ComputeWorker {
         result
     }
 
+    async fn host_load(&self) -> Result<crate::compute_load::HostLoad> {
+        let mut cached = self
+            .load
+            .try_lock()
+            .map_err(|_| anyhow!("native load observation busy"))?;
+        if let Some((at, value)) = cached
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() < Duration::from_secs(1))
+        {
+            let _ = at;
+            return Ok(value.clone());
+        }
+        let value = crate::compute_load::observe().await?;
+        *cached = Some((Instant::now(), value.clone()));
+        Ok(value)
+    }
+
     async fn capability_status(&self) -> Value {
         if let Some(reason) = self.eligibility_error() {
             return self.unavailable("ineligible", reason);
         }
-        if self.config.execution_provider == "cpu" {
-            return json!({"host_id": self.host_id, "backend": "cpu", "gpu_uuid": null,
+        if matches!(self.config.execution_provider.as_str(), "cpu" | "coreml") {
+            return json!({"host_id": self.host_id, "backend": self.config.execution_provider, "gpu_uuid": null,
                 "busy_count": usize::from(self.slots.available_permits() == 0),
                 "admission": if self.slots.available_permits() == 0 { "busy" } else { "available" },
-                "observed_at": observed_at(), "performance_score": 50,
+                "observed_at": observed_at(), "performance_score": std::thread::available_parallelism().map(|n| n.get() as f64 * 5.0).unwrap_or(5.0),
+                "coreml_compute_units": if self.config.execution_provider == "coreml" { Some("CPUAndGPU") } else { None },
                 "performance_score_approximate": true});
         }
         match self.probe_gpu(false).await {
@@ -335,6 +424,22 @@ impl ComputeWorker {
             self.retained_hits.fetch_add(1, Ordering::Relaxed);
             return Ok(value);
         }
+        let load = self.host_load().await?;
+        if load.admission() != "available" {
+            return Err(anyhow!(
+                "OCR worker rejected admission: {}",
+                load.admission()
+            ));
+        }
+        if self.config.execution_provider == "coreml"
+            && load
+                .apple_gpu_utilization_percent
+                .is_none_or(|n| n > self.config.max_gpu_utilization_percent.min(100) as f64)
+        {
+            return Err(anyhow!(
+                "Apple GPU is busy or its native load is unavailable"
+            ));
+        }
         let gpu = if self.config.execution_provider == "cuda" {
             let gpu = self.probe_gpu(true).await?;
             let admission = self.gpu_admission(&gpu);
@@ -370,6 +475,18 @@ impl ComputeWorker {
                 .context("create worker job directory")?;
             let path = directory.path().join(format!("input.{extension}"));
             fs::write(&path, bytes).context("store worker input")?;
+            #[cfg(feature = "ocr")]
+            let image_pixels = if extension != "pdf" {
+                image::image_dimensions(&path).ok().and_then(|(w, h)| {
+                    let pixels = w as u64 * h as u64;
+                    (pixels > 0 && pixels <= 64_000_000).then_some(pixels)
+                })
+            } else {
+                None
+            };
+            let inference_started = Instant::now();
+            #[cfg(feature = "ocr")]
+            let warm_model = engine.native_initialized();
             let text = if extension == "pdf" {
                 #[cfg(feature = "ocr")]
                 let text = engine.extract_pdf_in(&path, directory.path())?;
@@ -385,6 +502,18 @@ impl ComputeWorker {
                 "gpu_name": gpu.as_ref().map(|gpu| &gpu.name), "backend": worker.config.execution_provider});
             if serde_json::to_vec(&result)?.len() > worker.max_output_bytes {
                 return Err(anyhow!("OCR output exceeds worker response limit"));
+            }
+            #[cfg(feature = "ocr")]
+            if let Some(pixels) = image_pixels.filter(|_| warm_model) {
+                let rate = pixels as f64 / 1_000_000.0 / inference_started.elapsed().as_secs_f64();
+                if rate.is_finite() && rate > 0.0 {
+                    if let Ok(mut rates) = worker.image_rates.lock() {
+                        if rates.len() == 16 {
+                            rates.pop_front();
+                        }
+                        rates.push_back((Instant::now(), rate));
+                    }
+                }
             }
             let result = retain_native_success(&worker.retained, key, result)?;
             if started.elapsed() >= worker.timeout {
@@ -405,6 +534,14 @@ fn classify_image_failure(error: anyhow::Error) -> anyhow::Error {
     // Pinned oar-ocr-core 0.9.2 preserves ImageError as the source of
     // OCRError::ImageLoad. Inspect that typed chain; never infer input validity
     // from a generic "load image" message or classify IO/resource/CUDA errors.
+    #[cfg(feature = "ocr")]
+    if error
+        .chain()
+        .filter_map(|source| source.downcast_ref::<png::DecodingError>())
+        .any(|error| matches!(error, png::DecodingError::Format(_)))
+    {
+        return anyhow!(crate::compute_client::InvalidOcrInput);
+    }
     #[cfg(feature = "ocr")]
     if error.chain().filter_map(|source| source.downcast_ref::<image::ImageError>()).any(|error| {
         matches!(error, image::ImageError::Decoding(_)) || matches!(error,

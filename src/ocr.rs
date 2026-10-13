@@ -26,7 +26,7 @@ const MAX_DEFERRED_PATHS: usize = 65_536;
 const RETRY_COOLDOWN: Duration = Duration::from_secs(60);
 
 fn gpu_detection_config(config: &OcrConfig) -> Option<TextDetectionConfig> {
-    (config.execution_provider == "cuda").then(|| TextDetectionConfig {
+    matches!(config.execution_provider.as_str(), "cuda" | "coreml").then(|| TextDetectionConfig {
         // The default 960-side detector exhausted the unchanged 512 MiB ORT
         // arena on ordinary queued screenshots. Bound detector activations;
         // recognition still crops the original-resolution image.
@@ -61,6 +61,12 @@ struct OcrRuntime {
 }
 
 impl OcrEngine {
+    pub(crate) fn native_initialized(&self) -> bool {
+        self.pipeline
+            .lock()
+            .map(|pipeline| pipeline.is_some())
+            .unwrap_or(false)
+    }
     pub fn new(config: OcrConfig) -> Option<Self> {
         config.enabled.then_some(Self {
             config,
@@ -385,6 +391,79 @@ impl OcrEngine {
             *pipeline = Some(OcrRuntime::new(&self.config)?);
         }
         let runtime = pipeline.as_ref().expect("OCR pipeline initialized");
+        let deadline = Instant::now()
+            + Duration::from_millis(self.config.remote_timeout_ms.clamp(1_000, 300_000));
+        let mut located: Vec<(f32, f32, f32, f32, String)> = Vec::new();
+        let mut text_bytes = 0usize;
+        let tiled = runtime.preprocessing.install(|| {
+            crate::ocr_png::stream_tiles(path, deadline, |image, x, y| {
+                for page in runtime
+                    .ocr
+                    .predict(vec![image])
+                    .context("run tiled OAR-OCR")?
+                {
+                    for region in page.text_regions {
+                        let Some(text) = region
+                            .text
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|text| !text.is_empty())
+                        else {
+                            continue;
+                        };
+                        if region.bounding_box.points.is_empty()
+                            || region
+                                .bounding_box
+                                .points
+                                .iter()
+                                .any(|p| !p.x.is_finite() || !p.y.is_finite())
+                        {
+                            return Err(anyhow!("tiled OCR text geometry is invalid"));
+                        }
+                        let points = &region.bounding_box.points;
+                        let left =
+                            points.iter().map(|p| p.x).fold(f32::INFINITY, f32::min) + x as f32;
+                        let top =
+                            points.iter().map(|p| p.y).fold(f32::INFINITY, f32::min) + y as f32;
+                        let right =
+                            points.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max) + x as f32;
+                        let bottom =
+                            points.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max) + y as f32;
+                        // Deduplicate only the same text at overlapping global geometry.
+                        // Repeated text at another document position remains separate.
+                        let duplicate = located.iter().any(|(l, t, r, b, old)| {
+                            old == text
+                                && left < *r
+                                && right > *l
+                                && top < *b
+                                && bottom > *t
+                                && ((top + bottom) - (t + b)).abs()
+                                    < (bottom - top).min(b - t).max(1.0) * 0.5
+                                && ((left + right) - (l + r)).abs()
+                                    < (right - left).min(r - l).max(1.0) * 0.5
+                        });
+                        if !duplicate {
+                            text_bytes = text_bytes
+                                .checked_add(text.len() + 1)
+                                .ok_or_else(|| anyhow!("tiled OCR text limit exceeded"))?;
+                            if text_bytes > 1024 * 1024 || located.len() >= 8192 {
+                                return Err(anyhow!("tiled OCR text limit exceeded"));
+                            }
+                            located.push((left, top, right, bottom, text.to_string()));
+                        }
+                    }
+                }
+                Ok(())
+            })
+        })?;
+        if tiled.is_some() {
+            located.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.total_cmp(&b.0)));
+            return Ok(located
+                .into_iter()
+                .map(|(_, _, _, _, text)| text)
+                .collect::<Vec<_>>()
+                .join("\n"));
+        }
         // Image decoding and nested Rayon OCR operations use this pool rather
         // than creating a global pool sized for every CPU on the host.
         let results = runtime.preprocessing.install(|| {
@@ -610,6 +689,24 @@ impl OcrRuntime {
                 // Inherit the strict environment provider on both actual model
                 // commits. OAR's explicit CUDA dispatch permits silent fallback.
             }
+            "coreml" => {
+                if !cfg!(all(
+                    feature = "ocr-coreml",
+                    target_os = "macos",
+                    target_arch = "aarch64"
+                )) {
+                    return Err(anyhow!(
+                        "Apple CoreML OCR support is absent from this build"
+                    ));
+                }
+                #[cfg(all(feature = "ocr-coreml", target_os = "macos", target_arch = "aarch64"))]
+                require_coreml_environment()?;
+                if std::env::var("GREPMESH_COREML_DIAGNOSTICS").as_deref() == Ok("1") {
+                    session = session.with_log_severity_level(0);
+                }
+                // Required CoreML EP registration, CPU/GPU compute units.
+                // This does not claim that every model operator runs on GPU.
+            }
             _ => return Err(anyhow!("unsupported OCR execution provider")),
         }
         let preprocessing = rayon::ThreadPoolBuilder::new()
@@ -633,6 +730,26 @@ impl OcrRuntime {
             .map_err(|error| anyhow!("initialize OAR-OCR pipeline: {error}"))?;
         Ok(Self { ocr, preprocessing })
     }
+}
+
+#[cfg(all(feature = "ocr-coreml", target_os = "macos", target_arch = "aarch64"))]
+fn require_coreml_environment() -> Result<()> {
+    static ENVIRONMENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let committed = *ENVIRONMENT.get_or_init(|| {
+        let provider = ort::ep::CoreML::default()
+            .with_compute_units(ort::ep::coreml::ComputeUnits::CPUAndGPU)
+            .with_model_format(ort::ep::coreml::ModelFormat::MLProgram)
+            .with_profile_compute_plan(true)
+            .build()
+            .error_on_failure();
+        ort::init().with_execution_providers([provider]).commit()
+    });
+    if !committed {
+        return Err(anyhow!(
+            "ORT was already configured without required CoreML"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "ocr-cuda")]

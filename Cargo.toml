@@ -10,11 +10,12 @@ path = "src/main.rs"
 [features]
 default = ["local-stt", "ocr"]
 local-stt = ["dep:sherpa-onnx"]
-ocr = ["dep:oar-ocr", "dep:image", "dep:rayon"]
-ocr-cuda = ["ocr", "oar-ocr/cuda", "dep:ort"]
+ocr = ["dep:oar-ocr", "dep:image", "dep:rayon", "dep:png"]
+ocr-cuda = ["ocr", "oar-ocr/cuda", "dep:ort", "ort/cuda"]
+ocr-coreml = ["ocr", "oar-ocr/coreml", "dep:ort", "ort/coreml"]
 
 [dependencies]
-mesh-core = { git = "https://github.com/megamen32/mesh-core.git", rev = "daa657b5a5aae65749d904d1115d4b832fbd9eb6", features = ["transport"] }
+mesh-core = { git = "https://github.com/megamen32/mesh-core.git", rev = "abeb90bab6ec3f21ff5574195815ec7ce893277f", features = ["transport"] }
 anyhow = "1"
 axum = "0.7"
 clap = { version = "4", features = ["derive"] }
@@ -40,8 +41,9 @@ tar = "0.4"
 tempfile = "3"
 oar-ocr = { version = "0.9.1", features = ["auto-download"], optional = true }
 image = { version = "0.25.10", optional = true }
+png = { version = "0.18.1", optional = true }
 rayon = { version = "1", optional = true }
-ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "cuda"], optional = true }
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

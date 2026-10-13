@@ -22,7 +22,11 @@ if [[ "$target" == linux-x86_64 ]]; then
   runtime_args=(--runtime-dir "$repo_root/.tmp/linux-compatible-package")
 else
   export CARGO_TARGET_DIR="$repo_root/.tmp/release-target"
-  cargo build --release --locked --manifest-path "$repo_root/Cargo.toml"
+  if [[ "$target" == macos-aarch64 ]]; then
+    cargo build --release --locked --features ocr-coreml --manifest-path "$repo_root/Cargo.toml"
+  else
+    cargo build --release --locked --no-default-features --features ocr --manifest-path "$repo_root/Cargo.toml"
+  fi
   binary="$CARGO_TARGET_DIR/release/grepmesh-mcp"
 fi
 python3 "$repo_root/scripts/package-release.py" \

@@ -368,7 +368,7 @@ fn default_ocr_remote_timeout() -> u64 {
 #[serde(default)]
 pub struct ComputeConfig {
     pub enabled: bool,
-    /// Explicit native execution provider: cuda (default) or cpu.
+    /// Explicit native execution provider: cuda (default), cpu, or Apple coreml.
     pub execution_provider: String,
     pub gpu_device_id: i32,
     pub max_payload_bytes: usize,

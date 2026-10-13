@@ -48,7 +48,11 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ matrix.target }}" == "macos-x86_64" ]]; then
-            cargo build --release --locked --target "${{ matrix.rust_target }}" --no-default-features
+            cargo build --release --locked --target "${{ matrix.rust_target }}" --no-default-features --features ocr
+          elif [[ "${{ matrix.target }}" == "macos-aarch64" ]]; then
+            cargo build --release --locked --target "${{ matrix.rust_target }}" --features ocr-coreml
+          elif [[ "${{ matrix.target }}" == "linux-x86_64" ]]; then
+            cargo build --release --locked --target "${{ matrix.rust_target }}" --features ocr-cuda
           else
             cargo build --release --locked --target "${{ matrix.rust_target }}"
           fi

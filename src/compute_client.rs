@@ -32,6 +32,15 @@ impl std::fmt::Display for InvalidOcrInput {
 }
 impl std::error::Error for InvalidOcrInput {}
 
+#[derive(Debug)]
+struct WorkerBusy;
+impl std::fmt::Display for WorkerBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OCR worker temporarily busy")
+    }
+}
+impl std::error::Error for WorkerBusy {}
+
 #[derive(Clone, Debug, Deserialize)]
 struct ComputeStatus {
     host_id: String,
@@ -44,13 +53,17 @@ struct ComputeStatus {
     compute_capability: Option<String>,
     #[serde(default)]
     gpu_free_bytes: Option<u64>,
-    #[serde(default)]
-    gpu_utilization_percent: Option<u32>,
     busy_count: usize,
     admission: String,
     observed_at: u64,
     #[serde(default)]
     performance_score: Option<f64>,
+    #[serde(default)]
+    utilization_percent: Option<f64>,
+    #[serde(default)]
+    performance_basis: Option<String>,
+    #[serde(default)]
+    hardware_performance_score: Option<f64>,
 }
 
 impl ComputeStatus {
@@ -61,21 +74,37 @@ impl ComputeStatus {
 
     fn eligible(&self, host: &str, now: u64) -> bool {
         self.host_id == host
-            && matches!(self.backend.as_str(), "cuda" | "cpu")
+            && matches!(self.backend.as_str(), "cuda" | "cpu" | "coreml")
             && self.admission == "available"
             && self.busy_count == 0
-            && (self.backend == "cpu"
+            && (matches!(self.backend.as_str(), "cpu" | "coreml")
                 || (self.gpu_uuid.as_ref().is_some_and(|id| !id.is_empty())
                     && self.gpu_free_bytes.unwrap_or(0) >= MIN_FREE_GPU_BYTES))
             && self.fresh_at(now)
+            && self
+                .utilization_percent
+                .is_some_and(|n| n.is_finite() && (0.0..85.0).contains(&n))
     }
 
-    fn performance(&self) -> f64 {
-        if let Some(score) = self.performance_score.filter(|s| s.is_finite() && *s > 0.0) {
+    fn performance(&self, measured: bool) -> f64 {
+        let score = if measured {
+            self.performance_score
+        } else {
+            self.hardware_performance_score.or_else(|| {
+                (self.performance_basis.as_deref()
+                    != Some("native_image_megapixels_per_second_x100"))
+                .then_some(self.performance_score)
+                .flatten()
+            })
+        };
+        if let Some(score) = score.filter(|s| s.is_finite() && *s > 0.0) {
             return score;
         }
         // Coarse fallback only; live worker scores take precedence.
         let name = self.gpu_name.as_deref().unwrap_or_default().to_lowercase();
+        if matches!(self.backend.as_str(), "cpu" | "coreml") {
+            return 50.0;
+        }
         for (model, score) in [
             ("5090", 500.0),
             ("4090", 400.0),
@@ -189,7 +218,7 @@ impl ComputeClient {
                 });
             if status.as_ref().is_some_and(|status| {
                 status.host_id != peer.host_id
-                    || !matches!(status.backend.as_str(), "cuda" | "cpu")
+                    || !matches!(status.backend.as_str(), "cuda" | "cpu" | "coreml")
                     || matches!(status.admission.as_str(), "ineligible" | "unavailable")
                     || !status.fresh_at(unix_seconds())
             }) {
@@ -202,17 +231,29 @@ impl ComputeClient {
                 candidates.push((peer, status));
             }
         }
-        candidates.sort_by(|(_, a), (_, b)| {
-            b.performance()
-                .total_cmp(&a.performance())
-                .then_with(|| b.gpu_free_bytes.cmp(&a.gpu_free_bytes))
-                .then_with(|| {
-                    a.gpu_utilization_percent
-                        .unwrap_or(100)
-                        .cmp(&b.gpu_utilization_percent.unwrap_or(100))
-                })
-                .then_with(|| a.host_id.cmp(&b.host_id))
-        });
+        // Never compare measured throughput to unrelated hardware-estimate units.
+        let measured = !candidates.is_empty()
+            && candidates.iter().all(|(_, status)| {
+                status.performance_basis.as_deref()
+                    == Some("native_image_megapixels_per_second_x100")
+            });
+        let ratings: Vec<_> = candidates
+            .iter()
+            .map(|(_, status)| mesh_core::placement::WorkerRating {
+                host_id: status.host_id.clone(),
+                performance: status.performance(measured),
+                utilization_percent: status.utilization_percent.unwrap_or(f64::NAN),
+                observed_at: status.observed_at,
+                available: true,
+            })
+            .collect();
+        let order =
+            mesh_core::placement::rank_workers(&ratings, unix_seconds(), STATUS_TTL.as_secs());
+        let mut entries: Vec<_> = candidates.into_iter().map(Some).collect();
+        let candidates: Vec<_> = order
+            .into_iter()
+            .filter_map(|i| entries[i].take())
+            .collect();
         if candidates.is_empty() || Instant::now() >= deadline {
             return Err(anyhow!("mesh OCR deferred: no available OCR worker"));
         }
@@ -259,6 +300,10 @@ impl ComputeClient {
             let result = match result {
                 Ok(value) => value,
                 Err(error) if error.is::<InvalidOcrInput>() => return Err(error),
+                Err(error) if error.is::<WorkerBusy>() => {
+                    self.statuses.remove(&peer_key(&peer));
+                    continue;
+                }
                 Err(_) => {
                     self.mark_failed(&peer);
                     continue;
@@ -411,6 +456,19 @@ fn unwrap_result(body: Value) -> Result<Value> {
         return Err(anyhow!(InvalidOcrInput));
     }
     if body.get("error").is_some() {
+        if matches!(
+            body.pointer("/error/message").and_then(Value::as_str),
+            Some(
+                "GPU worker is busy"
+                    | "GPU worker request intake is busy"
+                    | "OCR worker rejected admission: host_cpu_busy"
+                    | "OCR worker rejected admission: host_memory_busy"
+                    | "OCR worker rejected admission: host_tasks_busy"
+                    | "Apple GPU is busy or its native load is unavailable"
+            )
+        ) {
+            return Err(anyhow!(WorkerBusy));
+        }
         return Err(anyhow!("OCR worker rejected request"));
     }
     let result = body
@@ -524,6 +582,10 @@ mod tests {
         let error = unwrap_result(json!({"error":{"code":-32000,"message":"GPU worker is busy"}}))
             .unwrap_err();
         assert!(!error.is::<InvalidOcrInput>());
+        assert!(
+            error.is::<WorkerBusy>(),
+            "busy is not a failed peer requiring cooldown"
+        );
     }
 
     #[cfg(feature = "ocr")]
@@ -573,7 +635,7 @@ mod tests {
                                         "gpu_name":"mock CUDA GPU", "compute_capability":"8.6",
                                         "gpu_free_bytes":4u64*1024*1024*1024, "gpu_utilization_percent":0,
                                         "busy_count":0, "admission":"available", "observed_at":unix_seconds(),
-                                        "performance_score":score
+                                        "performance_score":score, "utilization_percent":0
                                     }),
                                     "ocr_extract" => {
                                         let encoded = request.pointer("/params/arguments/content_base64").and_then(Value::as_str).unwrap_or_default();
@@ -732,7 +794,7 @@ mod tests {
 
     #[test]
     fn fallback_status_needs_refresh_after_a_long_first_attempt() {
-        let mut status: ComputeStatus = serde_json::from_value(json!({"host_id":"gpu", "backend":"cuda", "gpu_uuid":"old-gpu", "gpu_free_bytes":MIN_FREE_GPU_BYTES, "busy_count":0, "admission":"available", "observed_at":100})).unwrap();
+        let mut status: ComputeStatus = serde_json::from_value(json!({"host_id":"gpu", "backend":"cuda", "gpu_uuid":"old-gpu", "gpu_free_bytes":MIN_FREE_GPU_BYTES, "busy_count":0, "admission":"available", "observed_at":100,"utilization_percent":0})).unwrap();
         assert!(status.fresh_at(110));
         assert!(!status.fresh_at(145));
         // The renewed status supplies the identity checked against extraction.
@@ -743,7 +805,7 @@ mod tests {
     }
     #[test]
     fn stale_busy_and_unknown_workers_are_ineligible() {
-        let mut status: ComputeStatus = serde_json::from_value(json!({"host_id":"gpu", "backend":"cuda", "gpu_uuid":"id", "gpu_free_bytes":MIN_FREE_GPU_BYTES, "busy_count":0, "admission":"available", "observed_at":100})).unwrap();
+        let mut status: ComputeStatus = serde_json::from_value(json!({"host_id":"gpu", "backend":"cuda", "gpu_uuid":"id", "gpu_free_bytes":MIN_FREE_GPU_BYTES, "busy_count":0, "admission":"available", "observed_at":100,"utilization_percent":0})).unwrap();
         assert!(status.eligible("gpu", 100));
         assert!(!status.eligible("other", 100));
         assert!(!status.eligible("gpu", 111));
@@ -759,7 +821,7 @@ mod tests {
     fn explicit_cpu_worker_needs_no_cuda_but_retains_admission_fences() {
         let mut status: ComputeStatus = serde_json::from_value(json!({
             "host_id":"mac-m1", "backend":"cpu", "busy_count":0,
-            "admission":"available", "observed_at":100
+            "admission":"available", "observed_at":100, "utilization_percent":0
         }))
         .unwrap();
         assert!(status.eligible("mac-m1", 100));

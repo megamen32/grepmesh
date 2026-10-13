@@ -15,8 +15,19 @@ work so the caller can try the next candidate. Fail closed when CUDA is absent.
 Backendmesh never performs local inference. GPU-required workers validate CUDA registration with error_on_failure; PP-OCR CPU shape/control operators are permitted, while neural tensor inference uses CUDA.
 
 Client: poll at most a small known peer set, cache capabilities briefly, exclude
-stale/failed/unavailable/busy peers. Rank available GPU performance then headroom
-and utilization, recheck admission on extraction. Use existing direct LAN peers,
+stale/failed/unavailable/busy peers. The shared Rust mesh-core placement module
+ranks `performance * (1 - utilization/100)`, with deterministic ties. Fresh load
+uses host CPU, limiting cgroup ancestors' CPU/RAM/tasks, CUDA GPU utilization
+and, for Apple CoreML, native Mach/IOKit GPU counters. Known-busy admission is
+temporary rather than a failed-route cooldown. Admission is rechecked on the
+worker before inference. Reserve host memory for other users/services: 20GiB
+on >=64GiB hosts, 4GiB on >=32GiB, 2GiB on >=8GiB, otherwise1GiB.
+Hardware estimates are marked approximate; completed warm image work supplies
+median megapixels/s across16 samples/30min. Cold initialization, cache hits,
+PDFs and giant >64Mpixel rasters do not distort that estimator. The client
+never mixes throughput units with hardware estimates; workload complexity
+still makes these estimates approximate, not a universal device benchmark.
+Use existing direct LAN peers,
 relay fallback and protected credential env refs. On failure try another peer;
 report/defer OCR when none available. Existing topology refresh supplies new
 routes; retain all search routes. Send file bytes, never a local path to read
@@ -24,6 +35,25 @@ on another host. Enforce max32MiB decoded payload, input-type allowlist, finite
 HTTP deadlines, bounded output and serial client indexing. Worker receives
 images/PDF, renders PDF locally with existing bounded settings, returns text
 and actual serving host/GPU identity. Content and credentials are not logged.
+
+Apple-silicon builds include optional required CoreML registration with
+CPUAndGPU/MLProgram. The same ONNX models/dictionary are retained; CPU shape
+and unsupported operators remain possible. Real native M1 compute-plan/OCR
+proof observed matmul assigned to MLGPUComputeDevice Apple M1 Max, with
+236/242 detector and329/346 recognizer nodes supported byCoreML; cold5.386s
+and warm0.617s on the same new2000x1000 control-image workload. This was a
+finite separate candidate, not yet a production/all-host placement acceptance.
+macOS x86 builds retain CPU OCR; they do not pretend to offer CUDA/CoreML.
+
+Very tall noninterlaced PNGs stream rows into <=8192x512 RGB strips and
+overlapping <=1024x512 tiles, instead of allocating the complete raster.
+RGBA/GrayAlpha are composited onwhite; only exact constant-color tiles skip
+inference. CRC/end-of-frame and deadlines are checked; any incomplete pass
+returns an error. Identical text is deduplicated only at overlapping global
+geometry; repeated text elsewhere stays. Existing decoder handles ordinary
+images. The measured largest retained input has891391rows/21.1GB decoded
+pixels; codec-only pass took14.03s/1664KiB, withoutsaving rawpixels. Neural
+post-install completion and the pending media index still require real proof.
 
 Runtime: NVIDIA workers use the same pinned detector/recognizer/dictionary,
 ORT CUDA with limited arenas, one local Rayon worker and bounded CPU threads.
