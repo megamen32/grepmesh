@@ -9,7 +9,7 @@ use notify::{
     event::{CreateKind, ModifyKind, RenameMode},
     EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -115,6 +115,12 @@ pub struct IndexTextHit {
     pub line_number: usize,
     pub text: String,
     pub context: Vec<(usize, String)>,
+}
+
+#[derive(Debug)]
+pub struct IndexedSearch {
+    pub hits: Vec<IndexTextHit>,
+    pub truncated: bool,
 }
 
 struct RebuildState<'a> {
@@ -699,7 +705,7 @@ impl PersistentIndex {
     }
 
     pub fn candidates(&self, query: &str) -> Result<Vec<PathBuf>, String> {
-        let connection = self.connection()?;
+        let connection = self.read_connection(Instant::now() + Duration::from_secs(2))?;
         let fts_query = fts_literal_query(query);
         let mut statement = connection
             .prepare("SELECT path FROM grepmesh_documents WHERE body MATCH ?1")
@@ -711,48 +717,94 @@ impl PersistentIndex {
             .collect()
     }
 
-    fn matching_documents(&self, query: &str) -> Result<Vec<(PathBuf, String)>, String> {
-        let connection = self.connection()?;
+    fn read_connection(&self, deadline: Instant) -> Result<Connection, String> {
+        if Instant::now() >= deadline {
+            return Err("indexed search deadline".into());
+        }
+        // No schema/PRAGMA writes on an interactive read. Each worker owns its connection.
+        let connection = Connection::open_with_flags(
+            &self.path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| e.to_string())?;
+        connection
+            .busy_timeout(
+                Duration::from_millis(100).min(deadline.saturating_duration_since(Instant::now())),
+            )
+            .map_err(|e| e.to_string())?;
+        connection.progress_handler(256, Some(move || Instant::now() >= deadline));
+        connection
+            .execute_batch("BEGIN DEFERRED;")
+            .map_err(|e| e.to_string())?;
+        Ok(connection)
+    }
+
+    fn visit_matching_documents(
+        &self,
+        connection: &Connection,
+        query: &str,
+        root: &Path,
+        deadline: Instant,
+        mut allow: impl FnMut(&Path) -> bool,
+        mut visit: impl FnMut(PathBuf, String) -> bool,
+    ) -> Result<bool, String> {
+        let root_text = root.to_string_lossy().into_owned();
+        let separator = std::path::MAIN_SEPARATOR;
+        let stem = root_text.trim_end_matches(separator);
+        let prefix = format!("{stem}{separator}");
+        let upper = format!("{stem}{}", char::from_u32(separator as u32 + 1).unwrap());
         let fts_query = fts_literal_query(query);
-        let mut documents = BTreeMap::<PathBuf, String>::new();
-        {
-            let mut statement = connection
-                .prepare(
-                    "SELECT path, body FROM grepmesh_documents WHERE body MATCH ?1 ORDER BY rank",
-                )
-                .map_err(|error| error.to_string())?;
-            let rows = statement
-                .query_map(params![fts_query], |row| {
-                    Ok((
-                        PathBuf::from(row.get::<_, String>(0)?),
-                        row.get::<_, String>(1)?,
-                    ))
-                })
-                .map_err(|error| error.to_string())?;
-            for row in rows {
-                let (path, body) = row.map_err(|error| error.to_string())?;
-                documents.insert(path, body);
+        let pattern = format!(
+            "%{}%",
+            query
+                .replace('\\', "\\\\")
+                .replace('%', r"\%")
+                .replace('_', r"\_")
+        );
+        let mut seen = BTreeSet::new();
+        let mut body_bytes = 0usize;
+        const BODY_BUDGET: usize = 64 * 1024 * 1024;
+        // Paths/row IDs first; never materialize global document bodies or rank-sort them.
+        let queries = [
+            "SELECT d.fts_rowid,d.path FROM grepmesh_documents f \
+             JOIN grepmesh_document_rows d ON d.fts_rowid=f.rowid \
+             WHERE f.body MATCH ?1 AND (d.path=?2 OR (d.path>=?3 AND d.path<?4))",
+            "SELECT fts_rowid,path FROM grepmesh_document_rows \
+             WHERE path LIKE ?1 ESCAPE '\\' AND (path=?2 OR (path>=?3 AND path<?4))",
+        ];
+        let mut body = connection.prepare(
+            "SELECT body FROM grepmesh_documents WHERE rowid=?1 AND length(CAST(body AS BLOB))<=?2")
+            .map_err(|e| e.to_string())?;
+        for (sql, term) in queries.iter().zip([fts_query, pattern]) {
+            let mut statement = connection.prepare(sql).map_err(|e| e.to_string())?;
+            let mut rows = statement
+                .query(params![term, root_text, prefix, upper])
+                .map_err(|e| e.to_string())?;
+            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                if Instant::now() >= deadline {
+                    return Err("indexed search deadline".into());
+                }
+                let id: i64 = row.get(0).map_err(|e| e.to_string())?;
+                let path = PathBuf::from(row.get::<_, String>(1).map_err(|e| e.to_string())?);
+                if !path.starts_with(root) || !allow(&path) || !seen.insert(id) {
+                    continue;
+                }
+                if seen.len() > 20_000 {
+                    return Err("indexed search candidate budget".into());
+                }
+                let remaining = BODY_BUDGET.saturating_sub(body_bytes);
+                let text: Option<String> = body
+                    .query_row(params![id, remaining as i64], |r| r.get(0))
+                    .optional()
+                    .map_err(|e| e.to_string())?;
+                let text = text.ok_or_else(|| "indexed search body budget".to_string())?;
+                body_bytes += text.len();
+                if !visit(path, text) {
+                    return Ok(false);
+                }
             }
         }
-        let path_pattern = format!("%{}%", query.replace('%', r"\%").replace('_', r"\_"));
-        {
-            let mut statement = connection
-                .prepare("SELECT path, body FROM grepmesh_documents WHERE path LIKE ?1 ESCAPE '\\'")
-                .map_err(|error| error.to_string())?;
-            let rows = statement
-                .query_map(params![path_pattern], |row| {
-                    Ok((
-                        PathBuf::from(row.get::<_, String>(0)?),
-                        row.get::<_, String>(1)?,
-                    ))
-                })
-                .map_err(|error| error.to_string())?;
-            for row in rows {
-                let (path, body) = row.map_err(|error| error.to_string())?;
-                documents.entry(path).or_insert(body);
-            }
-        }
-        Ok(documents.into_iter().collect())
+        Ok(true)
     }
 }
 
@@ -1267,23 +1319,58 @@ impl IndexManager {
         path_globs: &[String],
         exclude_globs: &[String],
     ) -> Option<Vec<IndexTextHit>> {
-        if query.as_bytes().len() < 3 {
-            return None;
+        self.search_text_hits_filtered_until(
+            query,
+            root,
+            limit,
+            context_lines,
+            case_sensitive,
+            path_globs,
+            exclude_globs,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .ok()
+        .flatten()
+        .map(|page| page.hits)
+    }
+
+    pub fn search_text_hits_filtered_until(
+        &self,
+        query: &str,
+        root: &Path,
+        limit: usize,
+        context_lines: usize,
+        case_sensitive: bool,
+        path_globs: &[String],
+        exclude_globs: &[String],
+        deadline: Instant,
+    ) -> Result<Option<IndexedSearch>, String> {
+        if query.as_bytes().len() < 3 || limit == 0 {
+            return Ok(None);
         }
-        let persistent = self.persistent.as_ref()?;
+        let Some(persistent) = self.persistent.as_ref() else {
+            return Ok(None);
+        };
+        let connection = persistent.read_connection(deadline)?;
         let root_ready = self
             .ready_roots
             .read()
             .ok()
             .is_some_and(|roots| roots.iter().any(|ready| root.starts_with(ready)));
-        // A safety reconciliation updates the existing durable index in place.
-        // Its last completed baseline remains searchable while the new walk
-        // runs; otherwise every restart can hide cached PDF/OCR text for hours.
-        // Cold, never-completed indexes still use the filesystem fallback.
-        if !root_ready && persistent.last_full_rebuild_ms().ok().flatten().is_none() {
-            return None;
+        if !root_ready {
+            let baseline: Option<String> = connection
+                .query_row(
+                    "SELECT value FROM grepmesh_metadata WHERE key='last_full_rebuild_ms'",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            if baseline.is_none() {
+                return Ok(None);
+            }
         }
-        let excludes = compile_excludes(exclude_globs).ok()?;
+        let excludes = compile_excludes(exclude_globs).map_err(|e| e.to_string())?;
         let positive = path_globs
             .iter()
             .filter(|g| !g.starts_with('!'))
@@ -1293,69 +1380,86 @@ impl IndexManager {
             .iter()
             .filter_map(|g| g.strip_prefix('!').map(str::to_owned))
             .collect::<Vec<_>>();
-        let includes = compile_excludes(&positive).ok()?;
-        let rejects = compile_excludes(&negative).ok()?;
-        let documents = persistent.matching_documents(query).ok()?;
+        let includes = compile_excludes(&positive).map_err(|e| e.to_string())?;
+        let rejects = compile_excludes(&negative).map_err(|e| e.to_string())?;
         let needle = if case_sensitive {
             query.to_string()
         } else {
             query.to_lowercase()
         };
         let mut hits = Vec::new();
-        for (path, body) in documents {
-            if !path.starts_with(root) || excluded(&path, root, &excludes) {
-                continue;
-            }
-            let relative = path.strip_prefix(root).unwrap_or(&path);
-            let matches = |set: &GlobSet| set.is_match(&path) || set.is_match(relative);
-            if (!positive.is_empty() && !matches(&includes)) || matches(&rejects) {
-                continue;
-            }
-            let mut content_match = false;
-            let lines: Vec<&str> = body.lines().collect();
-            for (index, line) in lines.iter().enumerate() {
-                let haystack = if case_sensitive {
-                    (*line).to_string()
+        let mut parse_deadline = false;
+        let exhausted = persistent.visit_matching_documents(
+            &connection,
+            query,
+            root,
+            deadline,
+            |path| {
+                if !path.starts_with(root) || excluded(path, root, &excludes) {
+                    return false;
+                }
+                let relative = path.strip_prefix(root).unwrap_or(path);
+                let matches = |set: &GlobSet| set.is_match(path) || set.is_match(relative);
+                (positive.is_empty() || matches(&includes)) && !matches(&rejects)
+            },
+            |path, body| {
+                let mut content_match = false;
+                let lines: Vec<&str> = body.lines().collect();
+                for (index, line) in lines.iter().enumerate() {
+                    if Instant::now() >= deadline {
+                        parse_deadline = true;
+                        return false;
+                    }
+                    let haystack = if case_sensitive {
+                        (*line).to_string()
+                    } else {
+                        line.to_lowercase()
+                    };
+                    if !haystack.contains(&needle) {
+                        continue;
+                    }
+                    content_match = true;
+                    let start = index.saturating_sub(context_lines);
+                    let end = (index + context_lines + 1).min(lines.len());
+                    hits.push(IndexTextHit {
+                        path: path.clone(),
+                        line_number: index + 1,
+                        text: (*line).to_string(),
+                        context: (start..end)
+                            .map(|i| (i + 1, lines[i].to_string()))
+                            .collect(),
+                    });
+                    if hits.len() >= limit {
+                        return false;
+                    }
+                }
+                let path_text = path.to_string_lossy();
+                let path_haystack = if case_sensitive {
+                    path_text.to_string()
                 } else {
-                    line.to_lowercase()
+                    path_text.to_lowercase()
                 };
-                if !haystack.contains(&needle) {
-                    continue;
+                if !content_match && path_haystack.contains(&needle) {
+                    hits.push(IndexTextHit {
+                        path: path.clone(),
+                        line_number: 0,
+                        text: path_text.to_string(),
+                        context: Vec::new(),
+                    });
+                    if hits.len() >= limit {
+                        return false;
+                    }
                 }
-                content_match = true;
-                let start = index.saturating_sub(context_lines);
-                let end = (index + context_lines + 1).min(lines.len());
-                hits.push(IndexTextHit {
-                    path: path.clone(),
-                    line_number: index + 1,
-                    text: (*line).to_string(),
-                    context: (start..end)
-                        .map(|i| (i + 1, lines[i].to_string()))
-                        .collect(),
-                });
-                if hits.len() >= limit {
-                    return Some(hits);
-                }
-            }
-            let path_text = path.to_string_lossy();
-            let path_haystack = if case_sensitive {
-                path_text.to_string()
-            } else {
-                path_text.to_lowercase()
-            };
-            if !content_match && path_haystack.contains(&needle) {
-                hits.push(IndexTextHit {
-                    path: path.clone(),
-                    line_number: 0,
-                    text: path_text.to_string(),
-                    context: Vec::new(),
-                });
-                if hits.len() >= limit {
-                    return Some(hits);
-                }
-            }
+                true
+            },
+        )?;
+        if parse_deadline {
+            return Err("indexed search deadline".into());
         }
-        Some(hits)
+        Ok(Some(IndexedSearch {
+            hits,
+            truncated: !exhausted,
+        }))
     }
 
     pub fn candidate_paths(&self, query: &str, root: &Path) -> Option<Vec<PathBuf>> {
@@ -2946,9 +3050,171 @@ mod tests {
         index
             .replace_document(&document, "body without the filename token")
             .unwrap();
-        let matches = index.matching_documents("roadmap").unwrap();
+        let connection = index
+            .read_connection(Instant::now() + Duration::from_secs(2))
+            .unwrap();
+        let mut matches = Vec::new();
+        index
+            .visit_matching_documents(
+                &connection,
+                "roadmap",
+                dir.path(),
+                Instant::now() + Duration::from_secs(2),
+                |_| true,
+                |path, body| {
+                    matches.push((path, body));
+                    true
+                },
+            )
+            .unwrap();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].0, document);
+    }
+
+    #[test]
+    fn indexed_scope_filters_unrelated_bodies_before_decoding() {
+        // Fast unit. A scoped OCR/PDF read must not load an unrelated body.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("selected");
+        let pdf = root.join("scan.pdf");
+        let unrelated = dir.path().join("outside.png");
+        let persistent = PersistentIndex::open(dir.path().join("index.sqlite")).unwrap();
+        persistent
+            .replace_document(&pdf, "cached OCR needle from PDF")
+            .unwrap();
+        persistent
+            .replace_document(&unrelated, "unrelated needle")
+            .unwrap();
+        // SQLite permits a non-text value; outside-scope data must be irrelevant.
+        persistent
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE grepmesh_documents SET body=CAST(body AS BLOB) WHERE path=?1",
+                params![unrelated.display().to_string()],
+            )
+            .unwrap();
+        let mut index = IndexManager::disabled();
+        index.ready_roots.write().unwrap().insert(root.clone());
+        index.persistent = Some(persistent);
+        let hits = index
+            .search_text_hits_filtered("needle", &root, 3, 0, true, &["**/*.pdf".to_string()], &[])
+            .expect("scoped cached PDF remains searchable");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, pdf);
+    }
+
+    #[test]
+    fn indexed_scope_keeps_pdf_image_text_and_component_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("scope_%");
+        let store = PersistentIndex::open(dir.path().join("index.sqlite")).unwrap();
+        let pdf = root.join("cached.pdf");
+        let image = root.join("cached.png");
+        store
+            .replace_document(&pdf, "PDF needle cached extraction")
+            .unwrap();
+        store
+            .replace_document(&image, "OCR needle cached extraction")
+            .unwrap();
+        store
+            .replace_document(
+                &dir.path().join("scope_%other/outside.pdf"),
+                "needle outside",
+            )
+            .unwrap();
+        let mut index = IndexManager::disabled();
+        index.ready_roots.write().unwrap().insert(root.clone());
+        index.persistent = Some(store);
+        let hits = index
+            .search_text_hits_filtered("needle", &root, 10, 0, true, &[], &[])
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().any(|h| h.path == pdf));
+        assert!(hits.iter().any(|h| h.path == image));
+        let only_pdf = index
+            .search_text_hits_filtered("needle", &root, 10, 0, true, &["**/*.pdf".into()], &[])
+            .unwrap();
+        assert_eq!(only_pdf.len(), 1);
+        assert_eq!(only_pdf[0].path, pdf);
+    }
+
+    #[test]
+    fn indexed_deadline_and_result_limit_are_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let store = PersistentIndex::open(root.join("index.sqlite")).unwrap();
+        store
+            .replace_document(&root.join("cached.pdf"), "needle first\nneedle second")
+            .unwrap();
+        let mut index = IndexManager::disabled();
+        index
+            .ready_roots
+            .write()
+            .unwrap()
+            .insert(root.to_path_buf());
+        index.persistent = Some(store);
+        assert!(index
+            .search_text_hits_filtered_until(
+                "needle",
+                root,
+                5,
+                0,
+                true,
+                &[],
+                &[],
+                Instant::now() - Duration::from_secs(1)
+            )
+            .is_err());
+        let page = index
+            .search_text_hits_filtered_until(
+                "needle",
+                root,
+                1,
+                0,
+                true,
+                &[],
+                &[],
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(page.hits.len(), 1);
+        assert!(page.truncated);
+    }
+
+    #[test]
+    fn indexed_reader_uses_one_readonly_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let store = PersistentIndex::open(root.join("index.sqlite")).unwrap();
+        let pdf = root.join("scan.pdf");
+        store.replace_document(&pdf, "needle initial").unwrap();
+        let reader = store
+            .read_connection(Instant::now() + Duration::from_secs(2))
+            .unwrap();
+        let _: i64 = reader
+            .query_row("SELECT count(*) FROM grepmesh_document_rows", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        store.replace_document(&pdf, "needle changed").unwrap();
+        let mut bodies = Vec::new();
+        store
+            .visit_matching_documents(
+                &reader,
+                "needle",
+                root,
+                Instant::now() + Duration::from_secs(2),
+                |_| true,
+                |_, body| {
+                    bodies.push(body);
+                    true
+                },
+            )
+            .unwrap();
+        assert_eq!(bodies, vec!["needle initial"]);
+        assert!(reader.execute("DELETE FROM grepmesh_metadata", []).is_err());
     }
 
     #[test]

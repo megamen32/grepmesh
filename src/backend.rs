@@ -601,15 +601,44 @@ impl LocalBackend {
                 mode,
                 SearchMode::Literal | SearchMode::CaseInsensitiveLiteral
             ) {
-                if let Some(index_hits) = self.index.search_text_hits_filtered(
-                    &query,
-                    &root,
-                    remaining,
-                    context_lines,
-                    matches!(mode, SearchMode::Literal),
-                    &path_globs,
-                    &exclude_globs,
-                ) {
+                let index = self.index.clone();
+                let reader_query = query.clone();
+                let reader_root = root.clone();
+                let reader_globs = path_globs.clone();
+                let reader_excludes = exclude_globs.clone();
+                let case_sensitive = matches!(mode, SearchMode::Literal);
+                let reader_deadline =
+                    (deadline.min(Instant::now() + Duration::from_secs(2))).into_std();
+                // SQLite and cached document parsing must never occupy the async HTTP worker.
+                let indexed = tokio::task::spawn_blocking(move || {
+                    index.search_text_hits_filtered_until(
+                        &reader_query,
+                        &reader_root,
+                        remaining,
+                        context_lines,
+                        case_sensitive,
+                        &reader_globs,
+                        &reader_excludes,
+                        reader_deadline,
+                    )
+                })
+                .await;
+                let index_page = match indexed {
+                    Ok(Ok(page)) => page,
+                    failure => {
+                        failed_roots += 1;
+                        first_root_error.get_or_insert_with(|| match failure {
+                            Ok(Err(message)) => format!("indexed search unavailable: {message}"),
+                            _ => "indexed reader failed".to_string(),
+                        });
+                        partial = true;
+                        // Cached OCR/PDF cannot be honestly replaced by raw binary file scanning.
+                        continue;
+                    }
+                };
+                if let Some(index_page) = index_page {
+                    truncated |= index_page.truncated;
+                    let index_hits = index_page.hits;
                     successful_roots += 1;
                     hits.extend(index_hits.into_iter().map(|hit| {
                         SearchHit {
@@ -639,7 +668,14 @@ impl LocalBackend {
                     mode,
                     SearchMode::Literal | SearchMode::CaseInsensitiveLiteral
                 ) {
-                self.index.candidate_paths(&query, &root)
+                let index = self.index.clone();
+                let candidate_query = query.clone();
+                let candidate_root = root.clone();
+                tokio::task::spawn_blocking(move || {
+                    index.candidate_paths(&candidate_query, &candidate_root)
+                })
+                .await
+                .map_err(|_| anyhow!("indexed candidate reader failed"))?
             } else {
                 None
             };
