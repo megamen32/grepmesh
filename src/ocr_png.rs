@@ -74,9 +74,7 @@ pub(crate) fn stream_tiles(
         if row.data().len() != width * channels || read_rows >= height {
             return Err(anyhow!("PNG streaming row geometry changed"));
         }
-        for pixel in row.data().chunks_exact(channels) {
-            strip.extend_from_slice(&rgb_pixel(pixel));
-        }
+        append_rgb_row(&mut strip, row.data(), channels);
         read_rows += 1;
         if strip.len() == stride * ROWS {
             emitted += emit_strip(&strip, width, offset, deadline, &mut infer)?;
@@ -109,10 +107,43 @@ fn rgb_pixel(pixel: &[u8]) -> [u8; 3] {
     };
     if matches!(pixel.len(), 2 | 4) {
         let alpha = *pixel.last().unwrap() as u32;
+        if alpha == 255 {
+            return rgb;
+        }
+        if alpha == 0 {
+            return [255; 3];
+        }
         // Transparent backgrounds are rendered on white before OCR/blank tests.
         rgb.map(|value| ((value as u32 * alpha + 255 * (255 - alpha) + 127) / 255) as u8)
     } else {
         rgb
+    }
+}
+
+fn append_rgb_row(strip: &mut Vec<u8>, row: &[u8], channels: usize) {
+    if channels == 3 {
+        strip.extend_from_slice(row);
+        return;
+    }
+    let first = &row[..channels];
+    // Very tall captured PNGs mostly contain exact constant rows. Convert that
+    // pixel once and append the full row without billions of tiny Vec appends.
+    if row.chunks_exact(channels).all(|pixel| pixel == first) {
+        let color = rgb_pixel(first);
+        let count = row.len() / channels;
+        let start = strip.len();
+        if color[0] == color[1] && color[1] == color[2] {
+            strip.resize(start + count * 3, color[0]);
+        } else {
+            strip.resize(start + count * 3, 0);
+            for pixel in strip[start..].chunks_exact_mut(3) {
+                pixel.copy_from_slice(&color);
+            }
+        }
+    } else {
+        for pixel in row.chunks_exact(channels) {
+            strip.extend_from_slice(&rgb_pixel(pixel));
+        }
     }
 }
 
@@ -123,6 +154,13 @@ fn emit_strip(
     deadline: Instant,
     infer: &mut impl FnMut(RgbImage, u32, u32) -> Result<()>,
 ) -> Result<usize> {
+    if Instant::now() >= deadline {
+        return Err(anyhow!("PNG tile OCR deadline exceeded"));
+    }
+    // Exact constant strips need neither tile allocations nor repeated copies.
+    if strip.chunks_exact(3).all(|pixel| pixel == &strip[..3]) {
+        return Ok(0);
+    }
     let height = strip.len() / (width * 3);
     let mut emitted = 0;
     let mut x = 0;
@@ -161,6 +199,30 @@ fn emit_strip(
 mod tests {
     use super::*;
     use std::time::Duration;
+    #[test]
+    fn bulk_constant_rows_equal_per_pixel_rgba_gray_and_alpha_conversion() {
+        for pixel in [
+            vec![10],
+            vec![10, 0],
+            vec![10, 127],
+            vec![2, 30, 100, 255],
+            vec![2, 30, 100, 0],
+            vec![2, 30, 100, 127],
+        ] {
+            let mut strip = vec![8, 9, 10];
+            let row = pixel.repeat(5918);
+            append_rgb_row(&mut strip, &row, pixel.len());
+            assert_eq!(&strip[..3], &[8, 9, 10]);
+            assert!(strip[3..].chunks_exact(3).all(|p| p == rgb_pixel(&pixel)));
+        }
+        let row = [0, 0, 0, 0, 2, 3, 4, 255, 20, 30, 40, 127];
+        let mut strip = Vec::new();
+        append_rgb_row(&mut strip, &row, 4);
+        assert_eq!(
+            strip,
+            row.chunks_exact(4).flat_map(rgb_pixel).collect::<Vec<_>>()
+        );
+    }
     #[test]
     fn alpha_only_text_keeps_visible_contrast_before_uniform_tile_filter() {
         assert_eq!(rgb_pixel(&[0, 0, 0, 0]), [255; 3]);

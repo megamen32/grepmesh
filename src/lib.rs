@@ -1,6 +1,7 @@
 pub mod backend;
 pub mod backup_catalog;
 pub mod compute;
+mod compute_ratings;
 pub mod compute_client;
 mod compute_load;
 pub mod config;

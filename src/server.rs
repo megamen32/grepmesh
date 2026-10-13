@@ -95,7 +95,7 @@ pub async fn run_server(mut config: AppConfig) -> Result<()> {
     topology.retain_known_peers(&config.peers);
     // OCR discovery follows the same protected live/cache routes as search;
     // never force indexing clients to construct a local CPU session for mesh.
-    config.ocr.mesh_peers = topology.peers.clone();
+    config.ocr.mesh_peers = crate::compute_client::merge_compute_peers(topology.clone(), &config.ocr.mesh_peers);
     if config.compute.enabled {
         let local_compute_address = config.local_bind.unwrap_or_else(|| {
             if config.bind.ip().is_unspecified() {
@@ -553,7 +553,9 @@ fn tool_meta(name: &str, description: &str) -> Value {
             "properties": {
                 "content_base64": {"type": "string", "description": "Base64 file bytes; decoded size at most 32 MiB."},
                 "input_type": {"type": "string", "enum": ["png", "jpg", "jpeg", "webp", "tif", "tiff", "bmp", "gif", "avif", "pdf"]},
-                "filename": {"type": "string", "description": "Optional basename with matching allowed extension; never a path to read."}
+                "filename": {"type": "string", "description": "Optional basename with matching allowed extension; never a path to read."},
+                "execution_provider": {"type": "string", "enum": ["cpu", "cuda", "coreml"], "description": "Only this host's available CPU or configured accelerator; never a remote override."},
+                "task_class": {"type": "string", "maxLength": 80, "description": "Optional shared TaskDescriptor class; verified against actual input before inference."}
             }
         }),
         "search" | "search_text" => json!({

@@ -97,10 +97,20 @@ fn content_key(bytes: &[u8], extension: &str) -> [u8; 32] {
     hash.finalize().into()
 }
 
+fn device_content_key(bytes: &[u8], extension: &str, provider: &str) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(provider.as_bytes());
+    hash.update([0]);
+    hash.update(content_key(bytes, extension));
+    hash.finalize().into()
+}
+
 pub struct ComputeWorker {
     host_id: String,
     config: ComputeConfig,
     engine: Option<Arc<OcrEngine>>,
+    cpu_engine: Option<Arc<OcrEngine>>,
+    accelerator_environment_ready: bool,
     slots: Arc<Semaphore>,
     intake_slots: Arc<Semaphore>,
     probe_lock: Mutex<()>,
@@ -111,6 +121,7 @@ pub struct ComputeWorker {
     retained_late: AtomicU64,
     load: Mutex<Option<(Instant, crate::compute_load::HostLoad)>>,
     image_rates: StdMutex<VecDeque<(Instant, f64)>>,
+    ratings: StdMutex<crate::compute_ratings::Ratings>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +131,10 @@ pub struct OcrExtractRequest {
     pub input_type: String,
     #[serde(default)]
     pub filename: Option<String>,
+    #[serde(default)]
+    pub execution_provider: Option<String>,
+    #[serde(default)]
+    pub task_class: Option<String>,
 }
 
 #[derive(Debug)]
@@ -145,10 +160,21 @@ impl ComputeWorker {
         ocr.gpu_device_id = config.gpu_device_id;
         ocr.gpu_mem_limit_bytes = ocr.gpu_mem_limit_bytes.min(GPU_ARENA_LIMIT);
         let timeout = Duration::from_millis(ocr.remote_timeout_ms.clamp(1_000, 300_000));
-        Self {
+        let mut cpu_ocr = ocr.clone();
+        cpu_ocr.execution_provider = "cpu".into();
+        let engine = OcrEngine::new(ocr).map(Arc::new);
+        let cpu_engine = if config.execution_provider == "cpu" {
+            engine.as_ref().map(Arc::clone)
+        } else {
+            OcrEngine::new(cpu_ocr).map(Arc::new)
+        };
+        let accelerator_environment_ready = config.execution_provider == "cpu";
+        let mut worker = Self {
             host_id,
             config,
-            engine: OcrEngine::new(ocr).map(Arc::new),
+            engine,
+            cpu_engine,
+            accelerator_environment_ready,
             slots: Arc::new(Semaphore::new(1)),
             intake_slots: Arc::new(Semaphore::new(1)),
             probe_lock: Mutex::new(()),
@@ -159,7 +185,25 @@ impl ComputeWorker {
             retained_late: AtomicU64::new(0),
             load: Mutex::new(None),
             image_rates: StdMutex::new(VecDeque::new()),
+            ratings: StdMutex::new(crate::compute_ratings::Ratings::default()),
+        };
+        // Only eligible accelerators establish the global provider. This does
+        // not load models; explicitly chosen CPU sessions still opt out of it.
+        if worker.config.execution_provider != "cpu" {
+            worker.accelerator_environment_ready = if worker.eligibility_error().is_some() {
+                true // Accelerator is permanently ineligible in this worker; CPU is independent.
+            } else {
+                worker
+                    .engine
+                    .as_ref()
+                    .is_some_and(|e| e.prepare_accelerator_environment().is_ok())
+            };
         }
+        if worker.config.enabled && !worker.accelerator_environment_ready {
+            tracing::warn!(stage = "provider_environment", provider = %worker.config.execution_provider,
+                "OCR provider prerequisite is unavailable; no device admission promised");
+        }
+        worker
     }
 
     pub fn max_request_bytes(&self) -> usize {
@@ -241,6 +285,7 @@ impl ComputeWorker {
         result["hardware_performance_score"] = result["performance_score"].clone();
         match self.host_load().await {
             Ok(load) => {
+                result["host_admission"] = json!(load.admission());
                 let utilization = load
                     .utilization()
                     .max(result["gpu_utilization_percent"].as_f64().unwrap_or(0.0))
@@ -270,6 +315,7 @@ impl ComputeWorker {
                 result["host_load"] = json!(load);
             }
             Err(_) => {
+                result["host_admission"] = json!("load_unavailable");
                 result["admission"] = json!("load_unavailable");
                 result["utilization_percent"] = Value::Null;
             }
@@ -302,6 +348,57 @@ impl ComputeWorker {
         result["retained_result_hits"] = json!(self.retained_hits.load(Ordering::Relaxed));
         result["retained_result_after_deadline_count"] =
             json!(self.retained_late.load(Ordering::Relaxed));
+        // Hardware information remains diagnostic only. A cold rating is null.
+        result["performance_score"] = Value::Null;
+        result["performance_basis"] = json!("task_specific_native_observations");
+        let now = Instant::now();
+        result["performance_by_task"] = self
+            .ratings
+            .lock()
+            .map(|mut rates| rates.snapshot(&self.config.execution_provider, now))
+            .unwrap_or_else(|_| json!({}));
+        let mut devices = Vec::new();
+        let mut cpu = json!({"host_id": self.host_id, "backend": "cpu", "gpu_uuid": null,
+            "busy_count": usize::from(self.slots.available_permits() == 0),
+            "admission": "ineligible", "observed_at": observed_at(),
+            "performance_score": null, "performance_basis": "task_specific_native_observations",
+            "performance_by_task": self.ratings.lock().map(|mut r| r.snapshot("cpu", now)).unwrap_or_else(|_| json!({}))});
+        if self.config.enabled && self.cpu_engine.is_some() {
+            if let Some(load) = result.get("host_load") {
+                cpu["host_load"] = load.clone();
+                let utilization = load["cpu_utilization_percent"]
+                    .as_f64()
+                    .unwrap_or(100.0)
+                    .max(
+                        load["cgroup_cpu_utilization_percent"]
+                            .as_f64()
+                            .unwrap_or(0.0),
+                    );
+                cpu["utilization_percent"] = json!(utilization);
+                cpu["admission"] = if self.slots.available_permits() == 0 {
+                    json!("busy")
+                } else if result["host_admission"] != "available" {
+                    result["host_admission"].clone()
+                } else {
+                    json!("available")
+                };
+            } else {
+                cpu["admission"] = json!("load_unavailable");
+                cpu["utilization_percent"] = Value::Null;
+            }
+        }
+        if self.config.enabled && self.cpu_engine.is_some() && !self.accelerator_environment_ready {
+            cpu["admission"] = json!("provider_environment_unavailable");
+        }
+        devices.push(cpu);
+        if self.config.execution_provider != "cpu" {
+            let mut accelerator = result.clone();
+            accelerator["utilization_percent"] = accelerator_utilization(&result);
+            // Per-device status never recursively includes the device catalog.
+            accelerator.as_object_mut().unwrap().remove("devices");
+            devices.push(accelerator);
+        }
+        result["devices"] = json!(devices);
         result
     }
 
@@ -325,6 +422,12 @@ impl ComputeWorker {
     async fn capability_status(&self) -> Value {
         if let Some(reason) = self.eligibility_error() {
             return self.unavailable("ineligible", reason);
+        }
+        if !self.accelerator_environment_ready {
+            return self.unavailable(
+                "provider_environment_unavailable",
+                "global OCR provider prerequisite unavailable",
+            );
         }
         if matches!(self.config.execution_provider.as_str(), "cpu" | "coreml") {
             return json!({"host_id": self.host_id, "backend": self.config.execution_provider, "gpu_uuid": null,
@@ -391,7 +494,36 @@ impl ComputeWorker {
     }
 
     pub async fn extract(self: &Arc<Self>, request: OcrExtractRequest) -> Result<Value> {
-        if let Some(reason) = self.eligibility_error() {
+        let provider = request
+            .execution_provider
+            .as_deref()
+            .unwrap_or(&self.config.execution_provider)
+            .to_owned();
+        if provider != "cpu" && provider != self.config.execution_provider {
+            return Err(anyhow!(
+                "requested OCR execution provider is not configured on this host"
+            ));
+        }
+        if provider != "cpu" {
+            if let Some(reason) = self.eligibility_error() {
+                return Err(anyhow!(reason));
+            }
+        } else if !self.accelerator_environment_ready {
+            return Err(anyhow!(
+                "CPU OCR provider environment prerequisite is unavailable"
+            ));
+        } else if !self.config.enabled || self.cpu_engine.is_none() {
+            return Err(anyhow!("CPU OCR is disabled or unavailable"));
+        }
+        if request
+            .task_class
+            .as_ref()
+            .is_some_and(|class| class.len() > 80)
+        {
+            return Err(anyhow!("OCR task class exceeds metadata bound"));
+        }
+        if !matches!(provider.as_str(), "cpu" | "cuda" | "coreml") {
+            let reason = "unsupported OCR execution provider";
             return Err(anyhow!(reason));
         }
         let extension = validate_request(&request, self.payload_limit())?;
@@ -401,6 +533,8 @@ impl ComputeWorker {
         let started = Instant::now();
         let preparation_worker = Arc::clone(self);
         let preparation_type = extension.clone();
+        let preparation_provider = provider.clone();
+        let requested_class = request.task_class;
         // Both decoding and hashing belong to the same one-job admission.
         // The blocking task owns its permit even if the HTTP waiter goes away.
         let (bytes, key, permit, cached) = tokio::task::spawn_blocking(move || {
@@ -410,7 +544,7 @@ impl ComputeWorker {
             if bytes.is_empty() || bytes.len() > preparation_worker.payload_limit() {
                 return Err(anyhow!("OCR payload exceeds allowed size"));
             }
-            let key = content_key(&bytes, &preparation_type);
+            let key = device_content_key(&bytes, &preparation_type, &preparation_provider);
             let cached = preparation_worker
                 .retained
                 .lock()
@@ -421,6 +555,12 @@ impl ComputeWorker {
         .await
         .context("OCR input preparation failed")??;
         if let Some(value) = cached {
+            if requested_class
+                .as_deref()
+                .is_some_and(|class| value["task_class"].as_str() != Some(class))
+            {
+                return Err(anyhow!("OCR task class differs from actual input"));
+            }
             self.retained_hits.fetch_add(1, Ordering::Relaxed);
             return Ok(value);
         }
@@ -431,7 +571,7 @@ impl ComputeWorker {
                 load.admission()
             ));
         }
-        if self.config.execution_provider == "coreml"
+        if provider == "coreml"
             && load
                 .apple_gpu_utilization_percent
                 .is_none_or(|n| n > self.config.max_gpu_utilization_percent.min(100) as f64)
@@ -440,7 +580,7 @@ impl ComputeWorker {
                 "Apple GPU is busy or its native load is unavailable"
             ));
         }
-        let gpu = if self.config.execution_provider == "cuda" {
+        let gpu = if provider == "cuda" {
             let gpu = self.probe_gpu(true).await?;
             let admission = self.gpu_admission(&gpu);
             if admission != "available" {
@@ -451,10 +591,16 @@ impl ComputeWorker {
             None
         };
         let worker = Arc::clone(self);
+        // Prepare the required GPU environment before a first CPU override;
+        // CPU sessions explicitly opt out, future accelerator sessions inherit it.
         let engine = Arc::clone(
-            self.engine
-                .as_ref()
-                .ok_or_else(|| anyhow!("OCR engine unavailable"))?,
+            (if provider == "cpu" {
+                &self.cpu_engine
+            } else {
+                &self.engine
+            })
+            .as_ref()
+            .ok_or_else(|| anyhow!("OCR engine unavailable"))?,
         );
         // The permit belongs to the native job, not the waiting HTTP request.
         // Timeout/disconnection cannot admit an overlapping native inference.
@@ -476,6 +622,27 @@ impl ComputeWorker {
             let path = directory.path().join(format!("input.{extension}"));
             fs::write(&path, bytes).context("store worker input")?;
             #[cfg(feature = "ocr")]
+            let dimensions = if extension != "pdf" {
+                image::image_dimensions(&path).ok()
+            } else {
+                None
+            };
+            #[cfg(not(feature = "ocr"))]
+            let dimensions: Option<(u32, u32)> = None;
+            let descriptor = mesh_core::placement::TaskDescriptor {
+                input_type: extension.clone(),
+                input_bytes: fs::metadata(&path)?.len(),
+                width: dimensions.map(|v| v.0),
+                height: dimensions.map(|v| v.1),
+            };
+            let task_class = descriptor.task_class();
+            if requested_class
+                .as_deref()
+                .is_some_and(|class| task_class.as_deref() != Some(class))
+            {
+                return Err(anyhow!("OCR task class differs from actual input"));
+            }
+            #[cfg(feature = "ocr")]
             let image_pixels = if extension != "pdf" {
                 image::image_dimensions(&path).ok().and_then(|(w, h)| {
                     let pixels = w as u64 * h as u64;
@@ -489,19 +656,44 @@ impl ComputeWorker {
             let warm_model = engine.native_initialized();
             let text = if extension == "pdf" {
                 #[cfg(feature = "ocr")]
-                let text = engine.extract_pdf_in(&path, directory.path())?;
+                let text = engine
+                    .extract_pdf_in(&path, directory.path())
+                    .map_err(|error| {
+                        tracing::warn!(stage = "pdf_pipeline", provider = %provider,
+                        input_bytes = descriptor.input_bytes,
+                        elapsed_ms = inference_started.elapsed().as_millis() as u64,
+                        "Native OCR PDF pipeline failed");
+                        error
+                    })?;
                 #[cfg(not(feature = "ocr"))]
                 let text = engine.extract_pdf(&path)?;
                 text
             } else {
-                engine
-                    .extract_image(&path)
-                    .map_err(classify_image_failure)?
+                engine.extract_image(&path).map_err(|error| {
+                    tracing::warn!(stage = image_failure_stage(&error), provider = %provider,
+                        input_bytes = descriptor.input_bytes,
+                        elapsed_ms = inference_started.elapsed().as_millis() as u64,
+                        "Native OCR image pipeline failed");
+                    classify_image_failure(error)
+                })?
             };
             let result = json!({"text": text, "host_id": worker.host_id, "gpu_uuid": gpu.as_ref().map(|gpu| &gpu.uuid),
-                "gpu_name": gpu.as_ref().map(|gpu| &gpu.name), "backend": worker.config.execution_provider});
+                "gpu_name": gpu.as_ref().map(|gpu| &gpu.name), "backend": provider, "task_class": task_class});
             if serde_json::to_vec(&result)?.len() > worker.max_output_bytes {
                 return Err(anyhow!("OCR output exceeds worker response limit"));
+            }
+            #[cfg(feature = "ocr")]
+            if let Some(class) = task_class.as_deref() {
+                if let Ok(mut ratings) = worker.ratings.lock() {
+                    ratings.record(
+                        &provider,
+                        class,
+                        inference_started.elapsed().as_secs_f64(),
+                        warm_model,
+                        observed_at(),
+                        Instant::now(),
+                    );
+                }
             }
             #[cfg(feature = "ocr")]
             if let Some(pixels) = image_pixels.filter(|_| warm_model) {
@@ -524,10 +716,40 @@ impl ComputeWorker {
         tokio::time::timeout(self.timeout.saturating_sub(started.elapsed()), job)
             .await
             .map_err(|_| {
+                tracing::warn!(stage = "wait_deadline", provider = %self.config.execution_provider,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "OCR waiter expired; native job retains its host permit");
                 anyhow!("GPU OCR deadline exceeded; worker remains busy until native job finishes")
             })?
             .context("GPU OCR job failed")?
     }
+}
+
+fn accelerator_utilization(status: &Value) -> Value {
+    status
+        .get("gpu_utilization_percent")
+        .filter(|v| {
+            v.as_f64()
+                .is_some_and(|n| n.is_finite() && (0.0..=100.0).contains(&n))
+        })
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+fn image_failure_stage(error: &anyhow::Error) -> &'static str {
+    // Fixed categories only. Error.message, file paths, payloads and OCR text
+    // never enter the diagnostic. Opaque inference failures remain unattributed.
+    #[cfg(feature = "ocr")]
+    for source in error.chain() {
+        if source.downcast_ref::<png::DecodingError>().is_some() {
+            return "png_decode";
+        }
+        if source.downcast_ref::<image::ImageError>().is_some() {
+            return "image_decode";
+        }
+    }
+    let _ = error;
+    "native_ocr"
 }
 
 fn classify_image_failure(error: anyhow::Error) -> anyhow::Error {
@@ -665,7 +887,109 @@ fn observed_at() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn per_device_gpu_load_never_substitutes_host_cpu_load() {
+        assert_eq!(
+            super::accelerator_utilization(
+                &serde_json::json!({"utilization_percent":90,"gpu_utilization_percent":20})
+            ),
+            20
+        );
+        assert_eq!(
+            super::accelerator_utilization(&serde_json::json!({"utilization_percent":90})),
+            serde_json::Value::Null
+        );
+    }
+    #[cfg(feature = "ocr")]
+    #[tokio::test]
+    async fn cpu_admission_cannot_promise_a_failed_provider_prerequisite() {
+        let mut worker = super::ComputeWorker::new(
+            "test".into(),
+            crate::config::ComputeConfig {
+                enabled: true,
+                execution_provider: "cpu".into(),
+                ..crate::config::ComputeConfig::default()
+            },
+            crate::config::OcrConfig::default(),
+            4096,
+        );
+        assert!(worker.cpu_engine.is_some());
+        worker.accelerator_environment_ready = false; // Local state regression only.
+        let worker = std::sync::Arc::new(worker);
+        assert_eq!(
+            worker.status().await["devices"][0]["admission"],
+            "provider_environment_unavailable"
+        );
+        let error = worker
+            .extract(super::OcrExtractRequest {
+                content_base64: "!".into(),
+                input_type: "png".into(),
+                filename: None,
+                execution_provider: Some("cpu".into()),
+                task_class: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("provider environment prerequisite"));
+    }
+    #[test]
+    fn native_failure_diagnostic_never_projects_messages_or_paths() {
+        let error = anyhow::anyhow!("Authorization: Bearer private /Users/private/input.png");
+        assert_eq!(super::image_failure_stage(&error), "native_ocr");
+        #[cfg(feature = "ocr")]
+        assert_eq!(
+            super::image_failure_stage(&anyhow::Error::new(png::DecodingError::LimitsExceeded)),
+            "png_decode"
+        );
+    }
     use super::*;
+    #[test]
+    fn cpu_gpu_retained_receipts_are_separate_even_for_identical_content() {
+        assert_ne!(
+            device_content_key(b"same input", "png", "cpu"),
+            device_content_key(b"same input", "png", "cuda")
+        );
+        assert_ne!(
+            device_content_key(b"same input", "png", "cpu"),
+            device_content_key(b"same input", "png", "coreml")
+        );
+        let request: OcrExtractRequest = serde_json::from_value(json!({"input_type":"png","content_base64":"AA==","execution_provider":"cpu","task_class":"ocr:image:png:pixels:4mp"})).unwrap();
+        assert_eq!(request.execution_provider.as_deref(), Some("cpu"));
+        assert!(serde_json::from_value::<OcrExtractRequest>(
+            json!({"input_type":"png","content_base64":"AA==","host_id":"foreign"})
+        )
+        .is_err());
+    }
+    #[tokio::test]
+    async fn unconfigured_device_is_rejected_before_decoding_or_any_model() {
+        let worker = Arc::new(ComputeWorker::new(
+            "worker".into(),
+            ComputeConfig {
+                enabled: true,
+                execution_provider: "cpu".into(),
+                ..Default::default()
+            },
+            OcrConfig::default(),
+            128 * 1024,
+        ));
+        let error = worker
+            .extract(OcrExtractRequest {
+                content_base64: "!".into(),
+                input_type: "png".into(),
+                filename: None,
+                execution_provider: Some("cuda".into()),
+                task_class: None,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "requested OCR execution provider is not configured on this host"
+        );
+        assert_eq!(worker.slots.available_permits(), 1);
+    }
 
     #[test]
     fn retained_results_match_content_and_type_without_extending_ttl() {
@@ -735,6 +1059,8 @@ mod tests {
                 content_base64: "!!!!".into(),
                 input_type: "png".into(),
                 filename: None,
+                execution_provider: None,
+                task_class: None,
             })
             .await
             .unwrap_err();
@@ -818,6 +1144,8 @@ mod tests {
             content_base64: "YWJj".into(),
             input_type: "png".into(),
             filename: Some("../../a.png".into()),
+            execution_provider: None,
+            task_class: None,
         };
         assert!(validate_request(&request, 32).is_err());
         request.filename = Some("a.png".into());
