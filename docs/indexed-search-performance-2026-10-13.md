@@ -215,3 +215,56 @@ Evidence under `.tmp/search-latency-fix-20261013/full-coverage/`:
 All earlier failed/partial requests and failed verifier/setup attempts remain
 separate historical failures. No old model, OCR, notification or business input
 was replayed; no shared native/controller service was restarted.
+
+### Media recovery and measured worker placement — subsequent checkpoint
+
+The earlier 1,142 count is a historical snapshot. The retained, individually
+identified recovery cohort contains 1,036 inputs; the difference of 106 has no
+retained identity mapping and is not silently declared covered. A read-only
+SQLite audit at Unix time 1791922354 found:
+
+| Original cohort disposition | Inputs | Verification |
+| --- | ---: | --- |
+| Nonempty extraction and matching FTS document | 1,002 | Cache/FTS text equal; file size and modification generation still match |
+| Durable pending OCR | 10 | PNG inputs remain in the application queue |
+| Existing file without extraction cache | 24 | Reason is not established; absence from the queue is not proof of complete extraction |
+
+The verified nonempty group comprises 970 PNG, 31 PDF and one JPG. Header-only
+inspection of the 24 unresolved files found one zero-byte file and 23 other
+inputs. No new OCR was submitted to reinterpret their previous outcomes.
+The full-recovery marker remains set. **Complete media coverage is still open.**
+
+Shared-core task placement now uses an initially unknown (`None`) performance
+estimate, followed by successful native jobs per second for the same task class
+and execution provider. CPU and accelerator load are separate; host memory,
+CPU and task admission still apply, and one inference reservation per host is
+retained. Hardware estimates do not substitute for a task measurement.
+
+The reviewed worker source passed 139 pure library checks on native server-44:
+14.74 seconds for tests, 127.095 seconds including compilation, peak RSS/cgroup
+charge 795,013,120 bytes, zero swap/OOM events and verified natural cleanup.
+These checks establish source behavior, not live distributed queue completion.
+
+The corresponding M1 `ocr-coreml` artifact compiled in 232.964 seconds with
+sampled peak owned RSS 836,599,808 bytes. Expected duration was 180 seconds,
+with a separate 1,800-second emergency limit; crossing the estimate did not
+terminate the healthy build. Its memory observation is not a kernel quota.
+The controlled Grep-only activation preserved the launch plist, model hashes,
+existing configuration except three captcha-directory exclusions, and rollback.
+Before switching, active jobs and retained results were both zero. Its wrapper
+now enables the fixed `grepmesh::compute=warn` diagnostic target.
+
+The existing configured caller reached this worker through the registered
+HTTP singleton route in 0.635 seconds. The native response contained separate
+CPU and CoreML devices, initially unknown performance, CPU utilization 82.84%
+and accelerator utilization 19%, with current host admission available.
+This is actual protocol/device metadata evidence; ordinary queue completion
+on all three workers remains a separate acceptance gate. Historical OCR
+controls and queued legacy jobs were not resubmitted.
+
+Evidence under `.tmp/ocr-queue-completion-20261013/`:
+`cohort-audit-device0d-m1-installed.json`,
+`terminal24-header-classification.json`,
+`task-rating-source4/{input-manifest,unit-result}.json`,
+`m1-device0d-build-result.json`, `m1-device0d-activation-receipt.json`, and
+`original-caller-m1-device0d-status.json`.
