@@ -254,7 +254,7 @@ impl ComputeClient {
             self.statuses
                 .insert(peer_key(&peer), (Instant::now(), status.clone()));
             // Leave budget for another eligible candidate after a failed worker.
-            let attempt_deadline = deadline.min(Instant::now() + Duration::from_secs(45));
+            let attempt_deadline = ocr_attempt_deadline(input_type, Instant::now(), deadline);
             let result = self.call(&peer, "ocr_extract", arguments.clone(), attempt_deadline);
             let result = match result {
                 Ok(value) => value,
@@ -471,6 +471,17 @@ pub(crate) fn mesh_input_limit(configured: u64) -> u64 {
         configured.min(MAX_INPUT_BYTES)
     }
 }
+fn ocr_attempt_deadline(input_type: &str, now: Instant, deadline: Instant) -> Instant {
+    // A PDF is one whole-document job. Cutting it off at 45 seconds can
+    // discard a valid result while its native worker still owns the slot.
+    // Keep the existing overall budget; early errors can still fall back.
+    if input_type == "pdf" {
+        deadline
+    } else {
+        deadline.min(now + Duration::from_secs(45))
+    }
+}
+
 fn unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -481,6 +492,28 @@ fn unix_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pdf_attempt_keeps_its_existing_whole_document_budget() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(90);
+        assert_eq!(ocr_attempt_deadline("pdf", now, deadline), deadline);
+    }
+
+    #[test]
+    fn image_attempt_keeps_fallback_time_and_no_attempt_extends_its_budget() {
+        let now = Instant::now();
+        assert_eq!(
+            ocr_attempt_deadline("png", now, now + Duration::from_secs(90)),
+            now + Duration::from_secs(45)
+        );
+        for input_type in ["png", "pdf"] {
+            let short = now + Duration::from_secs(3);
+            assert_eq!(ocr_attempt_deadline(input_type, now, short), short);
+            let expired = now - Duration::from_secs(1);
+            assert_eq!(ocr_attempt_deadline(input_type, now, expired), expired);
+        }
+    }
 
     #[test]
     fn only_confirmed_input_rejection_is_terminal() {
