@@ -97,9 +97,12 @@ reserve or authorization to alter another tenant. Recheck88 >=8GiB reserve
 and hostmemory/IO fullavg10<1 before each step.
 
 Hosted native release CI is isolated from fleet processes. Keep at most one
-platform job active and Cargo jobs1. Linux/macOS have a20-minute job deadline;
-Windows has a40-minute deadline after the measured cold jobs1 build exceeded
-20minutes on run37692308698 while compilation still progressed. The isolated
+platform job active and Cargo jobs1. Cold Linux/macOS builds have an expected
+20-minute duration and a separate 200-minute emergency limit. Windows has an
+expected 40-minute duration; its tenfold emergency allowance is capped at the
+GitHub-hosted platform maximum of 360 minutes. Crossing an estimate never stops
+a healthy progressing build. The original 20/40-minute hard limits are historical:
+Intel run38458030807 was terminated at20 minutes while compiling. The isolated
 GitHub-hosted windows-latest VM has4vCPU/16GB RAM/14GB SSD; jobs1 reserves
 CPU capacity for runner/OS. No fleet capacity or runtime limit changes.
 Keep the full native features and packaging/search acceptance gates; reuse already

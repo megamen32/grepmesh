@@ -14,7 +14,9 @@ jobs:
   build:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: ${{ matrix.target == 'windows-x86_64' && 40 || 20 }}
+    # Expected cold durations (20m Unix / 40m Windows) are nonfatal.
+    # Emergency = 10x expected, capped by GitHub-hosted runners' 360m maximum.
+    timeout-minutes: ${{ matrix.target == 'windows-x86_64' && 360 || 200 }}
     env:
       CARGO_BUILD_JOBS: "1"
     strategy:

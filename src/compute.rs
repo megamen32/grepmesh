@@ -671,6 +671,8 @@ impl ComputeWorker {
             } else {
                 engine.extract_image(&path).map_err(|error| {
                     tracing::warn!(stage = image_failure_stage(&error), provider = %provider,
+                        decoder_class = image_decoder_failure_class(&error),
+                        decoder_io_kind = image_decoder_io_kind(&error),
                         input_bytes = descriptor.input_bytes,
                         elapsed_ms = inference_started.elapsed().as_millis() as u64,
                         "Native OCR image pipeline failed");
@@ -750,6 +752,40 @@ fn image_failure_stage(error: &anyhow::Error) -> &'static str {
     }
     let _ = error;
     "native_ocr"
+}
+
+fn image_decoder_failure_class(error: &anyhow::Error) -> &'static str {
+    // Only public typed variants, never Format/Io messages or private input data.
+    #[cfg(feature = "ocr")]
+    for source in error.chain() {
+        if let Some(error) = source.downcast_ref::<png::DecodingError>() {
+            return match error {
+                png::DecodingError::IoError(_) => "io",
+                png::DecodingError::Format(_) => "format",
+                png::DecodingError::Parameter(_) => "parameter",
+                png::DecodingError::LimitsExceeded => "limits",
+            };
+        }
+    }
+    let _ = error;
+    "unknown"
+}
+
+fn image_decoder_io_kind(error: &anyhow::Error) -> &'static str {
+    #[cfg(feature = "ocr")]
+    for source in error.chain() {
+        if let Some(png::DecodingError::IoError(error)) = source.downcast_ref::<png::DecodingError>() {
+            return match error.kind() {
+                std::io::ErrorKind::UnexpectedEof => "unexpected_eof",
+                std::io::ErrorKind::InvalidData => "invalid_data",
+                std::io::ErrorKind::PermissionDenied => "permission_denied",
+                std::io::ErrorKind::Interrupted => "interrupted",
+                _ => "other_io",
+            };
+        }
+    }
+    let _ = error;
+    "not_io"
 }
 
 fn classify_image_failure(error: anyhow::Error) -> anyhow::Error {
@@ -938,11 +974,29 @@ mod tests {
     fn native_failure_diagnostic_never_projects_messages_or_paths() {
         let error = anyhow::anyhow!("Authorization: Bearer private /Users/private/input.png");
         assert_eq!(super::image_failure_stage(&error), "native_ocr");
+        assert_eq!(super::image_decoder_failure_class(&error), "unknown");
+        assert_eq!(super::image_decoder_io_kind(&error), "not_io");
         #[cfg(feature = "ocr")]
         assert_eq!(
             super::image_failure_stage(&anyhow::Error::new(png::DecodingError::LimitsExceeded)),
             "png_decode"
         );
+        #[cfg(feature = "ocr")]
+        {
+            let limits = anyhow::Error::new(png::DecodingError::LimitsExceeded)
+                .context("private context must not be logged");
+            assert_eq!(super::image_decoder_failure_class(&limits), "limits");
+            let io = anyhow::Error::new(png::DecodingError::IoError(std::io::Error::other(
+                "Authorization: Bearer private /Users/private/input.png",
+            )));
+            assert_eq!(super::image_decoder_failure_class(&io), "io");
+            assert_eq!(super::image_decoder_io_kind(&io), "other_io");
+            let eof = anyhow::Error::new(png::DecodingError::IoError(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "private source message",
+            )));
+            assert_eq!(super::image_decoder_io_kind(&eof), "unexpected_eof");
+        }
     }
     use super::*;
     #[test]
