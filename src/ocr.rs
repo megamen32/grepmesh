@@ -10,7 +10,7 @@ use oar_ocr::{
     utils::load_image,
 };
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -47,6 +47,7 @@ pub struct OcrEngine {
     active_paths: Mutex<BTreeSet<PathBuf>>,
     last_retry: Mutex<Instant>,
     retry_cursor: Mutex<Option<PathBuf>>,
+    retry_after: Mutex<BTreeMap<PathBuf, Instant>>,
     metadata_retry_cursor: Mutex<Option<PathBuf>>,
     deferred_overflow: AtomicBool,
     pending_store: Mutex<Option<PersistentIndex>>,
@@ -141,6 +142,7 @@ impl OcrEngine {
                     .unwrap_or_else(Instant::now),
             ),
             retry_cursor: Mutex::new(None),
+            retry_after: Mutex::new(BTreeMap::new()),
             metadata_retry_cursor: Mutex::new(None),
             deferred_overflow: AtomicBool::new(false),
             pending_store: Mutex::new(None),
@@ -180,10 +182,25 @@ impl OcrEngine {
     }
 
     pub(crate) fn retry_poll_interval(&self) -> Duration {
-        if self.retry_fast.load(Ordering::Relaxed) {
+        let Ok(paths) = self.deferred.lock() else {
+            return Duration::from_secs(30);
+        };
+        let Ok(after) = self.retry_after.lock() else {
+            return Duration::from_secs(30);
+        };
+        let now = Instant::now();
+        if paths
+            .iter()
+            .any(|path| after.get(path).is_none_or(|at| *at <= now))
+        {
             Duration::from_secs(1)
         } else {
-            Duration::from_secs(30)
+            after
+                .values()
+                .map(|at| at.saturating_duration_since(now))
+                .min()
+                .unwrap_or(Duration::from_secs(30))
+                .clamp(Duration::from_secs(1), Duration::from_secs(30))
         }
     }
 
@@ -238,6 +255,9 @@ impl OcrEngine {
                 }
             }
             paths.remove(path);
+            if let Ok(mut after) = self.retry_after.lock() {
+                after.remove(path);
+            }
             if let Ok(mut undurable) = self.undurable.lock() {
                 undurable.remove(path);
                 self.pending_store_healthy.store(
@@ -344,12 +364,9 @@ impl OcrEngine {
         let Ok(mut last_retry) = self.last_retry.lock() else {
             return Vec::new();
         };
-        let cooldown = if self.retry_fast.load(Ordering::Relaxed) {
-            Duration::from_secs(1)
-        } else {
-            RETRY_COOLDOWN
-        };
-        if last_retry.elapsed() < cooldown {
+        // Only throttle dispatch observation itself. Unrelated files must not
+        // inherit another input's resource/transport retry delay.
+        if last_retry.elapsed() < Duration::from_secs(1) {
             return Vec::new();
         }
         let Ok(paths) = self.deferred.lock() else {
@@ -369,17 +386,28 @@ impl OcrEngine {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let Ok(mut after) = self.retry_after.lock() else {
+            return Vec::new();
+        };
+        let now = Instant::now();
         let mut unique = BTreeSet::new();
         let next: Vec<_> = ordered
             .into_iter()
             .chain(paths.iter())
-            .filter(|path| !in_flight.contains(*path) && unique.insert((*path).clone()))
+            .filter(|path| {
+                !in_flight.contains(*path)
+                    && after.get(*path).is_none_or(|at| *at <= now)
+                    && unique.insert((*path).clone())
+            })
             .take(max.min(MAX_PARALLEL_OCR))
             .cloned()
             .collect();
         if let Some(path) = next.last() {
             *last_retry = Instant::now();
             self.retry_fast.store(false, Ordering::Relaxed);
+            for selected in &next {
+                after.insert(selected.clone(), now + RETRY_COOLDOWN);
+            }
             *cursor = Some(path.clone());
         }
         next
@@ -687,6 +715,16 @@ impl OcrEngine {
         };
         if result.is_err() {
             self.defer_path(path)?;
+            if result.as_ref().is_err_and(|error| {
+                error.is::<OcrRecognitionFailure>()
+                    || error.is::<crate::compute_client::InvalidOcrInput>()
+            }) {
+                // A finished input failure has a finite generation budget;
+                // continue useful work without an outage backoff.
+                if let Ok(mut after) = self.retry_after.lock() {
+                    after.insert(path.to_path_buf(), Instant::now() + Duration::from_secs(1));
+                }
+            }
         }
         // The index owns durable acknowledgement and clears failures only
         // in the transaction committing a successful document.
@@ -1032,7 +1070,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_retry_drains_serially_and_failure_restores_backoff() {
+    fn failed_input_backoff_does_not_delay_other_queue_files() {
         let ocr = OcrEngine::new(OcrConfig {
             backend: "mesh".into(),
             ..OcrConfig::default()
@@ -1047,9 +1085,14 @@ mod tests {
         assert_eq!(ocr.retry_poll_interval(), Duration::from_secs(1));
         *ocr.last_retry.lock().unwrap() = Instant::now() - Duration::from_millis(1100);
         assert_eq!(ocr.take_retry_paths(10), vec![PathBuf::from("b.png")]);
-        // No durable ACK: the same positive failure backoff remains active.
-        assert_eq!(ocr.retry_poll_interval(), Duration::from_secs(30));
+        // b remains pending and cooling down, while c can use a free worker.
+        assert_eq!(ocr.retry_poll_interval(), Duration::from_secs(1));
         assert!(ocr.take_retry_paths(10).is_empty());
+        *ocr.last_retry.lock().unwrap() = Instant::now() - Duration::from_millis(1100);
+        assert_eq!(ocr.take_retry_paths(10), vec![PathBuf::from("c.png")]);
+        *ocr.last_retry.lock().unwrap() = Instant::now() - Duration::from_millis(1100);
+        assert!(ocr.take_retry_paths(10).is_empty());
+        assert!(ocr.retry_poll_interval() > Duration::from_secs(1));
         assert_eq!(ocr.deferred_count(), 2);
     }
 
