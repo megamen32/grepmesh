@@ -15,6 +15,13 @@
     <key>PATH</key>
     <string>@GREPMESH_PATH@</string>
   </dict>
+  <key>LimitLoadToSessionType</key>
+  <array>
+    <string>Aqua</string>
+    <string>Background</string>
+  </array>
+  <key>SessionCreate</key>
+  <true/>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

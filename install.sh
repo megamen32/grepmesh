@@ -111,9 +111,18 @@ else
     -e "s|@GREPMESH_PATH@|$prefix/bin:/usr/local/bin:/usr/bin:/bin|g" \
     -e "s|@GREPMESH_LOG@|$config_dir/grepmesh.log|g" \
     "$tmp/grepmesh-user.plist" > "$plist"
-  launchctl bootout "gui/$(id -u)" "$plist" >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/$(id -u)" "$plist"
-  launchctl kickstart -k "gui/$(id -u)/com.grepmesh.mcp"
+  # Retain an already loaded GrepMesh domain; SSH-only Macs have no GUI domain.
+  grepmesh_uid="$(id -u)"
+  if launchctl print "user/$grepmesh_uid/com.grepmesh.mcp" >/dev/null 2>&1; then
+    grepmesh_domain="user/$grepmesh_uid"
+  elif launchctl print "gui/$grepmesh_uid" >/dev/null 2>&1; then
+    grepmesh_domain="gui/$grepmesh_uid"
+  else
+    grepmesh_domain="user/$grepmesh_uid"
+  fi
+  launchctl bootout "$grepmesh_domain" "$plist" >/dev/null 2>&1 || true
+  launchctl bootstrap "$grepmesh_domain" "$plist"
+  launchctl kickstart -k "$grepmesh_domain/com.grepmesh.mcp"
   state="started"
 fi
 
