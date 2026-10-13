@@ -569,13 +569,38 @@ impl LocalBackend {
         path_globs: Vec<String>,
         root_names: Vec<String>,
     ) -> Result<SearchOutcome> {
+        self.search_text_with_overall_timeout(
+            query,
+            limit,
+            context_lines,
+            mode,
+            path_globs,
+            root_names,
+            Duration::from_millis(self.limits.overall_timeout_ms),
+        )
+        .await
+    }
+
+    /// Keep the interactive default separate from an already-admitted finite
+    /// background job's deadline. No new caller-controlled timeout is exposed.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn search_text_with_overall_timeout(
+        &self,
+        query: &str,
+        limit: usize,
+        context_lines: usize,
+        mode: SearchMode,
+        path_globs: Vec<String>,
+        root_names: Vec<String>,
+        overall_timeout: Duration,
+    ) -> Result<SearchOutcome> {
         let host_id = self.host_id.clone();
         let roots = self.selected_roots(&root_names)?;
         let query = query.to_string();
         let exclude_globs = self.exclude_globs.clone();
         let max_file_bytes = self.limits.max_file_bytes;
         let max_response_bytes = self.limits.max_response_bytes;
-        let deadline = Instant::now() + Duration::from_millis(self.limits.overall_timeout_ms);
+        let deadline = Instant::now() + overall_timeout;
         let total_roots = roots.len();
         let mut hits = Vec::new();
         let mut truncated = false;

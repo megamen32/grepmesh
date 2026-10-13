@@ -900,13 +900,14 @@ impl MeshService {
                 {
                     let outcome = service
                         .local
-                        .search_text_bounded(
+                        .search_text_with_overall_timeout(
                             &query,
                             limit,
                             context_lines,
                             mode.clone(),
                             path_globs.clone(),
                             roots.clone(),
+                            overall_timeout,
                         )
                         .await?;
                     let truncated = outcome.truncated;
@@ -1313,6 +1314,37 @@ fn normalize_host_statuses(statuses: &mut [PerHostStatus], response_partial: boo
 mod tests {
     use super::*;
     use crate::backend::HostSearchState;
+
+    #[tokio::test]
+    async fn background_deadline_reaches_local_scan_without_extending_interactive_calls() {
+        // Focused integration, expected <1s/max5s. Real rg and local files;
+        // zero interactive time makes the incorrect deadline reset deterministic.
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("needle.txt"), "deadline needle\n").unwrap();
+        let limits = crate::config::LimitsConfig {
+            overall_timeout_ms: 0,
+            ..Default::default()
+        };
+        let local = LocalBackend {
+            host_id: "test".into(),
+            root: temp.path().into(),
+            root_paths: BTreeMap::from([("local".into(), vec![temp.path().into()])]),
+            limits,
+            exclude_globs: vec![],
+            index: crate::index::IndexManager::disabled(),
+        };
+        let service = MeshService::new(local, Topology::new("test", vec![]));
+        let args = || serde_json::from_value::<SearchArgs>(json!({
+            "query":"deadline needle", "hosts":["test"], "mode":"literal",
+            "max_matches":5, "context_lines":0
+        })).unwrap();
+        let result = service.call_search_with_overall_timeout(args(), Duration::from_secs(5)).await.unwrap();
+        assert_eq!(result.data["partial"], false);
+        assert_eq!(result.data["results"].as_array().unwrap().len(), 1);
+        let interactive = service.call_search(args()).await.unwrap();
+        assert_eq!(interactive.data["partial"], true);
+        assert!(interactive.data["results"].as_array().unwrap().is_empty());
+    }
 
     fn hit(host: &str, path: &str, lines: &[(usize, &str)]) -> SearchHit {
         SearchHit {
