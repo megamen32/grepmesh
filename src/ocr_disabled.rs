@@ -7,6 +7,14 @@ pub struct OcrEngine;
 pub(crate) struct RetryPathLease;
 
 impl OcrEngine {
+    pub(crate) fn skip_recognition_for_version(
+        &self,
+        _path: &Path,
+        _size: u64,
+        _mtime_ns: u128,
+    ) -> Result<bool> {
+        Ok(false)
+    }
     pub(crate) fn is_in_flight(&self, _path: &Path) -> bool {
         false
     }

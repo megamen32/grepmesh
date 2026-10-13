@@ -26,6 +26,19 @@ const MAX_PEERS: usize = 8;
 // from this index's three clients while leaving inference fully parallel.
 static STATUS_PROBE_LOCK: Mutex<()> = Mutex::new(());
 pub(crate) const MAX_PARALLEL_OCR: usize = 3;
+pub(crate) const MAX_RECOGNITION_FAILURES: usize = 4;
+
+/// A completed native processing failure, never admission or transport loss.
+#[derive(Debug)]
+pub(crate) struct OcrRecognitionFailure {
+    pub attempts: usize,
+}
+impl std::fmt::Display for OcrRecognitionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OCR processing failed")
+    }
+}
+impl std::error::Error for OcrRecognitionFailure {}
 
 struct WorkerLease {
     host: String,
@@ -228,6 +241,20 @@ impl ComputeClient {
     }
 
     pub fn extract(&mut self, path: &Path, input_type: &str) -> Result<String> {
+        self.extract_with_budget(path, input_type, MAX_RECOGNITION_FAILURES)
+    }
+
+    pub(crate) fn extract_with_budget(
+        &mut self,
+        path: &Path,
+        input_type: &str,
+        remaining: usize,
+    ) -> Result<String> {
+        let remaining = remaining.min(MAX_RECOGNITION_FAILURES);
+        if remaining == 0 {
+            return Err(anyhow!(OcrRecognitionFailure { attempts: 0 }));
+        }
+        let mut recognition_failures = 0;
         if !matches!(
             input_type,
             "png" | "jpg" | "jpeg" | "webp" | "tif" | "tiff" | "bmp" | "gif" | "avif" | "pdf"
@@ -367,9 +394,23 @@ impl ComputeClient {
             let result = self.call(&peer, "ocr_extract", request, attempt_deadline);
             let result = match result {
                 Ok(value) => value,
-                Err(error) if error.is::<InvalidOcrInput>() => return Err(error),
+                Err(error) if error.is::<InvalidOcrInput>() => {
+                    return Err(anyhow!(OcrRecognitionFailure {
+                        attempts: recognition_failures + 1
+                    }));
+                }
                 Err(error) if error.is::<WorkerBusy>() => {
                     self.statuses.remove(&peer_key(&peer));
+                    continue;
+                }
+                Err(error) if error.is::<OcrRecognitionFailure>() => {
+                    recognition_failures += 1;
+                    self.mark_failed(&peer);
+                    if recognition_failures >= remaining {
+                        return Err(anyhow!(OcrRecognitionFailure {
+                            attempts: recognition_failures
+                        }));
+                    }
                     continue;
                 }
                 Err(error) => {
@@ -393,6 +434,11 @@ impl ComputeClient {
                 }
             }
             self.mark_failed(&peer);
+        }
+        if recognition_failures > 0 {
+            return Err(anyhow!(OcrRecognitionFailure {
+                attempts: recognition_failures
+            }));
         }
         Err(anyhow!(
             "mesh OCR deferred: no available OCR worker completed extraction"
@@ -533,6 +579,9 @@ impl std::fmt::Display for ConnectFailure {
 impl std::error::Error for ConnectFailure {}
 
 fn unwrap_result(body: Value) -> Result<Value> {
+    if body.pointer("/error/code").and_then(Value::as_i64) == Some(-32043) {
+        return Err(anyhow!(OcrRecognitionFailure { attempts: 1 }));
+    }
     if body.pointer("/error/code").and_then(Value::as_i64) == Some(-32042) {
         return Err(anyhow!(InvalidOcrInput));
     }
@@ -653,6 +702,39 @@ fn unix_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognition_marker_excludes_transport_busy_and_zero_budget_input() {
+        let error =
+            unwrap_result(json!({"error":{"code":-32043,"message":"private worker details"}}))
+                .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<OcrRecognitionFailure>()
+                .unwrap()
+                .attempts,
+            1
+        );
+        assert_eq!(error.to_string(), "OCR processing failed");
+        for body in [
+            json!({"error":{"code":-32000,"message":"GPU worker is busy"}}),
+            json!({"error":{"code":-32000,"message":"transport failed"}}),
+        ] {
+            assert!(!unwrap_result(body)
+                .unwrap_err()
+                .is::<OcrRecognitionFailure>());
+        }
+        let error = ComputeClient::new(OcrConfig::default())
+            .extract_with_budget(Path::new("missing-input.png"), "png", 0)
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<OcrRecognitionFailure>()
+                .unwrap()
+                .attempts,
+            0
+        );
+    }
 
     #[test]
     fn explicit_ocr_relay_replaces_a_stale_cached_route() {

@@ -183,6 +183,10 @@ impl PersistentIndex {
         connection
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS grepmesh_pending_ocr (path TEXT PRIMARY KEY);\
+                 CREATE TABLE IF NOT EXISTS grepmesh_ocr_attempts (\
+                   path TEXT PRIMARY KEY, size INTEGER NOT NULL, mtime_ns TEXT NOT NULL,\
+                   failures INTEGER NOT NULL CHECK(failures BETWEEN 0 AND 4)\
+                 );\
                  CREATE TABLE IF NOT EXISTS grepmesh_document_rows (\
                    path TEXT PRIMARY KEY,\
                    fts_rowid INTEGER NOT NULL UNIQUE\
@@ -334,6 +338,55 @@ impl PersistentIndex {
         }.map_err(|error| error.to_string())
     }
 
+    pub(crate) fn ocr_failure_count(
+        &self,
+        path: &Path,
+        size: u64,
+        mtime_ns: u128,
+    ) -> Result<usize, String> {
+        self.connection()?.query_row(
+            "SELECT COALESCE((SELECT failures FROM grepmesh_ocr_attempts WHERE path=?1 AND size=?2 AND mtime_ns=?3),0)",
+            params![path.display().to_string(), size as i64, mtime_ns.to_string()],
+            |row| row.get(0),
+        ).map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn record_ocr_failures(
+        &self,
+        path: &Path,
+        size: u64,
+        mtime_ns: u128,
+        attempts: usize,
+    ) -> Result<usize, String> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let key = path.display().to_string();
+        let (exists, count): (bool, usize) = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM grepmesh_ocr_attempts WHERE path=?1), (SELECT count(*) FROM grepmesh_ocr_attempts)",
+            params![key], |row| Ok((row.get(0)?,row.get(1)?)),
+        ).map_err(|error| error.to_string())?;
+        if !exists && count >= MAX_PENDING_OCR {
+            return Err("OCR failure ledger is full".into());
+        }
+        transaction.execute(
+            "INSERT INTO grepmesh_ocr_attempts(path,size,mtime_ns,failures) VALUES (?1,?2,?3,?4) \
+             ON CONFLICT(path) DO UPDATE SET size=excluded.size,mtime_ns=excluded.mtime_ns,failures= \
+             MIN(4, CASE WHEN size=excluded.size AND mtime_ns=excluded.mtime_ns THEN failures ELSE 0 END + excluded.failures)",
+            params![key,size as i64,mtime_ns.to_string(),attempts.min(4) as i64],
+        ).map_err(|error| error.to_string())?;
+        let failures = transaction
+            .query_row(
+                "SELECT failures FROM grepmesh_ocr_attempts WHERE path=?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(failures)
+    }
+
     fn replace_indexed_document(&self, document: &IndexedDocument) -> Result<(), String> {
         let mut connection = self.connection()?;
         let transaction = connection
@@ -378,7 +431,13 @@ impl PersistentIndex {
                     params![path],
                 )
                 .map_err(|error| error.to_string())?;
-            if acknowledged != 0 {
+            let cleared = transaction
+                .execute(
+                    "DELETE FROM grepmesh_ocr_attempts WHERE path=?1 AND size=?2 AND mtime_ns=?3",
+                    params![path, document.size as i64, document.mtime_ns.to_string()],
+                )
+                .map_err(|error| error.to_string())?;
+            if acknowledged != 0 || cleared != 0 {
                 transaction.commit().map_err(|error| error.to_string())?;
             }
             return Ok(());
@@ -432,6 +491,12 @@ impl PersistentIndex {
             .execute(
                 "DELETE FROM grepmesh_pending_ocr WHERE path=?1",
                 params![path],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM grepmesh_ocr_attempts WHERE path=?1 AND size=?2 AND mtime_ns=?3",
+                params![path, document.size as i64, document.mtime_ns.to_string()],
             )
             .map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())?;
@@ -2471,6 +2536,12 @@ fn walk(
                 }
             }
         } else if let Some(ocr) = context.ocr.filter(|ocr| ocr.is_image(path)) {
+            if ocr
+                .skip_recognition_for_version(path, size, mtime_ns)
+                .map_err(|error| error.to_string())?
+            {
+                return complete_empty_ocr(path, context, ocr, Some(&metadata));
+            }
             if metadata.len() == 0 {
                 return complete_empty_ocr(path, context, ocr, Some(&metadata));
             }
@@ -2492,6 +2563,14 @@ fn walk(
             }
         } else {
             let pdf_ocr = context.ocr.filter(|ocr| ocr.is_pdf(path));
+            if let Some(ocr) = pdf_ocr {
+                if ocr
+                    .skip_recognition_for_version(path, size, mtime_ns)
+                    .map_err(|error| error.to_string())?
+                {
+                    return complete_empty_ocr(path, context, ocr, Some(&metadata));
+                }
+            }
             let read_limit = pdf_ocr
                 .map(OcrEngine::max_image_bytes)
                 .unwrap_or(context.max_file_bytes);
@@ -2595,7 +2674,7 @@ fn walk(
     Ok(count)
 }
 
-fn metadata_mtime_ns(metadata: &fs::Metadata) -> u128 {
+pub(crate) fn metadata_mtime_ns(metadata: &fs::Metadata) -> u128 {
     metadata
         .modified()
         .unwrap_or(SystemTime::UNIX_EPOCH)
@@ -2685,6 +2764,93 @@ fn excluded(path: &Path, root: &Path, excludes: &GlobSet) -> bool {
 mod tests {
     #[cfg(feature = "ocr")]
     #[cfg(feature = "ocr")]
+    #[test]
+    fn ocr_failure_ledger_survives_reopen_and_resets_for_new_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("index.sqlite3");
+        let path = dir.path().join("retained.png");
+        fs::write(&path, b"preserved input").unwrap();
+        let store = PersistentIndex::open(database.clone()).unwrap();
+        assert_eq!(store.record_ocr_failures(&path, 14, 100, 2).unwrap(), 2);
+        drop(store);
+        let store = PersistentIndex::open(database).unwrap();
+        assert_eq!(store.ocr_failure_count(&path, 14, 100).unwrap(), 2);
+        assert_eq!(store.record_ocr_failures(&path, 14, 100, 1).unwrap(), 3);
+        assert_eq!(store.record_ocr_failures(&path, 14, 100, 1).unwrap(), 4);
+        assert_eq!(store.record_ocr_failures(&path, 14, 100, 5).unwrap(), 4);
+        store.remove_document(&path).unwrap();
+        assert_eq!(store.ocr_failure_count(&path, 14, 100).unwrap(), 4);
+        assert_eq!(fs::read(&path).unwrap(), b"preserved input");
+        assert_eq!(store.ocr_failure_count(&path, 14, 101).unwrap(), 0);
+        assert_eq!(store.record_ocr_failures(&path, 14, 101, 1).unwrap(), 1);
+        store
+            .replace_indexed_document(&IndexedDocument {
+                path: path.clone(),
+                size: 14,
+                mtime_ns: 101,
+                body: "recognized".into(),
+            })
+            .unwrap();
+        assert_eq!(store.ocr_failure_count(&path, 14, 101).unwrap(), 0);
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn ocr_failure_budget_stops_dispatch_and_rescan_without_deleting_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("retained.png");
+        fs::write(&path, b"original input").unwrap();
+        let store = PersistentIndex::open(dir.path().join("index.sqlite3")).unwrap();
+        let ocr = OcrEngine::new(OcrConfig {
+            backend: "mesh".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        ocr.attach_pending_store(store.clone()).unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        let size = metadata.len();
+        let mtime_ns = metadata_mtime_ns(&metadata);
+        // No available worker is a deferred transport/admission outcome, not a native failure.
+        assert!(ocr.extract_image(&path).is_err());
+        assert_eq!(store.ocr_failure_count(&path, size, mtime_ns).unwrap(), 0);
+        store.record_ocr_failures(&path, size, mtime_ns, 4).unwrap();
+        assert_eq!(ocr.extract_image(&path).unwrap(), "");
+        let matcher = compile_excludes(&[]).unwrap();
+        let (_, _, documents, _) = scan_directory_unit(
+            &path,
+            dir.path(),
+            &matcher,
+            0,
+            false,
+            None,
+            Some(&ocr),
+            Some(&store),
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(documents.is_empty());
+        assert!(store.load_pending_ocr().unwrap().0.is_empty());
+        assert_eq!(store.ocr_failure_count(&path, size, mtime_ns).unwrap(), 4);
+        assert_eq!(fs::read(&path).unwrap(), b"original input");
+        fs::write(&path, b"new larger generation").unwrap();
+        let (_, _, documents, _) = scan_directory_unit(
+            &path,
+            dir.path(),
+            &matcher,
+            0,
+            false,
+            None,
+            Some(&ocr),
+            Some(&store),
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(documents.is_empty());
+        assert_eq!(store.load_pending_ocr().unwrap().0, vec![path]);
+    }
+
     #[test]
     fn empty_result_cannot_acknowledge_a_newer_file_version() {
         let dir = tempfile::tempdir().unwrap();

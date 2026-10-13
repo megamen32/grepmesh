@@ -585,7 +585,45 @@ impl OcrEngine {
         self.extract_pdf_in(path, Path::new(".tmp/ocr"))
     }
 
+    pub(crate) fn skip_recognition_for_version(
+        &self,
+        path: &Path,
+        size: u64,
+        mtime_ns: u128,
+    ) -> Result<bool> {
+        let store = self
+            .pending_store
+            .lock()
+            .map_err(|_| anyhow!("OCR failure ledger lock unavailable"))?
+            .clone();
+        match store {
+            Some(store) => Ok(store
+                .ocr_failure_count(path, size, mtime_ns)
+                .map_err(anyhow::Error::msg)?
+                >= crate::compute_client::MAX_RECOGNITION_FAILURES),
+            None => Ok(false),
+        }
+    }
+
     fn extract_remote(&self, path: &Path, input_type: &str) -> Result<String> {
+        use crate::compute_client::{OcrRecognitionFailure, MAX_RECOGNITION_FAILURES};
+        let metadata = fs::metadata(path)?;
+        let size = metadata.len();
+        let mtime_ns = crate::index::metadata_mtime_ns(&metadata);
+        let store = self
+            .pending_store
+            .lock()
+            .map_err(|_| anyhow!("OCR failure ledger lock unavailable"))?
+            .clone();
+        let failures = match &store {
+            Some(store) => store
+                .ocr_failure_count(path, size, mtime_ns)
+                .map_err(anyhow::Error::msg)?,
+            None => 0,
+        };
+        if failures >= MAX_RECOGNITION_FAILURES {
+            return Ok(String::new());
+        }
         let result = (|| {
             let mut lease = MeshClientLease {
                 pool: &self.mesh,
@@ -601,21 +639,47 @@ impl OcrEngine {
                 .client
                 .as_mut()
                 .expect("client lease")
-                .extract(path, input_type)
+                .extract_with_budget(path, input_type, MAX_RECOGNITION_FAILURES - failures)
         })();
         let result = match result {
-            Err(error) if error.is::<crate::compute_client::InvalidOcrInput>() => {
-                // A confirmed undecodable image is terminal. The index still
-                // acknowledges an empty result only after its SQLite commit.
-                Ok(String::new())
+            Err(error)
+                if error.is::<crate::compute_client::InvalidOcrInput>()
+                    || error.is::<OcrRecognitionFailure>() =>
+            {
+                let attempts = error
+                    .downcast_ref::<OcrRecognitionFailure>()
+                    .map(|failure| failure.attempts)
+                    .unwrap_or(1);
+                let stable = fs::metadata(path)
+                    .map(|current| {
+                        current.len() == size
+                            && crate::index::metadata_mtime_ns(&current) == mtime_ns
+                    })
+                    .unwrap_or(false);
+                if stable {
+                    let total = match &store {
+                        Some(store) => store
+                            .record_ocr_failures(path, size, mtime_ns, attempts)
+                            .map_err(anyhow::Error::msg)?,
+                        None => failures.saturating_add(attempts),
+                    };
+                    if total >= MAX_RECOGNITION_FAILURES {
+                        tracing::info!(input = %path.display(), failures = total, "mesh OCR version skipped after processing failures");
+                        Ok(String::new())
+                    } else {
+                        Err(error)
+                    }
+                } else {
+                    Err(error)
+                }
             }
             result => result,
         };
         if result.is_err() {
             self.defer_path(path)?;
         }
-        // A successful GPU result is not durable until SQLite accepts it.
-        // Keep an existing deferred entry for the index's explicit ACK.
+        // The index owns durable acknowledgement and clears failures only
+        // in the transaction committing a successful document.
         result
     }
 
