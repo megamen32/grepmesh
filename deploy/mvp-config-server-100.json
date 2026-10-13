@@ -110,7 +110,10 @@
     "**/forensics_out/**",
     "**/captcha_dataset/**",
     "**/captcha-dataset/**",
-    "**/captcha_samples/**"
+    "**/captcha_samples/**",
+    "**/captcha_rejected/**",
+    "**/captcha-rejected/**",
+    "**/rutube/state/**/captcha_*/**"
   ],
   "topology_cache_path": "/var/lib/grepmesh-mcp/topology.json",
   "gptadmin_topology_url": "http://127.0.0.1:9001/mcp-relay/agents",

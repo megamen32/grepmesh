@@ -152,7 +152,10 @@
     "**/forensics_out/**",
     "**/captcha_dataset/**",
     "**/captcha-dataset/**",
-    "**/captcha_samples/**"
+    "**/captcha_samples/**",
+    "**/captcha_rejected/**",
+    "**/captcha-rejected/**",
+    "**/rutube/state/**/captcha_*/**"
   ],
   "stt": {
     "enabled": false,

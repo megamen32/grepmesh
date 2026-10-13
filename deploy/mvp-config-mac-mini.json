@@ -180,7 +180,10 @@
     "**/forensics_out/**",
     "**/captcha_dataset/**",
     "**/captcha-dataset/**",
-    "**/captcha_samples/**"
+    "**/captcha_samples/**",
+    "**/captcha_rejected/**",
+    "**/captcha-rejected/**",
+    "**/rutube/state/**/captcha_*/**"
   ],
   "index_enabled": false,
   "topology_cache_path": "/Users/roomhacker/.cache/grepmesh/topology.json",

@@ -108,7 +108,10 @@
     "**/forensics_out/**",
     "**/captcha_dataset/**",
     "**/captcha-dataset/**",
-    "**/captcha_samples/**"
+    "**/captcha_samples/**",
+    "**/captcha_rejected/**",
+    "**/captcha-rejected/**",
+    "**/rutube/state/**/captcha_*/**"
   ],
   "topology_cache_path": "/var/lib/grepmesh-mcp/topology.json",
   "gptadmin_topology_url": "https://u-f1102930.t.gptadmin.bezrabotnyi.com/mcp-relay/agents",
