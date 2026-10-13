@@ -739,11 +739,27 @@ impl PersistentIndex {
         Ok(connection)
     }
 
+    #[cfg(test)]
     fn visit_matching_documents(
         &self,
         connection: &Connection,
         query: &str,
         root: &Path,
+        deadline: Instant,
+        allow: impl FnMut(&Path) -> bool,
+        visit: impl FnMut(PathBuf, String) -> bool,
+    ) -> Result<bool, String> {
+        self.visit_matching_documents_with_paths(
+            connection, query, root, &[], deadline, allow, visit,
+        )
+    }
+
+    fn visit_matching_documents_with_paths(
+        &self,
+        connection: &Connection,
+        query: &str,
+        root: &Path,
+        path_globs: &[String],
         deadline: Instant,
         mut allow: impl FnMut(&Path) -> bool,
         mut visit: impl FnMut(PathBuf, String) -> bool,
@@ -765,17 +781,31 @@ impl PersistentIndex {
         let mut body_bytes = 0usize;
         const BODY_BUDGET: usize = 64 * 1024 * 1024;
         // Paths/row IDs first; never materialize global document bodies or rank-sort them.
-        let queries = [
-            "SELECT d.fts_rowid,d.path FROM grepmesh_documents f \
+        let names = exact_glob_basenames(path_globs);
+        let queries: Vec<(&str, String)> = if let Some(names) = names {
+            // A known filename must not first traverse global FTS postings.
+            // This is only a conservative prefilter; allow() still applies
+            // complete glob/root/exclusion semantics before loading a body.
+            names.into_iter().map(|name| (
+                "SELECT fts_rowid,path FROM grepmesh_document_rows \
+                 WHERE path>=?3 AND path<?4 AND substr(path,-length(?1))=?1 \
+                 UNION ALL SELECT fts_rowid,path FROM grepmesh_document_rows \
+                 WHERE path=?2 AND substr(path,-length(?1))=?1",
+                format!("{separator}{name}"),
+            )).collect()
+        } else {
+            vec![("SELECT d.fts_rowid,d.path FROM grepmesh_documents f \
              JOIN grepmesh_document_rows d ON d.fts_rowid=f.rowid \
-             WHERE f.body MATCH ?1 AND (d.path=?2 OR (d.path>=?3 AND d.path<?4))",
-            "SELECT fts_rowid,path FROM grepmesh_document_rows \
-             WHERE path LIKE ?1 ESCAPE '\\' AND (path=?2 OR (path>=?3 AND path<?4))",
-        ];
+             WHERE f.body MATCH ?1 AND (d.path=?2 OR (d.path>=?3 AND d.path<?4))", fts_query),
+             ("SELECT fts_rowid,path FROM grepmesh_document_rows \
+              WHERE path>=?3 AND path<?4 AND path LIKE ?1 ESCAPE '\\' \
+              UNION ALL SELECT fts_rowid,path FROM grepmesh_document_rows \
+              WHERE path=?2 AND path LIKE ?1 ESCAPE '\\'", pattern)]
+        };
         let mut body = connection.prepare(
             "SELECT body FROM grepmesh_documents WHERE rowid=?1 AND length(CAST(body AS BLOB))<=?2")
             .map_err(|e| e.to_string())?;
-        for (sql, term) in queries.iter().zip([fts_query, pattern]) {
+        for (sql, term) in queries {
             let mut statement = connection.prepare(sql).map_err(|e| e.to_string())?;
             let mut rows = statement
                 .query(params![term, root_text, prefix, upper])
@@ -1405,10 +1435,11 @@ impl IndexManager {
         };
         let mut hits = Vec::new();
         let mut parse_deadline = false;
-        let exhausted = persistent.visit_matching_documents(
+        let exhausted = persistent.visit_matching_documents_with_paths(
             &connection,
             query,
             root,
+            &positive,
             deadline,
             |path| {
                 if !path.starts_with(root) || excluded(path, root, &excludes) {
@@ -2482,6 +2513,25 @@ fn fts_literal_query(query: &str) -> String {
     format!("\"{}\"", query.replace('\"', "\"\""))
 }
 
+fn exact_glob_basenames(globs: &[String]) -> Option<BTreeSet<String>> {
+    if globs.is_empty() || globs.len() > 16 {
+        return None;
+    }
+    globs.iter().map(|glob| {
+        // Complex/escaped filename patterns keep the general reader. Never
+        // narrow a union if even one branch cannot be conservatively derived.
+        if glob.contains('\\') {
+            return None;
+        }
+        let name = glob.rsplit('/').next()?;
+        if name.is_empty() || name.contains(['*', '?', '[', ']', '{', '}']) {
+            None
+        } else {
+            Some(name.to_owned())
+        }
+    }).collect()
+}
+
 fn compile_excludes(excludes: &[String]) -> Result<GlobSet, String> {
     let mut builder = GlobSetBuilder::new();
     for pattern in excludes {
@@ -3085,6 +3135,46 @@ mod tests {
             .unwrap();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].0, document);
+    }
+
+    #[test]
+    fn exact_filename_reads_cached_pdf_before_global_fts_postings() {
+        // Focused SQLite integration, expected <2s/max5s. Count real VM work
+        // instead of relying on a machine-dependent wall-clock threshold.
+        let dir = tempfile::tempdir().unwrap();
+        let store = PersistentIndex::open(dir.path().join("index.sqlite")).unwrap();
+        let pdf = dir.path().join("wanted_%(1).pdf");
+        fs::write(&pdf, b"%PDF\0binary without searchable text").unwrap();
+        store.replace_document(&pdf, "needle cached PDF").unwrap();
+        for n in 0..500 {
+            store.replace_document(
+                &dir.path().join(format!("unrelated-{n}.txt")), "needle unrelated",
+            ).unwrap();
+        }
+        let read = |globs: &[String]| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let connection = store.read_connection(deadline).unwrap();
+            let steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed = steps.clone();
+            connection.progress_handler(1, Some(move || {
+                observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                false
+            }));
+            let mut found = Vec::new();
+            store.visit_matching_documents_with_paths(
+                &connection, "needle", dir.path(), globs, deadline,
+                |path| path == pdf,
+                |path, body| { found.push((path, body)); true },
+            ).unwrap();
+            (found, steps.load(std::sync::atomic::Ordering::Relaxed))
+        };
+        let baseline = read(&[]);
+        let scoped = read(&["**/wanted_%(1).pdf".into()]);
+        assert_eq!(scoped.0, vec![(pdf, "needle cached PDF".into())]);
+        assert_eq!(baseline.0, scoped.0);
+        assert!(scoped.1 < baseline.1 / 2, "scoped/global steps: {}/{}", scoped.1, baseline.1);
+        assert!(exact_glob_basenames(&["**/*.pdf".into()]).is_none());
+        assert!(exact_glob_basenames(&["**/wanted.pdf".into(), "**/*.pdf".into()]).is_none());
     }
 
     #[test]
