@@ -605,6 +605,10 @@ pub struct AppConfig {
     pub exclude_globs: Vec<String>,
     #[serde(default)]
     pub topology_cache_path: Option<PathBuf>,
+    /// Optional local operational-state parent. Does not add search/read roots.
+    /// Keep durable jobs out of cloud-backed or protected document folders.
+    #[serde(default)]
+    pub search_job_store_root: Option<PathBuf>,
     /// Set false on relay-only nodes that must use ripgrep without a persistent index.
     #[serde(default = "default_index_enabled")]
     pub index_enabled: bool,
@@ -675,6 +679,13 @@ impl AppConfig {
             .with_context(|| format!("read config {}", path.as_ref().display()))?;
         let mut cfg: AppConfig = serde_json::from_slice(&bytes).context("parse config JSON")?;
         cfg.config_path = Some(path.as_ref().to_path_buf());
+        if cfg
+            .search_job_store_root
+            .as_ref()
+            .is_some_and(|root| !root.is_absolute())
+        {
+            anyhow::bail!("search_job_store_root must be absolute");
+        }
         if cfg.limits.max_results == 0 {
             cfg.limits.max_results = default_max_results();
         }
@@ -693,6 +704,12 @@ impl AppConfig {
         Duration::from_millis(self.limits.peer_timeout_ms)
     }
 
+    pub fn job_store_root(&self) -> PathBuf {
+        self.search_job_store_root
+            .clone()
+            .unwrap_or_else(|| self.root.clone())
+    }
+
     pub fn overall_timeout(&self) -> Duration {
         Duration::from_millis(self.limits.overall_timeout_ms)
     }
@@ -701,6 +718,38 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::{default_exclude_globs, AppConfig};
+
+    #[test]
+    fn operational_job_store_does_not_change_search_roots() {
+        let original: AppConfig = serde_json::from_value(serde_json::json!({
+            "host_id":"test","root":"/documents","roots":{"extra":["/extra"]}
+        }))
+        .unwrap();
+        assert_eq!(original.job_store_root(), original.root);
+        let mut with_state = original.clone();
+        with_state.search_job_store_root = Some("/local/state/grepmesh".into());
+        assert_eq!(
+            with_state.job_store_root(),
+            std::path::PathBuf::from("/local/state/grepmesh")
+        );
+        assert_eq!(with_state.root, original.root);
+        assert_eq!(with_state.roots, original.roots);
+    }
+
+    #[test]
+    fn relative_operational_job_store_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        std::fs::write(
+            &path,
+            br#"{"host_id":"test","root":"/documents","search_job_store_root":"relative"}"#,
+        )
+        .unwrap();
+        assert!(AppConfig::from_path(path)
+            .unwrap_err()
+            .to_string()
+            .contains("must be absolute"));
+    }
 
     #[test]
     fn defaults_exclude_runtime_pseudo_filesystems() {

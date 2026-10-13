@@ -172,7 +172,7 @@ pub async fn run_server(mut config: AppConfig) -> Result<()> {
             .with_peer_auth_token(peer_auth_token.clone())
             .with_gptadmin_client(topology_client.clone()),
     );
-    let jobs = SearchJobs::persistent(service.local.root.clone(), &service.local.limits)?;
+    let jobs = SearchJobs::persistent(config.job_store_root(), &service.local.limits)?;
     if let Some(client) = topology_client {
         let refresh_service = Arc::clone(&service);
         let cache_path = config.topology_cache_path.clone();
