@@ -7,17 +7,95 @@ use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
+    collections::VecDeque,
     env, fs,
     path::Path,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex as StdMutex,
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 const HARD_PAYLOAD_LIMIT: usize = 32 * 1024 * 1024;
 const MIN_GPU_RESERVE_MB: u64 = 2560;
 const GPU_ARENA_LIMIT: usize = 512 * 1024 * 1024;
+
+// Native inference outlives an expired/disconnected HTTP waiter. Keep its
+// successful output for the same content/type retry, rather than running OCR
+// again and losing every result that takes longer than the waiting deadline.
+// This is process-local, not a durable queue or a claim of completed indexing.
+const RETAINED_RESULT_COUNT: usize = 64;
+const RETAINED_RESULT_BYTES: usize = 64 * 1024 * 1024;
+const RETAINED_RESULT_TTL: Duration = Duration::from_secs(2 * 60 * 60);
+
+#[derive(Default)]
+struct RetainedResults {
+    rows: VecDeque<([u8; 32], Instant, Value, usize)>,
+    bytes: usize,
+}
+
+impl RetainedResults {
+    fn prune(&mut self, now: Instant) {
+        while self
+            .rows
+            .front()
+            .is_some_and(|row| now.saturating_duration_since(row.1) >= RETAINED_RESULT_TTL)
+        {
+            self.bytes -= self.rows.pop_front().unwrap().3;
+        }
+    }
+
+    fn get(&mut self, key: &[u8; 32], now: Instant) -> Option<Value> {
+        self.prune(now);
+        self.rows
+            .iter()
+            .find(|row| &row.0 == key)
+            .map(|row| row.2.clone())
+    }
+
+    fn insert(&mut self, key: [u8; 32], value: Value, now: Instant) {
+        self.prune(now);
+        let Ok(bytes) = serde_json::to_vec(&value).map(|v| v.len()) else {
+            return;
+        };
+        if bytes > RETAINED_RESULT_BYTES {
+            return;
+        }
+        if let Some(index) = self.rows.iter().position(|row| row.0 == key) {
+            self.bytes -= self.rows.remove(index).unwrap().3;
+        }
+        while self.rows.len() >= RETAINED_RESULT_COUNT || self.bytes + bytes > RETAINED_RESULT_BYTES
+        {
+            self.bytes -= self.rows.pop_front().unwrap().3;
+        }
+        self.rows.push_back((key, now, value, bytes));
+        self.bytes += bytes;
+    }
+}
+
+fn retain_native_success(
+    cache: &StdMutex<RetainedResults>,
+    key: [u8; 32],
+    value: Value,
+) -> Result<Value> {
+    cache
+        .lock()
+        .map_err(|_| anyhow!("OCR result cache unavailable"))?
+        .insert(key, value.clone(), Instant::now());
+    Ok(value)
+}
+
+fn content_key(bytes: &[u8], extension: &str) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(extension.as_bytes());
+    hash.update([0]);
+    hash.update(bytes);
+    hash.finalize().into()
+}
 
 pub struct ComputeWorker {
     host_id: String,
@@ -28,6 +106,9 @@ pub struct ComputeWorker {
     probe_lock: Mutex<()>,
     timeout: Duration,
     max_output_bytes: usize,
+    retained: StdMutex<RetainedResults>,
+    retained_hits: AtomicU64,
+    retained_late: AtomicU64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +152,9 @@ impl ComputeWorker {
             probe_lock: Mutex::new(()),
             timeout,
             max_output_bytes: max_output_bytes.clamp(1024, 1024 * 1024),
+            retained: StdMutex::new(RetainedResults::default()),
+            retained_hits: AtomicU64::new(0),
+            retained_late: AtomicU64::new(0),
         }
     }
 
@@ -138,6 +222,19 @@ impl ComputeWorker {
     }
 
     pub async fn status(&self) -> Value {
+        let mut result = self.capability_status().await;
+        if let Ok(mut cache) = self.retained.lock() {
+            cache.prune(Instant::now());
+            result["retained_result_count"] = json!(cache.rows.len());
+            result["retained_result_bytes"] = json!(cache.bytes);
+        }
+        result["retained_result_hits"] = json!(self.retained_hits.load(Ordering::Relaxed));
+        result["retained_result_after_deadline_count"] =
+            json!(self.retained_late.load(Ordering::Relaxed));
+        result
+    }
+
+    async fn capability_status(&self) -> Value {
         if let Some(reason) = self.eligibility_error() {
             return self.unavailable("ineligible", reason);
         }
@@ -212,6 +309,32 @@ impl ComputeWorker {
         let permit = Arc::clone(&self.slots)
             .try_acquire_owned()
             .map_err(|_| anyhow!("GPU worker is busy"))?;
+        let started = Instant::now();
+        let preparation_worker = Arc::clone(self);
+        let preparation_type = extension.clone();
+        // Both decoding and hashing belong to the same one-job admission.
+        // The blocking task owns its permit even if the HTTP waiter goes away.
+        let (bytes, key, permit, cached) = tokio::task::spawn_blocking(move || {
+            let bytes = STANDARD
+                .decode(request.content_base64)
+                .context("invalid base64 OCR payload")?;
+            if bytes.is_empty() || bytes.len() > preparation_worker.payload_limit() {
+                return Err(anyhow!("OCR payload exceeds allowed size"));
+            }
+            let key = content_key(&bytes, &preparation_type);
+            let cached = preparation_worker
+                .retained
+                .lock()
+                .map_err(|_| anyhow!("OCR result cache unavailable"))?
+                .get(&key, Instant::now());
+            Ok::<_, anyhow::Error>((bytes, key, permit, cached))
+        })
+        .await
+        .context("OCR input preparation failed")??;
+        if let Some(value) = cached {
+            self.retained_hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(value);
+        }
         let gpu = if self.config.execution_provider == "cuda" {
             let gpu = self.probe_gpu(true).await?;
             let admission = self.gpu_admission(&gpu);
@@ -230,13 +353,14 @@ impl ComputeWorker {
         );
         // The permit belongs to the native job, not the waiting HTTP request.
         // Timeout/disconnection cannot admit an overlapping native inference.
+        if started.elapsed() >= self.timeout {
+            return Err(anyhow!("OCR deadline expired before native inference"));
+        }
         let job = tokio::task::spawn_blocking(move || -> Result<Value> {
             let _permit = permit;
-            let bytes = STANDARD
-                .decode(request.content_base64)
-                .context("invalid base64 OCR payload")?;
-            if bytes.is_empty() || bytes.len() > worker.payload_limit() {
-                return Err(anyhow!("OCR payload exceeds allowed size"));
+            // A queued blocking task must not start inference after its budget.
+            if started.elapsed() >= worker.timeout {
+                return Err(anyhow!("OCR deadline expired before native inference"));
             }
             fs::create_dir_all(&worker.config.temp_dir)
                 .context("prepare worker temporary directory")?;
@@ -262,9 +386,13 @@ impl ComputeWorker {
             if serde_json::to_vec(&result)?.len() > worker.max_output_bytes {
                 return Err(anyhow!("OCR output exceeds worker response limit"));
             }
+            let result = retain_native_success(&worker.retained, key, result)?;
+            if started.elapsed() >= worker.timeout {
+                worker.retained_late.fetch_add(1, Ordering::Relaxed);
+            }
             Ok(result)
         });
-        tokio::time::timeout(self.timeout, job)
+        tokio::time::timeout(self.timeout.saturating_sub(started.elapsed()), job)
             .await
             .map_err(|_| {
                 anyhow!("GPU OCR deadline exceeded; worker remains busy until native job finishes")
@@ -401,6 +529,102 @@ fn observed_at() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_results_match_content_and_type_without_extending_ttl() {
+        let now = Instant::now();
+        let mut cache = RetainedResults::default();
+        let key = content_key(b"native output input", "pdf");
+        let value = json!({"text":"completed OCR", "host_id":"worker"});
+        cache.insert(key, value.clone(), now);
+        assert_eq!(cache.get(&key, now + Duration::from_secs(90)), Some(value));
+        assert_eq!(cache.get(&content_key(b"other input", "pdf"), now), None);
+        assert_eq!(
+            cache.get(&content_key(b"native output input", "png"), now),
+            None
+        );
+        assert_eq!(cache.get(&key, now + RETAINED_RESULT_TTL), None);
+        assert_eq!(cache.bytes, 0);
+    }
+
+    #[test]
+    fn retained_results_evict_to_both_hard_bounds_and_replace_exact_key() {
+        let now = Instant::now();
+        let mut cache = RetainedResults::default();
+        for i in 0..RETAINED_RESULT_COUNT + 1 {
+            cache.insert(content_key(&i.to_le_bytes(), "png"), json!("ok"), now);
+        }
+        assert_eq!(cache.rows.len(), RETAINED_RESULT_COUNT);
+        assert!(cache
+            .get(&content_key(&0usize.to_le_bytes(), "png"), now)
+            .is_none());
+        let key = content_key(b"last", "pdf");
+        cache.insert(key, json!("old"), now);
+        cache.insert(key, json!("new"), now);
+        assert_eq!(cache.rows.iter().filter(|row| row.0 == key).count(), 1);
+        assert_eq!(
+            cache.bytes,
+            cache.rows.iter().map(|row| row.3).sum::<usize>()
+        );
+        // Exercise the byte bound cheaply with accounted entries: payload
+        // serialization itself has its independent max_output_bytes fence.
+        cache.rows.clear();
+        cache.bytes = 0;
+        cache
+            .rows
+            .push_back(([1; 32], now, json!("small"), RETAINED_RESULT_BYTES));
+        cache.bytes = RETAINED_RESULT_BYTES;
+        cache.insert([2; 32], json!("next"), now);
+        assert_eq!(cache.rows.len(), 1);
+        assert_eq!(cache.rows[0].0, [2; 32]);
+        assert!(cache.bytes <= RETAINED_RESULT_BYTES);
+    }
+
+    #[tokio::test]
+    async fn busy_native_slot_rejects_input_before_decode_and_hash() {
+        let worker = Arc::new(ComputeWorker::new(
+            "worker".into(),
+            ComputeConfig {
+                enabled: true,
+                execution_provider: "cpu".into(),
+                ..Default::default()
+            },
+            OcrConfig::default(),
+            128 * 1024,
+        ));
+        let _permit = worker.slots.try_acquire().unwrap();
+        let error = worker
+            .extract(OcrExtractRequest {
+                content_base64: "!!!!".into(),
+                input_type: "png".into(),
+                filename: None,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "GPU worker is busy");
+        assert!(worker.retained.lock().unwrap().rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_completion_survives_expired_http_waiter_without_second_job() {
+        let cache = Arc::new(StdMutex::new(RetainedResults::default()));
+        let retained = Arc::clone(&cache);
+        let key = content_key(b"same admitted input", "pdf");
+        let (finished, receipt) = tokio::sync::oneshot::channel();
+        let job = tokio::task::spawn_blocking(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            retain_native_success(&retained, key, json!({"text":"late native result"})).unwrap();
+            finished.send(()).unwrap();
+        });
+        assert!(tokio::time::timeout(Duration::from_millis(1), job)
+            .await
+            .is_err());
+        receipt.await.unwrap();
+        assert_eq!(
+            cache.lock().unwrap().get(&key, Instant::now()),
+            Some(json!({"text":"late native result"}))
+        );
+    }
 
     #[cfg(feature = "ocr")]
     #[test]
