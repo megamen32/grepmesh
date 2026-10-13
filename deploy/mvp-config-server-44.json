@@ -102,7 +102,10 @@
     "**/.antigravity/extensions/**",
     "**/.local/share/zed/extensions/**",
     "**/.tmpbin/**",
-    "**/forensics_out/**"
+    "**/forensics_out/**",
+    "**/captcha_dataset/**",
+    "**/captcha-dataset/**",
+    "**/captcha_samples/**"
   ],
   "topology_cache_path": "/var/lib/grepmesh-mcp/topology.json",
   "limits": {
@@ -188,7 +191,12 @@
     "pdf_dpi": 180,
     "max_pdf_pages": 200,
     "max_image_bytes": 268435456,
-    "backend": "mesh"
+    "backend": "mesh",
+    "mesh_worker_hosts": [
+      "server-44",
+      "mac-m1",
+      "server-88"
+    ]
   },
   "gptadmin_topology_url": "https://u-f1102930.t.gptadmin.bezrabotnyi.com/mcp-relay/agents",
   "gptadmin_token_env": "GPTADMIN_GREPMESH_TOKEN",

@@ -4,8 +4,18 @@ use std::path::Path;
 
 /// Lightweight build used on hosts where the local index and OCR are disabled.
 pub struct OcrEngine;
+pub(crate) struct RetryPathLease;
 
 impl OcrEngine {
+    pub(crate) fn is_in_flight(&self, _path: &Path) -> bool {
+        false
+    }
+    pub(crate) fn claim_retry(self: &std::sync::Arc<Self>, _path: &Path) -> Option<RetryPathLease> {
+        None
+    }
+    pub(crate) fn prepare_accelerator_environment(&self) -> Result<()> {
+        Err(anyhow!("OCR support is disabled in this build"))
+    }
     pub(crate) fn attach_pending_store(
         &self,
         _store: crate::index::PersistentIndex,

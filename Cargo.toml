@@ -15,7 +15,7 @@ ocr-cuda = ["ocr", "oar-ocr/cuda", "dep:ort", "ort/cuda"]
 ocr-coreml = ["ocr", "oar-ocr/coreml", "dep:ort", "ort/coreml"]
 
 [dependencies]
-mesh-core = { git = "https://github.com/megamen32/mesh-core.git", rev = "abeb90bab6ec3f21ff5574195815ec7ce893277f", features = ["transport"] }
+mesh-core = { git = "https://github.com/megamen32/mesh-core.git", rev = "baebb913c018a6de26f3dac584eb65ba0033c5b6", features = ["transport"] }
 anyhow = "1"
 axum = "0.7"
 clap = { version = "4", features = ["derive"] }

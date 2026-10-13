@@ -44,6 +44,7 @@ pub struct OcrEngine {
     pipeline: Mutex<Option<OcrRuntime>>,
     mesh: Mutex<Vec<ComputeClient>>,
     deferred: Mutex<BTreeSet<PathBuf>>,
+    active_paths: Mutex<BTreeSet<PathBuf>>,
     last_retry: Mutex<Instant>,
     retry_cursor: Mutex<Option<PathBuf>>,
     metadata_retry_cursor: Mutex<Option<PathBuf>>,
@@ -53,6 +54,18 @@ pub struct OcrEngine {
     pending_store_load_failed: AtomicBool,
     undurable: Mutex<BTreeSet<PathBuf>>,
     retry_fast: AtomicBool,
+}
+
+pub(crate) struct RetryPathLease {
+    engine: Arc<OcrEngine>,
+    path: PathBuf,
+}
+impl Drop for RetryPathLease {
+    fn drop(&mut self) {
+        if let Ok(mut paths) = self.engine.active_paths.lock() {
+            paths.remove(&self.path);
+        }
+    }
 }
 
 struct MeshClientLease<'a> {
@@ -73,6 +86,38 @@ struct OcrRuntime {
 }
 
 impl OcrEngine {
+    /// Prepare only the preferred global provider before a CPU override;
+    /// constructing model sessions remains lazy and within worker admission.
+    pub(crate) fn prepare_accelerator_environment(&self) -> Result<()> {
+        match self.config.execution_provider.as_str() {
+            "cuda" => {
+                #[cfg(feature = "ocr-cuda")]
+                {
+                    return require_cuda_environment(&self.config);
+                }
+                #[cfg(not(feature = "ocr-cuda"))]
+                {
+                    Err(anyhow!("CUDA support is absent from this build"))
+                }
+            }
+            "coreml" => {
+                #[cfg(all(feature = "ocr-coreml", target_os = "macos", target_arch = "aarch64"))]
+                {
+                    return require_coreml_environment();
+                }
+                #[cfg(not(all(
+                    feature = "ocr-coreml",
+                    target_os = "macos",
+                    target_arch = "aarch64"
+                )))]
+                {
+                    Err(anyhow!("CoreML support is absent from this build"))
+                }
+            }
+            "cpu" => Ok(()),
+            _ => Err(anyhow!("unsupported OCR execution provider")),
+        }
+    }
     pub(crate) fn native_initialized(&self) -> bool {
         self.pipeline
             .lock()
@@ -89,6 +134,7 @@ impl OcrEngine {
             pipeline: Mutex::new(None),
             mesh: Mutex::new(clients),
             deferred: Mutex::new(BTreeSet::new()),
+            active_paths: Mutex::new(BTreeSet::new()),
             last_retry: Mutex::new(
                 Instant::now()
                     .checked_sub(RETRY_COOLDOWN)
@@ -153,6 +199,21 @@ impl OcrEngine {
             .saturating_add(usize::from(self.deferred_overflow.load(Ordering::Relaxed)))
     }
 
+    pub(crate) fn is_in_flight(&self, path: &Path) -> bool {
+        self.active_paths
+            .lock()
+            .map(|paths| paths.contains(path))
+            .unwrap_or(true)
+    }
+    pub(crate) fn claim_retry(self: &Arc<Self>, path: &Path) -> Option<RetryPathLease> {
+        if !self.active_paths.lock().ok()?.insert(path.to_path_buf()) {
+            return None;
+        }
+        Some(RetryPathLease {
+            engine: Arc::clone(self),
+            path: path.to_path_buf(),
+        })
+    }
     pub(crate) fn is_deferred(&self, path: &Path) -> bool {
         self.deferred
             .lock()

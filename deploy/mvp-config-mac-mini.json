@@ -177,7 +177,10 @@
     "**/.antigravity/extensions/**",
     "**/.local/share/zed/extensions/**",
     "**/.tmpbin/**",
-    "**/forensics_out/**"
+    "**/forensics_out/**",
+    "**/captcha_dataset/**",
+    "**/captcha-dataset/**",
+    "**/captcha_samples/**"
   ],
   "index_enabled": false,
   "topology_cache_path": "/Users/roomhacker/.cache/grepmesh/topology.json",

@@ -149,7 +149,10 @@
     "**/.antigravity/extensions/**",
     "**/.local/share/zed/extensions/**",
     "**/.tmpbin/**",
-    "**/forensics_out/**"
+    "**/forensics_out/**",
+    "**/captcha_dataset/**",
+    "**/captcha-dataset/**",
+    "**/captcha_samples/**"
   ],
   "stt": {
     "enabled": false,

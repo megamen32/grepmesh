@@ -74,22 +74,69 @@ struct ComputeStatus {
     #[serde(default)]
     gpu_uuid: Option<String>,
     #[serde(default)]
-    gpu_name: Option<String>,
-    #[serde(default)]
-    compute_capability: Option<String>,
-    #[serde(default)]
     gpu_free_bytes: Option<u64>,
     busy_count: usize,
     admission: String,
     observed_at: u64,
     #[serde(default)]
-    performance_score: Option<f64>,
-    #[serde(default)]
     utilization_percent: Option<f64>,
     #[serde(default)]
-    performance_basis: Option<String>,
+    performance_by_task: BTreeMap<String, TaskPerformance>,
     #[serde(default)]
-    hardware_performance_score: Option<f64>,
+    supports_device_choice: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct TaskPerformance {
+    #[serde(default)]
+    performance_score: Option<f64>,
+    #[serde(default)]
+    observations: usize,
+    #[serde(default)]
+    warm: bool,
+    #[serde(default)]
+    basis: String,
+    #[serde(default)]
+    sample_age_seconds: u64,
+}
+fn device_statuses(value: Value) -> Vec<ComputeStatus> {
+    if let Some(devices) = value.get("devices").and_then(Value::as_array) {
+        devices
+            .iter()
+            .take(3)
+            .filter_map(|device| {
+                let mut device = device.clone();
+                device["host_id"] = value["host_id"].clone();
+                device["supports_device_choice"] = json!(true);
+                serde_json::from_value(device).ok()
+            })
+            .collect()
+    } else {
+        serde_json::from_value(value).ok().into_iter().collect()
+    }
+}
+fn task_descriptor(bytes: &[u8], input_type: &str) -> mesh_core::placement::TaskDescriptor {
+    #[cfg(feature = "ocr")]
+    let dimensions = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok());
+    #[cfg(not(feature = "ocr"))]
+    let dimensions = (input_type == "png"
+        && bytes.len() >= 24
+        && &bytes[..8] == b"\x89PNG\r\n\x1a\n")
+        .then(|| {
+            (
+                u32::from_be_bytes(bytes[16..20].try_into().unwrap()),
+                u32::from_be_bytes(bytes[20..24].try_into().unwrap()),
+            )
+        });
+    mesh_core::placement::TaskDescriptor {
+        input_type: input_type.into(),
+        input_bytes: bytes.len() as u64,
+        width: dimensions.map(|n| n.0),
+        height: dimensions.map(|n| n.1),
+    }
 }
 
 impl ComputeStatus {
@@ -112,42 +159,15 @@ impl ComputeStatus {
                 .is_some_and(|n| n.is_finite() && (0.0..85.0).contains(&n))
     }
 
-    fn performance(&self, measured: bool) -> f64 {
-        let score = if measured {
-            self.performance_score
-        } else {
-            self.hardware_performance_score.or_else(|| {
-                (self.performance_basis.as_deref()
-                    != Some("native_image_megapixels_per_second_x100"))
-                .then_some(self.performance_score)
-                .flatten()
-            })
-        };
-        if let Some(score) = score.filter(|s| s.is_finite() && *s > 0.0) {
-            return score;
-        }
-        // Coarse fallback only; live worker scores take precedence.
-        let name = self.gpu_name.as_deref().unwrap_or_default().to_lowercase();
-        if matches!(self.backend.as_str(), "cpu" | "coreml") {
-            return 50.0;
-        }
-        for (model, score) in [
-            ("5090", 500.0),
-            ("4090", 400.0),
-            ("3090", 310.0),
-            ("3080 ti", 300.0),
-            ("3080ti", 300.0),
-            ("3080", 280.0),
-        ] {
-            if name.contains(model) {
-                return score;
-            }
-        }
-        self.compute_capability
-            .as_deref()
-            .and_then(|c| c.parse::<f64>().ok())
-            .filter(|s| s.is_finite())
-            .unwrap_or(0.0)
+    fn task_performance(&self, class: Option<&str>) -> Option<f64> {
+        let sample = self.performance_by_task.get(class?)?;
+        (sample.warm
+            && sample.observations > 0
+            && sample.sample_age_seconds < 1800
+            && sample.basis == "native_jobs_per_second_same_task_class")
+            .then_some(sample.performance_score)
+            .flatten()
+            .filter(|n| n.is_finite() && *n > 0.0)
     }
 }
 
@@ -157,7 +177,7 @@ pub struct ComputeClient {
     config: OcrConfig,
     claimed: Arc<Mutex<BTreeSet<String>>>,
     agent: ureq::Agent,
-    statuses: BTreeMap<String, (Instant, ComputeStatus)>,
+    statuses: BTreeMap<String, (Instant, Vec<ComputeStatus>)>,
     failures: BTreeMap<String, Instant>,
 }
 
@@ -199,6 +219,12 @@ impl ComputeClient {
             .and_then(|snapshot| Topology::from_snapshot(snapshot, now).ok())
             .unwrap_or_else(|| Topology::new("", Vec::new()));
         merge_compute_peers(topology, &self.config.mesh_peers)
+            .into_iter()
+            .filter(|peer| {
+                self.config.mesh_worker_hosts.is_empty()
+                    || self.config.mesh_worker_hosts.contains(&peer.host_id)
+            })
+            .collect()
     }
 
     pub fn extract(&mut self, path: &Path, input_type: &str) -> Result<String> {
@@ -233,70 +259,33 @@ impl ComputeClient {
             if self.cooling_down(&key, Instant::now()) {
                 continue;
             }
-            let status = self
+            let statuses = self
                 .statuses
                 .get(&key)
-                .filter(|(_, status)| status.fresh_at(unix_seconds()))
-                .map(|(_, status)| status.clone())
-                .or_else(|| {
+                .filter(|(_, statuses)| statuses.iter().all(|s| s.fresh_at(unix_seconds())))
+                .map(|(_, statuses)| statuses.clone())
+                .unwrap_or_else(|| {
                     let probe_deadline = deadline.min(Instant::now() + Duration::from_secs(3));
                     let value = match self.call(&peer, "compute_status", json!({}), probe_deadline)
                     {
                         Ok(value) => value,
                         Err(_) => {
                             self.mark_failed(&peer);
-                            return None;
+                            return Vec::new();
                         }
                     };
-                    let status: ComputeStatus = match serde_json::from_value(value) {
-                        Ok(status) => status,
-                        Err(_) => {
-                            self.mark_failed(&peer);
-                            return None;
-                        }
-                    };
+                    let statuses = device_statuses(value);
                     self.statuses
-                        .insert(key.clone(), (Instant::now(), status.clone()));
-                    Some(status)
+                        .insert(key.clone(), (Instant::now(), statuses.clone()));
+                    statuses
                 });
-            if status.as_ref().is_some_and(|status| {
-                status.host_id != peer.host_id
-                    || !matches!(status.backend.as_str(), "cuda" | "cpu" | "coreml")
-                    || matches!(status.admission.as_str(), "ineligible" | "unavailable")
-                    || !status.fresh_at(unix_seconds())
-            }) {
-                self.mark_failed(&peer);
-                continue;
-            }
-            if let Some(status) =
-                status.filter(|status| status.eligible(&peer.host_id, unix_seconds()))
+            for status in statuses
+                .into_iter()
+                .filter(|status| status.eligible(&peer.host_id, unix_seconds()))
             {
-                candidates.push((peer, status));
+                candidates.push((peer.clone(), status));
             }
         }
-        // Never compare measured throughput to unrelated hardware-estimate units.
-        let measured = !candidates.is_empty()
-            && candidates.iter().all(|(_, status)| {
-                status.performance_basis.as_deref()
-                    == Some("native_image_megapixels_per_second_x100")
-            });
-        let ratings: Vec<_> = candidates
-            .iter()
-            .map(|(_, status)| mesh_core::placement::WorkerRating {
-                host_id: status.host_id.clone(),
-                performance: status.performance(measured),
-                utilization_percent: status.utilization_percent.unwrap_or(f64::NAN),
-                observed_at: status.observed_at,
-                available: true,
-            })
-            .collect();
-        let order =
-            mesh_core::placement::rank_workers(&ratings, unix_seconds(), STATUS_TTL.as_secs());
-        let mut entries: Vec<_> = candidates.into_iter().map(Some).collect();
-        let candidates: Vec<_> = order
-            .into_iter()
-            .filter_map(|i| entries[i].take())
-            .collect();
         if candidates.is_empty() || Instant::now() >= deadline {
             return Err(anyhow!("mesh OCR deferred: no available OCR worker"));
         }
@@ -311,6 +300,26 @@ impl ComputeClient {
         if bytes.is_empty() || bytes.len() as u64 > ceiling {
             return Err(anyhow!("mesh OCR input is empty or exceeds its byte limit"));
         }
+        let descriptor = task_descriptor(&bytes, input_type);
+        let task_class = descriptor.task_class();
+        let ratings: Vec<_> = candidates
+            .iter()
+            .map(|(_, status)| mesh_core::placement::TaskWorkerRating {
+                host_id: status.host_id.clone(),
+                backend: status.backend.clone(),
+                performance: status.task_performance(task_class.as_deref()),
+                utilization_percent: status.utilization_percent.unwrap_or(f64::NAN),
+                observed_at: status.observed_at,
+                available: true,
+            })
+            .collect();
+        let order =
+            mesh_core::placement::rank_task_workers(&ratings, unix_seconds(), STATUS_TTL.as_secs());
+        let mut entries: Vec<_> = candidates.into_iter().map(Some).collect();
+        let candidates: Vec<_> = order
+            .into_iter()
+            .filter_map(|i| entries[i].take())
+            .collect();
         let arguments = json!({"content_base64": STANDARD.encode(bytes), "input_type": input_type});
         for (peer, mut status) in candidates {
             if Instant::now() >= deadline {
@@ -324,7 +333,11 @@ impl ComputeClient {
                 let refreshed = self
                     .call(&peer, "compute_status", json!({}), refresh_deadline)
                     .ok()
-                    .and_then(|value| serde_json::from_value::<ComputeStatus>(value).ok());
+                    .and_then(|value| {
+                        device_statuses(value)
+                            .into_iter()
+                            .find(|s| s.backend == status.backend)
+                    });
                 let Some(refreshed) = refreshed else {
                     self.mark_failed(&peer);
                     continue;
@@ -339,12 +352,19 @@ impl ComputeClient {
                 continue;
             };
             self.statuses
-                .insert(peer_key(&peer), (Instant::now(), status.clone()));
+                .insert(peer_key(&peer), (Instant::now(), vec![status.clone()]));
             let started = Instant::now();
-            tracing::info!(worker_host = %peer.host_id, input = %path.display(), backend = %status.backend, "mesh OCR dispatch");
+            tracing::info!(worker_host = %peer.host_id, input = %path.display(), backend = %status.backend, via_hub = peer.gptadmin_relay_url.as_deref() == Some(peer.routable_url.as_str()), "mesh OCR dispatch");
             // Leave budget for another eligible candidate after a failed worker.
             let attempt_deadline = ocr_attempt_deadline(input_type, Instant::now(), deadline);
-            let result = self.call(&peer, "ocr_extract", arguments.clone(), attempt_deadline);
+            let mut request = arguments.clone();
+            if status.supports_device_choice {
+                request["execution_provider"] = json!(status.backend);
+                if let Some(class) = task_class.as_ref() {
+                    request["task_class"] = json!(class);
+                }
+            }
+            let result = self.call(&peer, "ocr_extract", request, attempt_deadline);
             let result = match result {
                 Ok(value) => value,
                 Err(error) if error.is::<InvalidOcrInput>() => return Err(error),
@@ -352,7 +372,8 @@ impl ComputeClient {
                     self.statuses.remove(&peer_key(&peer));
                     continue;
                 }
-                Err(_) => {
+                Err(error) => {
+                    tracing::warn!(worker_host = %peer.host_id, input = %path.display(), error = %error, "mesh OCR attempt deferred");
                     self.mark_failed(&peer);
                     continue;
                 }
@@ -367,6 +388,7 @@ impl ComputeClient {
             if let Some(text) = result.get("text").and_then(Value::as_str) {
                 if text.len() <= 4 * 1024 * 1024 {
                     tracing::info!(worker_host = %peer.host_id, input = %path.display(), backend = %status.backend, elapsed_ms = started.elapsed().as_millis() as u64, "mesh OCR completed");
+                    self.statuses.remove(&peer_key(&peer));
                     return Ok(text.to_owned());
                 }
             }
@@ -481,6 +503,7 @@ impl ComputeClient {
                 {
                     anyhow!(ConnectFailure)
                 }
+                ureq::Error::Status(status, _) => anyhow!("mesh OCR HTTP status {}", status),
                 _ => anyhow!("mesh OCR transport failed"),
             })?;
             let mut bytes = Vec::new();
@@ -527,7 +550,12 @@ fn unwrap_result(body: Value) -> Result<Value> {
         ) {
             return Err(anyhow!(WorkerBusy));
         }
-        return Err(anyhow!("OCR worker rejected request"));
+        return Err(anyhow!(
+            "OCR worker rejected request (RPC code {})",
+            body.pointer("/error/code")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+        ));
     }
     let result = body
         .get("result")
@@ -608,6 +636,56 @@ fn unix_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_ratings_are_unknown_until_same_class_warm_measurement() {
+        let mut status: ComputeStatus = serde_json::from_value(json!({"host_id":"server-44", "backend":"cpu", "busy_count":0,"admission":"available","observed_at":100,"utilization_percent":1,"performance_score":999999,"hardware_performance_score":999999})).unwrap();
+        let class = "ocr:image:png:pixels:4mp";
+        assert_eq!(status.task_performance(Some(class)), None);
+        status.performance_by_task.insert(
+            class.into(),
+            TaskPerformance {
+                performance_score: Some(2.0),
+                observations: 2,
+                warm: true,
+                basis: "native_jobs_per_second_same_task_class".into(),
+                sample_age_seconds: 1,
+            },
+        );
+        assert_eq!(status.task_performance(Some(class)), Some(2.0));
+        assert_eq!(status.task_performance(Some("ocr:pdf:bytes:1m")), None);
+        status.performance_by_task.get_mut(class).unwrap().warm = false;
+        assert_eq!(status.task_performance(Some(class)), None);
+    }
+
+    #[test]
+    fn per_device_status_retains_backend_and_declared_worker_scope() {
+        let values = device_statuses(
+            json!({"host_id":"server-44", "devices":[{"backend":"cpu","busy_count":0,"admission":"available","observed_at":100,"utilization_percent":1},{"backend":"cuda","gpu_uuid":"gpu","gpu_free_bytes":MIN_FREE_GPU_BYTES,"busy_count":1,"admission":"busy","observed_at":100,"utilization_percent":10}]}),
+        );
+        assert_eq!(values.len(), 2);
+        assert!(values[0].supports_device_choice && values[0].eligible("server-44", 100));
+        assert!(!values[1].eligible("server-44", 100));
+        let peer = |host: &str| PeerConfig {
+            host_id: host.into(),
+            local_url: "http://127.0.0.1:9419/mcp".into(),
+            routable_url: "http://127.0.0.1:9419/mcp".into(),
+            gptadmin_proxy_url: None,
+            gptadmin_relay_url: None,
+        };
+        let client = ComputeClient::new(OcrConfig {
+            mesh_worker_hosts: vec!["server-44".into(), "mac-m1".into(), "server-88".into()],
+            mesh_peers: vec![
+                peer("server-100"),
+                peer("server-44"),
+                peer("server-88"),
+                peer("mac-m1"),
+            ],
+            ..Default::default()
+        });
+        assert_eq!(client.peers().len(), 3);
+        assert!(client.peers().iter().all(|p| p.host_id != "server-100"));
+    }
 
     #[test]
     fn parallel_worker_reservations_are_exclusive_and_released() {
@@ -745,9 +823,9 @@ mod tests {
         }
 
         let requests: Requests = Arc::new(Mutex::new(Vec::new()));
-        let (best, stop_best, best_thread) = mock_peer("best", 400.0, true, requests.clone());
+        let (best, stop_best, best_thread) = mock_peer("a-best", 400.0, true, requests.clone());
         let (alternate, stop_alternate, alternate_thread) =
-            mock_peer("alternate", 100.0, false, requests.clone());
+            mock_peer("z-alternate", 100.0, false, requests.clone());
         let temp_root = Path::new(".tmp/compute-client-tests");
         std::fs::create_dir_all(temp_root).unwrap();
         let directory = tempfile::tempdir_in(temp_root).unwrap();
@@ -755,7 +833,7 @@ mod tests {
         std::fs::write(&input, [0xa5u8; 32]).unwrap();
         let engine = crate::ocr::OcrEngine::new(OcrConfig {
             backend: "mesh".into(),
-            // Probe order deliberately differs from GPU performance order.
+            // Cold device ordering deliberately differs from probe order.
             mesh_peers: vec![alternate, best],
             remote_timeout_ms: 5_000,
             // Invalid image bytes and missing models make local inference
@@ -790,10 +868,10 @@ mod tests {
         assert_eq!(
             requests.as_slice(),
             &[
-                ("alternate".into(), "compute_status".into()),
-                ("best".into(), "compute_status".into()),
-                ("best".into(), "ocr_extract".into()),
-                ("alternate".into(), "ocr_extract".into()),
+                ("z-alternate".into(), "compute_status".into()),
+                ("a-best".into(), "compute_status".into()),
+                ("a-best".into(), "ocr_extract".into()),
+                ("z-alternate".into(), "ocr_extract".into()),
             ]
         );
     }

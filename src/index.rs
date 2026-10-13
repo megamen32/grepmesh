@@ -1296,6 +1296,9 @@ impl IndexManager {
                         &active,
                     );
                     for path in retry {
+                        let Some(path_lease) = ocr.claim_retry(&path) else {
+                            continue;
+                        };
                         let (job_roots, job_excludes, job_activity, job_ocr, job_index, job_path) = (
                             roots.clone(),
                             excludes.clone(),
@@ -1307,6 +1310,7 @@ impl IndexManager {
                         match thread::Builder::new()
                             .name("grepmesh-ocr-retry".into())
                             .spawn(move || {
+                                let _path_lease = path_lease;
                                 retry_ocr_path(
                                     &job_path,
                                     &job_roots,
@@ -1851,6 +1855,9 @@ fn reconcile_event_paths(
             .map(|relative| root.join(relative))
             .unwrap_or_else(|_| path.clone());
         let path = logical_path.as_path();
+        if ocr.is_some_and(|engine| engine.is_in_flight(path)) {
+            continue;
+        }
         // Directory metadata events are emitted for every child write. They
         // carry no file content change and would falsely make the root hot.
         if path.exists() && !path.is_file() {
@@ -2036,6 +2043,12 @@ fn retry_ocr_path(
     ) {
         Ok((_, _, documents, _)) => {
             for document in documents {
+                if !fs::metadata(&document.path).is_ok_and(|now| {
+                    now.len() == document.size && metadata_mtime_ns(&now) == document.mtime_ns
+                }) {
+                    let _ = ocr.defer_path(&document.path);
+                    continue;
+                }
                 match persistent.replace_indexed_document(&document) {
                     Ok(()) => {
                         ocr.forget_deferred(&document.path);
@@ -2349,7 +2362,16 @@ fn complete_empty_ocr(
     path: &Path,
     context: &ScanContext<'_>,
     ocr: &OcrEngine,
+    expected: Option<&fs::Metadata>,
 ) -> Result<usize, String> {
+    if expected.is_some_and(|before| {
+        !fs::metadata(path).is_ok_and(|now| {
+            now.len() == before.len() && metadata_mtime_ns(&now) == metadata_mtime_ns(before)
+        })
+    }) {
+        ocr.defer_path(path).map_err(|error| error.to_string())?;
+        return Ok(0);
+    }
     if ocr.is_mesh() {
         if let Some(index) = context.persistent {
             if let Err(error) = index.remove_document(path) {
@@ -2390,6 +2412,9 @@ fn walk(
         return Ok(0);
     }
     if metadata.is_file() {
+        if !context.dispatch_mesh && context.ocr.is_some_and(|ocr| ocr.is_in_flight(path)) {
+            return Ok(0);
+        }
         let size = metadata.len();
         let mtime_ns = metadata_mtime_ns(&metadata);
         if context
@@ -2447,7 +2472,7 @@ fn walk(
             }
         } else if let Some(ocr) = context.ocr.filter(|ocr| ocr.is_image(path)) {
             if metadata.len() == 0 {
-                return complete_empty_ocr(path, context, ocr);
+                return complete_empty_ocr(path, context, ocr, Some(&metadata));
             }
             if ocr.max_image_bytes() != 0 && metadata.len() > ocr.max_image_bytes() {
                 ocr.forget_deferred(path);
@@ -2459,7 +2484,7 @@ fn walk(
             }
             match ocr.extract_image(path) {
                 Ok(text) if !text.trim().is_empty() => text,
-                Ok(_) => return complete_empty_ocr(path, context, ocr),
+                Ok(_) => return complete_empty_ocr(path, context, ocr, Some(&metadata)),
                 Err(error) => {
                     tracing::warn!(path = %path.display(), error = %error, "OCR skipped image file");
                     return Ok(0);
@@ -2501,7 +2526,7 @@ fn walk(
                     Ok(text) if !text.trim().is_empty() => text,
                     Ok(_) => match extracted {
                         Some(text) => text,
-                        None => return complete_empty_ocr(path, context, ocr),
+                        None => return complete_empty_ocr(path, context, ocr, Some(&metadata)),
                     },
                     Err(error) => {
                         tracing::warn!(path = %path.display(), error = %error, "OCR PDF fallback failed");
@@ -2659,6 +2684,80 @@ fn excluded(path: &Path, root: &Path, excludes: &GlobSet) -> bool {
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "ocr")]
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn empty_result_cannot_acknowledge_a_newer_file_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("changed.png");
+        fs::write(&path, []).unwrap();
+        let before = fs::metadata(&path).unwrap();
+        let store = PersistentIndex::open(dir.path().join("index.sqlite3")).unwrap();
+        let ocr = OcrEngine::new(OcrConfig {
+            backend: "mesh".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        ocr.attach_pending_store(store.clone()).unwrap();
+        ocr.defer_path(&path).unwrap();
+        fs::write(&path, "new input arrived during inference").unwrap();
+        let matcher = compile_excludes(&[]).unwrap();
+        let context = ScanContext {
+            dispatch_mesh: true,
+            root: dir.path(),
+            root_device: None,
+            excludes: &matcher,
+            max_file_bytes: 0,
+            build_candidates: false,
+            stt: None,
+            ocr: Some(&ocr),
+            persistent: Some(&store),
+            metadata_only: None,
+        };
+        complete_empty_ocr(&path, &context, &ocr, Some(&before)).unwrap();
+        assert_eq!(store.load_pending_ocr().unwrap().0, vec![path.clone()]);
+        assert!(ocr.is_deferred(&path));
+        assert!(path.exists());
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn in_flight_input_cannot_be_acknowledged_by_metadata_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("active.png");
+        fs::write(&path, "input").unwrap();
+        let store = PersistentIndex::open(dir.path().join("index.sqlite3")).unwrap();
+        let ocr = Arc::new(
+            OcrEngine::new(OcrConfig {
+                backend: "mesh".into(),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        ocr.attach_pending_store(store.clone()).unwrap();
+        ocr.defer_path(&path).unwrap();
+        let lease = ocr.claim_retry(&path).unwrap();
+        assert!(ocr.claim_retry(&path).is_none());
+        let matcher = compile_excludes(&[]).unwrap();
+        let metadata = compile_excludes(&["**/*.png".into()]).unwrap();
+        let (_, _, documents, _) = scan_directory_unit(
+            &path,
+            dir.path(),
+            &matcher,
+            0,
+            false,
+            None,
+            Some(&ocr),
+            Some(&store),
+            Some(&metadata),
+            false,
+        )
+        .unwrap();
+        assert!(documents.is_empty());
+        assert_eq!(store.load_pending_ocr().unwrap().0, vec![path.clone()]);
+        drop(lease);
+        assert!(!ocr.is_in_flight(&path));
+    }
+
     #[test]
     fn mesh_discovery_queues_durably_and_excludes_never_enter_ocr() {
         let dir = tempfile::tempdir().unwrap();
@@ -3142,7 +3241,7 @@ mod tests {
             )
             .unwrap();
 
-        let error = complete_empty_ocr(&path, &context, &ocr).unwrap_err();
+        let error = complete_empty_ocr(&path, &context, &ocr, None).unwrap_err();
         assert!(error.contains("controlled SQLite failure"));
         assert!(
             ocr.is_deferred(&path),
@@ -3160,7 +3259,7 @@ mod tests {
         connection
             .execute_batch("DROP TRIGGER mesh_ocr_ack_fail_delete;")
             .unwrap();
-        assert_eq!(complete_empty_ocr(&path, &context, &ocr).unwrap(), 0);
+        assert_eq!(complete_empty_ocr(&path, &context, &ocr, None).unwrap(), 0);
         assert!(
             !ocr.is_deferred(&path),
             "only a committed deletion acknowledges completion"

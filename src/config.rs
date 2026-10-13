@@ -11,6 +11,9 @@ use std::{
 
 pub fn default_exclude_globs() -> Vec<String> {
     [
+        "**/captcha_dataset/**",
+        "**/captcha-dataset/**",
+        "**/captcha_samples/**",
         "**/captcha-train/**",
         "**/captcha-train-*/**",
         "**/captcha_train/**",
@@ -297,6 +300,9 @@ pub struct OcrConfig {
     pub gpu_mem_limit_bytes: usize,
     #[serde(default)]
     pub mesh_peers: Vec<PeerConfig>,
+    /// Optional host scope for background OCR dispatch; empty permits configured peers.
+    #[serde(default)]
+    pub mesh_worker_hosts: Vec<String>,
     #[serde(default)]
     pub mesh_topology_cache_path: Option<PathBuf>,
     #[serde(default)]
@@ -334,6 +340,7 @@ impl Default for OcrConfig {
             gpu_device_id: 0,
             gpu_mem_limit_bytes: default_ocr_gpu_memory(),
             mesh_peers: Vec::new(),
+            mesh_worker_hosts: Vec::new(),
             mesh_topology_cache_path: None,
             mesh_peer_token_env: None,
             mesh_relay_token_env: None,
