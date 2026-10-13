@@ -962,7 +962,9 @@ async fn search_text_impl(
     let mut command = rg_command().unwrap_or_else(grep_command);
     command.arg("-n");
     if using_rg {
-        command.arg("--hidden");
+        // Match the indexer's device boundary. Explicitly configured mounted
+        // roots are searched separately, rather than entering foreign mounts.
+        command.arg("--hidden").arg("--one-file-system");
     } else {
         command
             .arg("-R")
@@ -1328,7 +1330,10 @@ async fn find_paths_impl(
             "path search requires rg; install ripgrep (text search falls back to grep)"
         ));
     };
-    command.arg("--files").arg("--hidden");
+    command
+        .arg("--files")
+        .arg("--hidden")
+        .arg("--one-file-system");
     for glob in exclude_globs {
         command.arg("--glob").arg(format!("!{glob}"));
     }
