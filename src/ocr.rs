@@ -1,4 +1,4 @@
-use crate::compute_client::{mesh_input_limit, ComputeClient};
+use crate::compute_client::{mesh_input_limit, ComputeClient, MAX_PARALLEL_OCR};
 use crate::config::OcrConfig;
 use crate::index::PersistentIndex;
 use anyhow::{anyhow, Context, Result};
@@ -16,7 +16,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex,
+        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -42,7 +42,7 @@ fn gpu_detection_config(config: &OcrConfig) -> Option<TextDetectionConfig> {
 pub struct OcrEngine {
     config: OcrConfig,
     pipeline: Mutex<Option<OcrRuntime>>,
-    mesh: Mutex<Option<ComputeClient>>,
+    mesh: Mutex<Vec<ComputeClient>>,
     deferred: Mutex<BTreeSet<PathBuf>>,
     last_retry: Mutex<Instant>,
     retry_cursor: Mutex<Option<PathBuf>>,
@@ -53,6 +53,18 @@ pub struct OcrEngine {
     pending_store_load_failed: AtomicBool,
     undurable: Mutex<BTreeSet<PathBuf>>,
     retry_fast: AtomicBool,
+}
+
+struct MeshClientLease<'a> {
+    pool: &'a Mutex<Vec<ComputeClient>>,
+    client: Option<ComputeClient>,
+}
+impl Drop for MeshClientLease<'_> {
+    fn drop(&mut self) {
+        if let (Some(client), Ok(mut pool)) = (self.client.take(), self.pool.lock()) {
+            pool.push(client);
+        }
+    }
 }
 
 struct OcrRuntime {
@@ -68,10 +80,14 @@ impl OcrEngine {
             .unwrap_or(false)
     }
     pub fn new(config: OcrConfig) -> Option<Self> {
+        let claimed = Arc::new(Mutex::new(BTreeSet::new()));
+        let clients = (0..MAX_PARALLEL_OCR)
+            .map(|_| ComputeClient::with_shared_workers(config.clone(), Arc::clone(&claimed)))
+            .collect();
         config.enabled.then_some(Self {
             config,
             pipeline: Mutex::new(None),
-            mesh: Mutex::new(None),
+            mesh: Mutex::new(clients),
             deferred: Mutex::new(BTreeSet::new()),
             last_retry: Mutex::new(
                 Instant::now()
@@ -253,6 +269,14 @@ impl OcrEngine {
     /// input disappears.
     /// Rotate through the set so one rejected input cannot starve other files.
     pub(crate) fn take_retry_paths(&self, max: usize) -> Vec<PathBuf> {
+        self.take_retry_paths_excluding(max.min(1), &BTreeSet::new())
+    }
+
+    pub(crate) fn take_retry_paths_excluding(
+        &self,
+        max: usize,
+        in_flight: &BTreeSet<PathBuf>,
+    ) -> Vec<PathBuf> {
         if !self.is_mesh() || max == 0 {
             return Vec::new();
         }
@@ -273,28 +297,31 @@ impl OcrEngine {
         let Ok(mut cursor) = self.retry_cursor.lock() else {
             return Vec::new();
         };
-        let next = cursor
+        let ordered: Vec<_> = cursor
             .as_ref()
-            .and_then(|previous| {
+            .map(|previous| {
                 paths
                     .range((
                         std::ops::Bound::Excluded(previous.clone()),
                         std::ops::Bound::Unbounded,
                     ))
-                    .next()
+                    .collect::<Vec<_>>()
             })
-            .or_else(|| paths.iter().next())
-            .cloned();
-        let Some(path) = next else {
-            return Vec::new();
-        };
-        *last_retry = Instant::now();
-        self.retry_fast.store(false, Ordering::Relaxed);
-        *cursor = Some(path.clone());
-        // Even missing inputs reach the index's durable terminal ACK, which
-        // also removes stale searchable text before clearing this queue.
-        // The max parameter cannot multiply the shared project's workload.
-        vec![path]
+            .unwrap_or_default();
+        let mut unique = BTreeSet::new();
+        let next: Vec<_> = ordered
+            .into_iter()
+            .chain(paths.iter())
+            .filter(|path| !in_flight.contains(*path) && unique.insert((*path).clone()))
+            .take(max.min(MAX_PARALLEL_OCR))
+            .cloned()
+            .collect();
+        if let Some(path) = next.last() {
+            *last_retry = Instant::now();
+            self.retry_fast.store(false, Ordering::Relaxed);
+            *cursor = Some(path.clone());
+        }
+        next
     }
 
     pub(crate) fn metadata_retry_paths(
@@ -499,12 +526,21 @@ impl OcrEngine {
 
     fn extract_remote(&self, path: &Path, input_type: &str) -> Result<String> {
         let result = (|| {
-            let mut mesh = self
-                .mesh
-                .lock()
-                .map_err(|_| anyhow!("mesh OCR lock is unavailable"))?;
-            let client = mesh.get_or_insert_with(|| ComputeClient::new(self.config.clone()));
-            client.extract(path, input_type)
+            let mut lease = MeshClientLease {
+                pool: &self.mesh,
+                client: Some(
+                    self.mesh
+                        .lock()
+                        .map_err(|_| anyhow!("mesh OCR lock unavailable"))?
+                        .pop()
+                        .ok_or_else(|| anyhow!("mesh OCR client slots busy"))?,
+                ),
+            };
+            lease
+                .client
+                .as_mut()
+                .expect("client lease")
+                .extract(path, input_type)
         })();
         let result = match result {
             Err(error) if error.is::<crate::compute_client::InvalidOcrInput>() => {
@@ -785,6 +821,36 @@ fn require_cuda_environment(config: &OcrConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parallel_retry_is_bounded_skips_inflight_and_never_acknowledges_dispatch() {
+        let engine = OcrEngine::new(OcrConfig {
+            backend: "mesh".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        for name in ["a.png", "b.png", "c.png", "d.png", "e.png"] {
+            engine.defer_path(Path::new(name)).unwrap();
+        }
+        let inflight = BTreeSet::from([PathBuf::from("b.png")]);
+        let batch = engine.take_retry_paths_excluding(99, &inflight);
+        assert_eq!(
+            batch,
+            vec![
+                PathBuf::from("a.png"),
+                PathBuf::from("c.png"),
+                PathBuf::from("d.png")
+            ]
+        );
+        assert_eq!(engine.deferred_count(), 5, "dispatch is not a durable ACK");
+        engine.retry_fast.store(true, Ordering::Relaxed);
+        *engine.last_retry.lock().unwrap() = Instant::now() - Duration::from_secs(2);
+        let active = batch.into_iter().chain(inflight).collect();
+        assert_eq!(
+            engine.take_retry_paths_excluding(3, &active),
+            vec![PathBuf::from("e.png")]
+        );
+    }
 
     #[test]
     fn energy_recovery_gpu_detector_respects_existing_arena_budget() {

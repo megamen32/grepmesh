@@ -131,6 +131,7 @@ struct RebuildState<'a> {
 }
 
 struct ScanContext<'a> {
+    dispatch_mesh: bool,
     root: &'a Path,
     root_device: Option<u64>,
     excludes: &'a GlobSet,
@@ -750,7 +751,13 @@ impl PersistentIndex {
         visit: impl FnMut(PathBuf, String) -> bool,
     ) -> Result<bool, String> {
         self.visit_matching_documents_with_paths(
-            connection, query, root, &[], deadline, allow, visit,
+            connection,
+            query,
+            root,
+            &[],
+            deadline,
+            allow,
+            visit,
         )
     }
 
@@ -786,21 +793,34 @@ impl PersistentIndex {
             // A known filename must not first traverse global FTS postings.
             // This is only a conservative prefilter; allow() still applies
             // complete glob/root/exclusion semantics before loading a body.
-            names.into_iter().map(|name| (
-                "SELECT fts_rowid,path FROM grepmesh_document_rows \
+            names
+                .into_iter()
+                .map(|name| {
+                    (
+                        "SELECT fts_rowid,path FROM grepmesh_document_rows \
                  WHERE path>=?3 AND path<?4 AND substr(path,-length(?1))=?1 \
                  UNION ALL SELECT fts_rowid,path FROM grepmesh_document_rows \
                  WHERE path=?2 AND substr(path,-length(?1))=?1",
-                format!("{separator}{name}"),
-            )).collect()
+                        format!("{separator}{name}"),
+                    )
+                })
+                .collect()
         } else {
-            vec![("SELECT d.fts_rowid,d.path FROM grepmesh_documents f \
+            vec![
+                (
+                    "SELECT d.fts_rowid,d.path FROM grepmesh_documents f \
              JOIN grepmesh_document_rows d ON d.fts_rowid=f.rowid \
-             WHERE f.body MATCH ?1 AND (d.path=?2 OR (d.path>=?3 AND d.path<?4))", fts_query),
-             ("SELECT fts_rowid,path FROM grepmesh_document_rows \
+             WHERE f.body MATCH ?1 AND (d.path=?2 OR (d.path>=?3 AND d.path<?4))",
+                    fts_query,
+                ),
+                (
+                    "SELECT fts_rowid,path FROM grepmesh_document_rows \
               WHERE path>=?3 AND path<?4 AND path LIKE ?1 ESCAPE '\\' \
               UNION ALL SELECT fts_rowid,path FROM grepmesh_document_rows \
-              WHERE path=?2 AND path LIKE ?1 ESCAPE '\\'", pattern)]
+              WHERE path=?2 AND path LIKE ?1 ESCAPE '\\'",
+                    pattern,
+                ),
+            ]
         };
         let mut body = connection.prepare(
             "SELECT body FROM grepmesh_documents WHERE rowid=?1 AND length(CAST(body AS BLOB))<=?2")
@@ -1129,13 +1149,26 @@ impl IndexManager {
             }
             let mut pending = ocr.as_ref().is_some_and(|ocr| ocr.deferred_count() > 0);
             let mut directory_activity = BTreeMap::<PathBuf, DirectoryActivityState>::new();
+            let mut running = BTreeMap::<PathBuf, thread::JoinHandle<()>>::new();
             loop {
+                let finished: Vec<_> = running
+                    .iter()
+                    .filter(|(_, task)| task.is_finished())
+                    .map(|(path, _)| path.clone())
+                    .collect();
+                for path in finished {
+                    if running.remove(&path).expect("running task").join().is_err() {
+                        tracing::warn!(input = %path.display(), "OCR retry panicked; durable input remains pending");
+                    }
+                }
                 let activity_delay_until = directory_activity
                     .values()
                     .map(|stats| stats.hot_until_ms)
                     .max()
                     .unwrap_or(0);
-                let remaining = if ocr.as_ref().is_some_and(|ocr| ocr.deferred_count() > 0) {
+                let remaining = if !running.is_empty() {
+                    Duration::from_secs(1)
+                } else if ocr.as_ref().is_some_and(|ocr| ocr.deferred_count() > 0) {
                     // An overdue full pass is intentionally blocked while GPU
                     // work is deferred. Never turn its expired deadline into
                     // recv_timeout(0) and spin throughout the GPU outage.
@@ -1222,54 +1255,84 @@ impl IndexManager {
                     }
                     pending = true;
                 }
-                // GPU admission failures are deferred independently of the
-                // weekly full walk. Retry one input serially and preserve
-                // the successful-reconciliation marker until all are served.
+                // Keep up to three independent queue jobs live; workers admit one
+                // request each using their fresh measured CPU/RAM/GPU capacity.
                 if let (Some(ocr), Some(index)) = (ocr.as_ref(), persistent_state.as_ref()) {
                     let metadata_matcher =
                         compile_excludes(&activity_config.metadata_only_globs).ok();
                     let ignored_matcher = compile_excludes(&excludes).ok();
                     let configured = ordered_roots(&roots);
-                    let mut retry = ocr.metadata_retry_paths(64, |path| {
-                        configured
-                            .iter()
-                            .filter(|root| path.starts_with(root))
-                            .max_by_key(|root| root.components().count())
-                            .is_some_and(|root| {
-                                // Newly ignored inputs need only a durable index removal,
-                                // never GPU admission or the serial inference cooldown.
-                                ignored_matcher
-                                    .as_ref()
-                                    .is_some_and(|matcher| excluded(path, root, matcher))
-                                    || metadata_matcher
+                    let cleanup = ocr.metadata_retry_paths(64, |path| {
+                        !running.contains_key(path)
+                            && configured
+                                .iter()
+                                .filter(|root| path.starts_with(root))
+                                .max_by_key(|root| root.components().count())
+                                .is_some_and(|root| {
+                                    ignored_matcher
                                         .as_ref()
                                         .is_some_and(|matcher| excluded(path, root, matcher))
-                            })
+                                        || metadata_matcher
+                                            .as_ref()
+                                            .is_some_and(|matcher| excluded(path, root, matcher))
+                                })
                     });
-                    if retry.is_empty() {
-                        retry = ocr.take_retry_paths(1);
-                    }
-                    let retry = retry.into_iter().collect::<BTreeSet<_>>();
-                    if !retry.is_empty() {
-                        for path in &retry {
-                            retry_ocr_path(
-                                path,
-                                &roots,
-                                &excludes,
-                                &activity_config,
-                                max_file_bytes,
-                                stt.as_ref(),
-                                ocr,
-                                index,
-                            );
-                        }
+                    for path in cleanup {
+                        retry_ocr_path(
+                            &path,
+                            &roots,
+                            &excludes,
+                            &activity_config,
+                            max_file_bytes,
+                            None,
+                            ocr,
+                            index,
+                        );
                         pending = true;
+                    }
+                    let active = running.keys().cloned().collect();
+                    let retry = ocr.take_retry_paths_excluding(
+                        crate::compute_client::MAX_PARALLEL_OCR.saturating_sub(running.len()),
+                        &active,
+                    );
+                    for path in retry {
+                        let (job_roots, job_excludes, job_activity, job_ocr, job_index, job_path) = (
+                            roots.clone(),
+                            excludes.clone(),
+                            activity_config.clone(),
+                            Arc::clone(ocr),
+                            index.clone(),
+                            path.clone(),
+                        );
+                        match thread::Builder::new()
+                            .name("grepmesh-ocr-retry".into())
+                            .spawn(move || {
+                                retry_ocr_path(
+                                    &job_path,
+                                    &job_roots,
+                                    &job_excludes,
+                                    &job_activity,
+                                    max_file_bytes,
+                                    None,
+                                    &job_ocr,
+                                    &job_index,
+                                );
+                            }) {
+                            Ok(task) => {
+                                running.insert(path, task);
+                                pending = true;
+                            }
+                            Err(error) => {
+                                tracing::warn!(error = %error, "OCR retry thread unavailable; input retained")
+                            }
+                        }
                     }
                     if ocr.clear_overflow_if_drained() {
                         pending = true;
                     }
                 }
                 if pending
+                    && running.is_empty()
                     && ocr.as_ref().is_none_or(|ocr| ocr.deferred_count() == 0)
                     && (persistent_state.is_none()
                         || (rebuild_due(last_full_rebuild_ms)
@@ -1650,6 +1713,7 @@ fn reconcile_new_subtrees(
                 ocr,
                 Some(persistent),
                 metadata_only.as_ref(),
+                false,
             ) {
                 Ok((_, _, documents, children)) => {
                     units.extend(children);
@@ -1866,9 +1930,12 @@ fn reconcile_event_paths(
             ocr,
             Some(persistent),
             metadata_only.as_ref(),
+            false,
         ) {
             Ok((_, _, documents, _)) if documents.is_empty() => {
-                let _ = persistent.remove_document(path);
+                if !ocr.is_some_and(|engine| engine.is_deferred(path)) {
+                    let _ = persistent.remove_document(path);
+                }
             }
             Ok((_, _, documents, _)) => {
                 for document in documents {
@@ -1949,7 +2016,9 @@ fn retry_ocr_path(
         return;
     };
     if excluded(path, root, &matcher) {
-        ocr.forget_deferred(path);
+        if persistent.remove_document(path).is_ok() {
+            ocr.forget_deferred(path);
+        }
         return;
     }
     let metadata_only = compile_excludes(&activity_config.metadata_only_globs).ok();
@@ -1963,11 +2032,15 @@ fn retry_ocr_path(
         Some(ocr),
         Some(persistent),
         metadata_only.as_ref(),
+        true,
     ) {
         Ok((_, _, documents, _)) => {
             for document in documents {
                 match persistent.replace_indexed_document(&document) {
-                    Ok(()) => ocr.forget_deferred(&document.path),
+                    Ok(()) => {
+                        ocr.forget_deferred(&document.path);
+                        tracing::info!(input = %document.path.display(), "mesh OCR index committed");
+                    }
                     Err(error) => {
                         let _ = ocr.defer_path(&document.path);
                         tracing::warn!(error = %error, "deferred OCR index write failed");
@@ -2059,6 +2132,7 @@ fn rebuild_index(
                 ocr,
                 rebuild.persistent,
                 metadata_only.as_ref(),
+                false,
             );
             let (unit_count, next, documents, children) = match result {
                 Ok(result) => result,
@@ -2148,6 +2222,7 @@ fn build_root_index(
     let mut map = BTreeMap::new();
     let mut documents = Vec::new();
     let context = ScanContext {
+        dispatch_mesh: false,
         root,
         root_device,
         excludes: &matcher,
@@ -2172,6 +2247,7 @@ fn scan_directory_unit(
     ocr: Option<&OcrEngine>,
     persistent: Option<&PersistentIndex>,
     metadata_only: Option<&GlobSet>,
+    dispatch_mesh: bool,
 ) -> Result<DirectoryScan, String> {
     let root_device = device_id(
         &fs::symlink_metadata(root).map_err(|error| format!("{}: {error}", root.display()))?,
@@ -2198,6 +2274,7 @@ fn scan_directory_unit(
     if metadata.is_file() {
         let mut documents = Vec::new();
         let context = ScanContext {
+            dispatch_mesh,
             root,
             root_device,
             excludes,
@@ -2369,8 +2446,15 @@ fn walk(
                 }
             }
         } else if let Some(ocr) = context.ocr.filter(|ocr| ocr.is_image(path)) {
+            if metadata.len() == 0 {
+                return complete_empty_ocr(path, context, ocr);
+            }
             if ocr.max_image_bytes() != 0 && metadata.len() > ocr.max_image_bytes() {
                 ocr.forget_deferred(path);
+                return Ok(0);
+            }
+            if ocr.is_mesh() && !context.dispatch_mesh {
+                ocr.defer_path(path).map_err(|error| error.to_string())?;
                 return Ok(0);
             }
             match ocr.extract_image(path) {
@@ -2409,6 +2493,10 @@ fn walk(
                 .ocr
                 .filter(|ocr| ocr.is_pdf(path) && ocr.should_ocr_pdf(extracted.as_deref()))
             {
+                if ocr.is_mesh() && !context.dispatch_mesh {
+                    ocr.defer_path(path).map_err(|error| error.to_string())?;
+                    return Ok(0);
+                }
                 match ocr.extract_pdf(path) {
                     Ok(text) if !text.trim().is_empty() => text,
                     Ok(_) => match extracted {
@@ -2517,19 +2605,22 @@ fn exact_glob_basenames(globs: &[String]) -> Option<BTreeSet<String>> {
     if globs.is_empty() || globs.len() > 16 {
         return None;
     }
-    globs.iter().map(|glob| {
-        // Complex/escaped filename patterns keep the general reader. Never
-        // narrow a union if even one branch cannot be conservatively derived.
-        if glob.contains('\\') {
-            return None;
-        }
-        let name = glob.rsplit('/').next()?;
-        if name.is_empty() || name.contains(['*', '?', '[', ']', '{', '}']) {
-            None
-        } else {
-            Some(name.to_owned())
-        }
-    }).collect()
+    globs
+        .iter()
+        .map(|glob| {
+            // Complex/escaped filename patterns keep the general reader. Never
+            // narrow a union if even one branch cannot be conservatively derived.
+            if glob.contains('\\') {
+                return None;
+            }
+            let name = glob.rsplit('/').next()?;
+            if name.is_empty() || name.contains(['*', '?', '[', ']', '{', '}']) {
+                None
+            } else {
+                Some(name.to_owned())
+            }
+        })
+        .collect()
 }
 
 fn compile_excludes(excludes: &[String]) -> Result<GlobSet, String> {
@@ -2567,6 +2658,70 @@ fn excluded(path: &Path, root: &Path, excludes: &GlobSet) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn mesh_discovery_queues_durably_and_excludes_never_enter_ocr() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("new.png");
+        let ignored = dir.path().join("node_modules/ignored.png");
+        let empty = dir.path().join("empty.png");
+        fs::write(&empty, []).unwrap();
+        fs::create_dir_all(ignored.parent().unwrap()).unwrap();
+        fs::write(
+            &image,
+            "deliberately undecodable; discovery must not run OCR",
+        )
+        .unwrap();
+        fs::write(&ignored, "excluded content must not reach OCR").unwrap();
+        let index = PersistentIndex::open(dir.path().join("index.sqlite3")).unwrap();
+        let ocr = OcrEngine::new(OcrConfig {
+            backend: "mesh".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        ocr.attach_pending_store(index.clone()).unwrap();
+        let matcher = compile_excludes(&["**/node_modules/**".into()]).unwrap();
+        for path in [&image, &ignored, &empty] {
+            let (_, _, documents, _) = scan_directory_unit(
+                path,
+                dir.path(),
+                &matcher,
+                0,
+                false,
+                None,
+                Some(&ocr),
+                Some(&index),
+                None,
+                false,
+            )
+            .unwrap();
+            assert!(documents.is_empty());
+        }
+        assert_eq!(index.load_pending_ocr().unwrap().0, vec![image.clone()]);
+        assert!(!ocr.is_deferred(&ignored));
+        assert!(!ocr.is_deferred(&empty));
+        assert!(empty.exists());
+        // An old excluded entry retires without any worker or content decoder.
+        index
+            .replace_document(&ignored, "obsolete indexed ignored text")
+            .unwrap();
+        ocr.defer_path(&ignored).unwrap();
+        retry_ocr_path(
+            &ignored,
+            &BTreeMap::from([("local".into(), vec![dir.path().into()])]),
+            &["**/node_modules/**".into()],
+            &Default::default(),
+            0,
+            None,
+            &ocr,
+            &index,
+        );
+        assert!(!ocr.is_deferred(&ignored));
+        assert!(index.cached_body(&ignored, 0, 0).unwrap().is_none());
+        assert_eq!(index.load_pending_ocr().unwrap().0, vec![image]);
+        assert!(ignored.exists());
+    }
+
     #[test]
     fn energy_recovery_watch_filters_nested_excluded_subtrees() {
         let dir = tempfile::tempdir().unwrap();
@@ -2659,6 +2814,7 @@ mod tests {
             Some(&ocr),
             Some(&index),
             Some(&metadata),
+            false,
         )
         .unwrap();
         assert!(
@@ -2872,6 +3028,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
             )
             .unwrap();
             count += unit_count;
@@ -2965,6 +3122,7 @@ mod tests {
         ocr.defer_path(&path).unwrap();
         let excludes = GlobSetBuilder::new().build().unwrap();
         let context = ScanContext {
+            dispatch_mesh: false,
             root: dir.path(),
             root_device: None,
             excludes: &excludes,
@@ -3147,32 +3305,52 @@ mod tests {
         fs::write(&pdf, b"%PDF\0binary without searchable text").unwrap();
         store.replace_document(&pdf, "needle cached PDF").unwrap();
         for n in 0..500 {
-            store.replace_document(
-                &dir.path().join(format!("unrelated-{n}.txt")), "needle unrelated",
-            ).unwrap();
+            store
+                .replace_document(
+                    &dir.path().join(format!("unrelated-{n}.txt")),
+                    "needle unrelated",
+                )
+                .unwrap();
         }
         let read = |globs: &[String]| {
             let deadline = Instant::now() + Duration::from_secs(5);
             let connection = store.read_connection(deadline).unwrap();
             let steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let observed = steps.clone();
-            connection.progress_handler(1, Some(move || {
-                observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                false
-            }));
+            connection.progress_handler(
+                1,
+                Some(move || {
+                    observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    false
+                }),
+            );
             let mut found = Vec::new();
-            store.visit_matching_documents_with_paths(
-                &connection, "needle", dir.path(), globs, deadline,
-                |path| path == pdf,
-                |path, body| { found.push((path, body)); true },
-            ).unwrap();
+            store
+                .visit_matching_documents_with_paths(
+                    &connection,
+                    "needle",
+                    dir.path(),
+                    globs,
+                    deadline,
+                    |path| path == pdf,
+                    |path, body| {
+                        found.push((path, body));
+                        true
+                    },
+                )
+                .unwrap();
             (found, steps.load(std::sync::atomic::Ordering::Relaxed))
         };
         let baseline = read(&[]);
         let scoped = read(&["**/wanted_%(1).pdf".into()]);
         assert_eq!(scoped.0, vec![(pdf, "needle cached PDF".into())]);
         assert_eq!(baseline.0, scoped.0);
-        assert!(scoped.1 < baseline.1 / 2, "scoped/global steps: {}/{}", scoped.1, baseline.1);
+        assert!(
+            scoped.1 < baseline.1 / 2,
+            "scoped/global steps: {}/{}",
+            scoped.1,
+            baseline.1
+        );
         assert!(exact_glob_basenames(&["**/*.pdf".into()]).is_none());
         assert!(exact_glob_basenames(&["**/wanted.pdf".into(), "**/*.pdf".into()]).is_none());
     }

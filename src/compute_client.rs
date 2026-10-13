@@ -12,6 +12,7 @@ use std::{
     fs::File,
     io::Read,
     path::Path,
+    sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -21,6 +22,31 @@ const MIN_FREE_GPU_BYTES: u64 = 5 * 1024 * 1024 * 1024 / 2;
 const STATUS_TTL: Duration = Duration::from_secs(10);
 const FAILED_PEER_COOLDOWN: Duration = Duration::from_secs(60);
 const MAX_PEERS: usize = 8;
+// Workers cache a short native load snapshot; avoid overlapping observations
+// from this index's three clients while leaving inference fully parallel.
+static STATUS_PROBE_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) const MAX_PARALLEL_OCR: usize = 3;
+
+struct WorkerLease {
+    host: String,
+    claimed: Arc<Mutex<BTreeSet<String>>>,
+}
+impl Drop for WorkerLease {
+    fn drop(&mut self) {
+        if let Ok(mut claimed) = self.claimed.lock() {
+            claimed.remove(&self.host);
+        }
+    }
+}
+fn claim_worker(claimed: &Arc<Mutex<BTreeSet<String>>>, host: &str) -> Option<WorkerLease> {
+    if !claimed.lock().ok()?.insert(host.to_owned()) {
+        return None;
+    }
+    Some(WorkerLease {
+        host: host.to_owned(),
+        claimed: Arc::clone(claimed),
+    })
+}
 
 #[derive(Debug)]
 pub(crate) struct InvalidOcrInput;
@@ -125,10 +151,11 @@ impl ComputeStatus {
     }
 }
 
-/// Synchronous client: indexing already serializes OCR, so no client queues or
-/// extra inference/preprocessing pools are created for mesh mode.
+/// One synchronous lane of the bounded queue dispatcher. Shared reservations
+/// avoid duplicate assignment; each remote worker also admits one native job.
 pub struct ComputeClient {
     config: OcrConfig,
+    claimed: Arc<Mutex<BTreeSet<String>>>,
     agent: ureq::Agent,
     statuses: BTreeMap<String, (Instant, ComputeStatus)>,
     failures: BTreeMap<String, Instant>,
@@ -136,8 +163,16 @@ pub struct ComputeClient {
 
 impl ComputeClient {
     pub fn new(config: OcrConfig) -> Self {
+        Self::with_shared_workers(config, Arc::new(Mutex::new(BTreeSet::new())))
+    }
+
+    pub(crate) fn with_shared_workers(
+        config: OcrConfig,
+        claimed: Arc<Mutex<BTreeSet<String>>>,
+    ) -> Self {
         Self {
             config,
+            claimed,
             agent: ureq::AgentBuilder::new()
                 .timeout_connect(Duration::from_secs(2))
                 .redirects(0)
@@ -187,6 +222,14 @@ impl ComputeClient {
                 break;
             }
             let key = peer_key(&peer);
+            if self
+                .claimed
+                .lock()
+                .map(|set| set.contains(&peer.host_id))
+                .unwrap_or(true)
+            {
+                continue;
+            }
             if self.cooling_down(&key, Instant::now()) {
                 continue;
             }
@@ -292,8 +335,13 @@ impl ComputeClient {
                 self.mark_failed(&peer);
                 continue;
             }
+            let Some(_lease) = claim_worker(&self.claimed, &peer.host_id) else {
+                continue;
+            };
             self.statuses
                 .insert(peer_key(&peer), (Instant::now(), status.clone()));
+            let started = Instant::now();
+            tracing::info!(worker_host = %peer.host_id, input = %path.display(), backend = %status.backend, "mesh OCR dispatch");
             // Leave budget for another eligible candidate after a failed worker.
             let attempt_deadline = ocr_attempt_deadline(input_type, Instant::now(), deadline);
             let result = self.call(&peer, "ocr_extract", arguments.clone(), attempt_deadline);
@@ -318,6 +366,7 @@ impl ComputeClient {
             }
             if let Some(text) = result.get("text").and_then(Value::as_str) {
                 if text.len() <= 4 * 1024 * 1024 {
+                    tracing::info!(worker_host = %peer.host_id, input = %path.display(), backend = %status.backend, elapsed_ms = started.elapsed().as_millis() as u64, "mesh OCR completed");
                     return Ok(text.to_owned());
                 }
             }
@@ -341,6 +390,15 @@ impl ComputeClient {
     }
 
     fn call(&self, peer: &PeerConfig, tool: &str, args: Value, deadline: Instant) -> Result<Value> {
+        let _probe = if tool == "compute_status" {
+            Some(
+                STATUS_PROBE_LOCK
+                    .lock()
+                    .map_err(|_| anyhow!("OCR status probe lock unavailable"))?,
+            )
+        } else {
+            None
+        };
         let payload = serde_json::to_string(
             &json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":tool,"arguments":args}}),
         )?;
@@ -550,6 +608,18 @@ fn unix_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parallel_worker_reservations_are_exclusive_and_released() {
+        let claimed = std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
+        let lease = super::claim_worker(&claimed, "server-44").unwrap();
+        assert!(super::claim_worker(&claimed, "server-44").is_none());
+        let other = super::claim_worker(&claimed, "mac-m1").unwrap();
+        drop(lease);
+        assert!(super::claim_worker(&claimed, "server-44").is_some());
+        drop(other);
+        assert!(claimed.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn pdf_attempt_keeps_its_existing_whole_document_budget() {
