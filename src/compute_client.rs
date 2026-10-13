@@ -254,7 +254,6 @@ impl ComputeClient {
         if remaining == 0 {
             return Err(anyhow!(OcrRecognitionFailure { attempts: 0 }));
         }
-        let mut recognition_failures = 0;
         if !matches!(
             input_type,
             "png" | "jpg" | "jpeg" | "webp" | "tif" | "tiff" | "bmp" | "gif" | "avif" | "pdf"
@@ -397,7 +396,7 @@ impl ComputeClient {
                 Err(error) if error.is::<InvalidOcrInput>() => {
                     tracing::info!(worker_host = %peer.host_id, input = %path.display(), backend = %status.backend, elapsed_ms = started.elapsed().as_millis() as u64, "mesh OCR processing failed");
                     return Err(anyhow!(OcrRecognitionFailure {
-                        attempts: recognition_failures + 1
+                        attempts: 1
                     }));
                 }
                 Err(error) if error.is::<WorkerBusy>() => {
@@ -405,17 +404,14 @@ impl ComputeClient {
                     continue;
                 }
                 Err(error) if error.is::<OcrRecognitionFailure>() => {
-                    recognition_failures += 1;
                     tracing::info!(worker_host = %peer.host_id, input = %path.display(), backend = %status.backend, elapsed_ms = started.elapsed().as_millis() as u64, "mesh OCR processing failed");
                     // A completed input failure does not make this healthy
-                    // host unavailable for other queue files.
+                    // host unavailable for other queue files. Commit this
+                    // receipt before starting another inference: a late
+                    // fallback can otherwise outlive the remaining waiter
+                    // budget and become an uncounted processing failure.
                     self.statuses.remove(&peer_key(&peer));
-                    if recognition_failures >= remaining {
-                        return Err(anyhow!(OcrRecognitionFailure {
-                            attempts: recognition_failures
-                        }));
-                    }
-                    continue;
+                    return Err(anyhow!(OcrRecognitionFailure { attempts: 1 }));
                 }
                 Err(error) => {
                     tracing::warn!(worker_host = %peer.host_id, input = %path.display(), error = %error, "mesh OCR attempt deferred");
@@ -438,11 +434,6 @@ impl ComputeClient {
                 }
             }
             self.mark_failed(&peer);
-        }
-        if recognition_failures > 0 {
-            return Err(anyhow!(OcrRecognitionFailure {
-                attempts: recognition_failures
-            }));
         }
         Err(anyhow!(
             "mesh OCR deferred: no available OCR worker completed extraction"
@@ -685,15 +676,11 @@ pub(crate) fn mesh_input_limit(configured: u64) -> u64 {
         configured.min(MAX_INPUT_BYTES)
     }
 }
-fn ocr_attempt_deadline(input_type: &str, now: Instant, deadline: Instant) -> Instant {
-    // A PDF is one whole-document job. Cutting it off at 45 seconds can
-    // discard a valid result while its native worker still owns the slot.
-    // Keep the existing overall budget; early errors can still fall back.
-    if input_type == "pdf" {
-        deadline
-    } else {
-        deadline.min(now + Duration::from_secs(45))
-    }
+fn ocr_attempt_deadline(_input_type: &str, _now: Instant, deadline: Instant) -> Instant {
+    // Images can also complete after 45 seconds. Keep the configured whole-job
+    // budget so native results and completed failure receipts remain observable.
+    // Admission/busy/transport failures can still fall back without extending it.
+    deadline
 }
 
 fn unix_seconds() -> u64 {
@@ -828,11 +815,11 @@ mod tests {
     }
 
     #[test]
-    fn image_attempt_keeps_fallback_time_and_no_attempt_extends_its_budget() {
+    fn image_native_completion_after_45s_is_observable_without_extending_budget() {
         let now = Instant::now();
         assert_eq!(
             ocr_attempt_deadline("png", now, now + Duration::from_secs(90)),
-            now + Duration::from_secs(45)
+            now + Duration::from_secs(90)
         );
         for input_type in ["png", "pdf"] {
             let short = now + Duration::from_secs(3);
