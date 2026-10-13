@@ -964,7 +964,9 @@ async fn search_text_impl(
     if using_rg {
         // Match the indexer's device boundary. Explicitly configured mounted
         // roots are searched separately, rather than entering foreign mounts.
-        command.arg("--hidden").arg("--one-file-system");
+        // Repository ignore files are not GrepMesh exclusions. Match the
+        // index's configured corpus while retaining explicit exclude globs.
+        command.arg("--hidden").arg("--no-ignore").arg("--one-file-system");
     } else {
         command
             .arg("-R")
@@ -1333,6 +1335,7 @@ async fn find_paths_impl(
     command
         .arg("--files")
         .arg("--hidden")
+        .arg("--no-ignore")
         .arg("--one-file-system");
     for glob in exclude_globs {
         command.arg("--glob").arg(format!("!{glob}"));
@@ -1589,6 +1592,46 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn live_scans_use_configured_exclusions_not_repository_ignore_files() {
+        // Focused integration, expected <1s/max5s. Real rg over an unindexed
+        // tree: the index does not interpret repository ignore files either.
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".ignore"), "needle.txt\nblocked.txt\n").unwrap();
+        let needle = temp.path().join("needle.txt");
+        std::fs::write(&needle, "live needle\n").unwrap();
+        std::fs::write(temp.path().join("blocked.txt"), "live needle\n").unwrap();
+        let backend = super::LocalBackend {
+            host_id: "test".into(),
+            root: temp.path().into(),
+            root_paths: std::collections::BTreeMap::from([(
+                "local".into(), vec![temp.path().into()],
+            )]),
+            limits: Default::default(),
+            exclude_globs: vec!["**/blocked.txt".into()],
+            index: crate::index::IndexManager::disabled(),
+        };
+        for mode in [super::SearchMode::Literal, super::SearchMode::Regex] {
+            let result = backend.search_text_bounded(
+                "live needle", 5, 0, mode, vec![], vec!["local".into()],
+            ).await.unwrap();
+            assert!(!result.partial);
+            assert_eq!(result.hits.len(), 1);
+            assert_eq!(result.hits[0].path, needle.display().to_string());
+        }
+        let paths = backend.find_paths_bounded(
+            "needle.txt", 5, vec!["local".into()],
+        ).await.unwrap();
+        assert!(!paths.partial);
+        assert_eq!(paths.hits.len(), 1);
+        assert_eq!(paths.hits[0].path, needle.display().to_string());
+        let blocked = backend.find_paths_bounded(
+            "blocked.txt", 5, vec!["local".into()],
+        ).await.unwrap();
+        assert!(!blocked.partial);
+        assert!(blocked.hits.is_empty());
+    }
+
     #[tokio::test]
     async fn empty_cached_index_does_not_hide_existing_live_text() {
         // Focused integration, expected <1s/max5s. Real SQLite+rg, no watcher
