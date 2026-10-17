@@ -26,6 +26,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", required=True)
     parser.add_argument("--archive", type=Path, required=True)
+    parser.add_argument("--expected-version", help="Require the packaged MCP version to match the release")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="grepmesh-smoke-") as temp:
         root = Path(temp)
@@ -64,6 +65,9 @@ def main() -> int:
             else:
                 raise SystemExit("packaged GrepMesh did not start")
             assert initialized["result"]["serverInfo"]["name"] == "grepmesh"
+            if args.expected_version:
+                actual_version = initialized["result"]["serverInfo"]["version"]
+                assert actual_version == args.expected_version, (actual_version, args.expected_version)
             searched = rpc(url, "tools/call", {"name": "search_text", "arguments": {"query": "release canary", "hosts": "local"}})
             if "error" in searched:
                 raise SystemExit(f"packaged search returned RPC error: {searched['error']}")

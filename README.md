@@ -137,7 +137,7 @@ locally with ripgrep must set top-level `"index_enabled": false`; omitting
 `index_path` or setting it to `null` selects the default SQLite path and does
 not disable indexing.
 
-OCR is an optional compile-time feature. Normal Linux and Apple-silicon release builds keep it enabled. The Intel macOS release is built with `--no-default-features` because ONNX Runtime no longer publishes an x86_64 macOS runtime; it remains suitable for relay-only nodes or text indexing with OCR disabled.
+OCR is an optional compile-time feature. Normal Linux and Apple-silicon release builds keep it enabled. The Intel macOS release uses `--no-default-features --features ocr` and bundles a compatible CPU ONNX Runtime; local speech transcription is disabled in that build.
 
 Each host also controls hot-directory protection under `limits.index_activity`. GrepMesh counts watcher events and changed bytes per top-level directory during `window_ms`. Crossing either threshold marks that directory hot for `hot_cooldown_ms`, switches updates to filename/size/time metadata only, and suppresses repeated writes for `hot_debounce_ms`. `metadata_only_globs` and `exclude_globs` provide manual per-host policy. Cache, log, build, target, and temporary directories are excluded by default. Current counters and hot state are returned in `index_directory_activity` with host status.
 

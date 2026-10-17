@@ -42,6 +42,22 @@ jobs:
             binary: target/release/grepmesh-mcp.exe
     steps:
       - uses: actions/checkout@v4
+      - name: Verify release version
+        shell: bash
+        run: |
+          python3 - <<'PYVERSION'
+          import os
+          import re
+          from pathlib import Path
+          version = re.search(r'(?ms)^\[package\].*?^version = "([^"\n]+)"', Path("Cargo.toml").read_text()).group(1)
+          locked = re.search(r'(?m)^name = "grepmesh"\nversion = "([^"\n]+)"', Path("Cargo.lock").read_text()).group(1)
+          assert locked == version, (locked, version)
+          ref = os.environ["GITHUB_REF"]
+          if ref.startswith("refs/tags/"):
+              assert ref == f"refs/tags/v{version}", (ref, version)
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              output.write(f"RELEASE_VERSION={version}\n")
+          PYVERSION
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}
@@ -101,6 +117,7 @@ jobs:
         run: |
           python3 scripts/smoke-release.py \
             --target "${{ matrix.target }}" \
+            --expected-version "$RELEASE_VERSION" \
             --archive "dist/grepmesh-${{ matrix.target }}${{ startsWith(matrix.target, 'windows-') && '.zip' || '.tar.gz' }}"
       - uses: actions/upload-artifact@v4
         with:
@@ -114,6 +131,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
@@ -124,4 +142,8 @@ jobs:
         run: sha256sum grepmesh-* > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
+          name: GrepMesh ${{ github.ref_name }}
+          body_path: docs/releases/${{ github.ref_name }}.md
+          draft: false
+          prerelease: false
           files: dist/*
