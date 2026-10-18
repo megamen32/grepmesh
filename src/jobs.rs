@@ -18,7 +18,7 @@ const MAX_JOBS: usize = 256;
 const MAX_CURSORS_PER_JOB: usize = 256;
 const DEFAULT_PAGE_SIZE: usize = 32;
 const MAX_PAGE_SIZE: usize = 64;
-const NEXT_POLL_AFTER_MS: u64 = 30_000;
+const NEXT_POLL_AFTER_MS: u64 = 1_000;
 const MAX_TELEMETRY_RECORDS: usize = 500;
 const MAX_TELEMETRY_BYTES: usize = 2 * 1024 * 1024;
 const TELEMETRY_MAX_AGE_MS: u64 = 30 * 24 * 60 * 60 * 1000;
@@ -511,7 +511,7 @@ impl SearchJobs {
         if running {
             data["next_poll_after_ms"] = Value::from(NEXT_POLL_AFTER_MS);
             data["message"] = Value::String(
-                "Search continues; poll again in 30 seconds. Поиск продолжается; повторите запрос через 30 секунд.".into(),
+                "Search continues; poll again in 1 second. Поиск продолжается; повторите запрос через 1 секунду.".into(),
             );
         }
         if running || end < job.results.len() {

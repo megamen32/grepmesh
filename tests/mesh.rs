@@ -1131,11 +1131,8 @@ async fn async_search_status_returns_a_bounded_final_page() {
         .unwrap()
         .iter()
         .any(|host| host == "A"));
-    assert_eq!(running["next_poll_after_ms"], 30_000);
-    assert!(running["message"]
-        .as_str()
-        .unwrap()
-        .contains("Search continues"));
+    assert_eq!(running["next_poll_after_ms"], 1_000);
+    assert!(running["message"].as_str().unwrap().contains("1 second"));
     let delivered_cursor = running["cursor"].as_str().unwrap().to_string();
 
     tokio::time::sleep(Duration::from_millis(350)).await;
@@ -1326,7 +1323,7 @@ async fn search_tool_defaults_to_compact_ranges_with_search_text_compat_alias() 
     );
     assert_eq!(
         search_schema["inputSchema"]["properties"]["wait_ms"]["default"],
-        30_000
+        500
     );
 
     let compact = rpc(

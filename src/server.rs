@@ -22,7 +22,7 @@ use std::{env, fs, sync::Arc, time::Duration};
 
 const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
 const CURRENT_PROTOCOL_VERSION: &str = "2026-07-28";
-const DEFAULT_FOREGROUND_SEARCH_WAIT_MS: u64 = 30_000;
+const DEFAULT_FOREGROUND_SEARCH_WAIT_MS: u64 = 500;
 
 #[derive(Clone)]
 struct AppState {
@@ -573,7 +573,7 @@ fn tool_meta(name: &str, description: &str) -> Value {
                 "context_lines": {"type": "integer", "minimum": 0},
                 "max_matches": {"type": "integer", "minimum": 1},
                 "wait_ms": {"type": "integer", "minimum": 0, "default": DEFAULT_FOREGROUND_SEARCH_WAIT_MS,
-                    "description": "Foreground wait budget; defaults to 30 seconds. A running search returns an opaque job_id and can be polled."}
+                    "description": "Foreground wait budget; defaults to 500 ms to return quickly. A running search returns an opaque job_id and can be polled."}
             }
         }),
         "find_paths" => json!({
