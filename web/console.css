@@ -89,7 +89,7 @@
 .match-navigation .quiet-button { min-width:60px; padding:6px 4px; font-size:10px; }
 .match-navigation [role="status"] { flex:1; min-width:0; overflow:hidden; text-align:center; text-overflow:ellipsis; white-space:nowrap; }
 .match-navigation button:disabled { opacity:.35; cursor:default; }
-.preview-code { overflow:auto; max-height:430px; padding:9px; border:1px solid var(--line); border-radius:8px; color:#dceafa; background:#101115; font:11px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.preview-code { position:relative; overflow:auto; max-height:430px; padding:9px; border:1px solid var(--line); border-radius:8px; color:#dceafa; background:#101115; font:11px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .preview-line { display:grid; grid-template-columns:3.5em minmax(0,1fr); gap:10px; padding:2px 5px; border-radius:3px; white-space:pre-wrap; word-break:break-word; }
 .line-number { color:var(--dim); text-align:right; user-select:none; }
 .preview-match { color:#fff; background:rgba(41,155,255,.22); box-shadow:inset 2px 0 var(--accent); }

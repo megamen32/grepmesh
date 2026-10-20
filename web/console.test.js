@@ -2,7 +2,7 @@
 const assert=require("node:assert/strict"),fs=require("node:fs"),test=require("node:test"),vm=require("node:vm");
 class Element {
   constructor(){this.children=[];this.dataset={};this.events=new Map();this.className="";this.textContent="";this.attributes={};this.hidden=false;this.open=false;this.classList={add:name=>{this.className+=" "+name;},remove:name=>{this.className=this.className.split(" ").filter(x=>x!==name).join(" ");},toggle:name=>{this.className.includes(name)?this.classList.remove(name):this.classList.add(name);}};}
-  get firstElementChild(){return this.children[0];}get lastElementChild(){return this.children.at(-1);}
+  get firstElementChild(){return this.children[0];}get lastElementChild(){return this.children.at(-1);}get isConnected(){return Boolean(this.connected||this.parentElement?.isConnected);}get offsetTop(){return this.isConnected&&this.parentElement?this.parentElement.children.indexOf(this)*20:0;}get clientHeight(){return this.className.includes("preview-code")?80:0;}
   append(...children){children.forEach(child=>child.parentElement=this);this.children.push(...children);}
   showModal(){this.open=true;}close(){this.open=false;}
   replaceChildren(...children){this.children=[];this.append(...children);}
@@ -14,7 +14,7 @@ class Element {
 }
 const entries=[{name:"zeta.txt",path:"/etc/zeta.txt",kind:"file",size:100,modified_ms:3000,created_ms:null},{name:"alpha.txt",path:"/etc/alpha.txt",kind:"file",size:3,modified_ms:1000,created_ms:2000},{name:"folder",path:"/etc/folder",kind:"directory",size:null,modified_ms:2000,created_ms:1000}];
 function fixture(options={}){
-  const ids=[...fs.readFileSync("web/index.html","utf8").matchAll(/id="([^"]+)"/g)].map(x=>x[1]);const nodes=Object.fromEntries(ids.map(id=>[id,new Element()]));
+  const ids=[...fs.readFileSync("web/index.html","utf8").matchAll(/id="([^"]+)"/g)].map(x=>x[1]);const nodes=Object.fromEntries(ids.map(id=>{const node=new Element();node.connected=true;return[id,node];}));
   nodes.connection.append(new Element(),new Element());nodes["search-state"].append(new Element(),new Element());nodes["search-button"].append(new Element());
   const sorts=["name","size","modified","created"].map(key=>{const node=new Element();node.dataset.sort=key;node.append(new Element());return node;});
   const storage=options.storage || new Map(),requests=[],window=new Element();
@@ -134,6 +134,13 @@ test("selecting a match opens its line and previous/next walks every match in th
   matchLine=descendants(f.nodes.preview).find(node=>node.className.includes("preview-match"));assert.equal(matchLine.dataset.line,"42");assert.match(content(matchLine),/third match/);assert.match(content(f.nodes.preview),/bounded search context instead/);assert.equal(f.nodes["next-match"].disabled,true);
   f.nodes["previous-match"].click();await settle();assert.equal(JSON.parse(f.requests.filter(request=>request.url==="/api/preview").at(-1).options.body).preview_id,"second");assert.equal(f.nodes["match-position"].textContent,"Match 2 of 3 · line 19");assert.equal(f.nodes["previous-match"].disabled,false);
   rows(f).find(row=>row.title.includes("/docs/other.txt:3")).click();await settle();assert.equal(f.nodes["match-position"].textContent,"Match 1 of 1 · line 3");assert.equal(f.nodes["previous-match"].disabled,true);assert.equal(f.nodes["next-match"].disabled,true);
+});
+test("source preview scrolls the selected match into view after attachment",async()=>{
+  const lines=Array.from({length:50},(_,index)=>`${index+1} ${index===36?"needle":"surrounding text"}`);
+  const f=fixture({responses:{"/api/search":{state:"complete",results:[{path:"/docs/long.txt",preview_id:"long",host_id:"server-100",line_number:37,snippet:"needle"}]},"/api/preview":{start_line:1,text:lines.join("\n")}}});
+  await settle();f.nodes.query.value="needle";f.nodes["search-form"].dispatch("submit");await settle();rows(f)[0].click();await settle();
+  const code=descendants(f.nodes.preview).find(node=>node.className.includes("preview-code")),match=descendants(code).find(node=>node.className.includes("preview-match"));
+  assert.equal(match.dataset.line,"37");assert.ok(match.offsetTop-code.scrollTop>=0&&match.offsetTop-code.scrollTop<=code.clientHeight,"selected match should scroll into the visible preview window");
 });
 test("browse selection previews Markdown, JSON and HTML with source mode and bounded safe rendering",async()=>{
   const previewFiles=[

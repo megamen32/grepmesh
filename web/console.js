@@ -204,8 +204,8 @@
     code.setAttribute("role","region"); code.setAttribute("aria-label",matchLine?(isOcr?`Extracted text near match on line ${matchLine}`:`File source near match on line ${matchLine}`):"File source preview"); code.tabIndex=0;
     let matchRow=null;
     lines.forEach((line,offset)=>{const lineNumber=Number(pick(exactLines[offset], ["line_number"]))||startLine+offset,isMatch=lineNumber===matchLine,row=element("div",`preview-line${isMatch?" preview-match":""}`);row.dataset.line=String(lineNumber);row.append(element("span","line-number",lineNumber),element("span","line-text",line||" "));code.append(row);if(isMatch)matchRow=row;});
-    code.scrollTop=matchRow&&Number.isFinite(matchRow.offsetTop)&&Number.isFinite(code.clientHeight)?Math.max(0,matchRow.offsetTop-Math.floor(code.clientHeight/2)):0;
     body.append(code);
+    code.scrollTop=matchRow&&Number.isFinite(matchRow.offsetTop)&&Number.isFinite(code.clientHeight)?Math.max(0,matchRow.offsetTop-Math.floor(code.clientHeight/2)):0;
   }
   function renderFilePreview() {
     const body=state.previewBody, entry=state.previewEntry, view=state.previewMode==="rendered"?"document":sourcePreviewView(entry), payload=state.previewPayloads[view]||state.previewPayload;
