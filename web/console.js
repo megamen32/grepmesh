@@ -157,7 +157,7 @@
     });
     clear(placeholder); placeholder.textContent = ""; placeholder.className = "bounded-preview";
     placeholder.append(element("p", "detail-label", `Content · line ${result.line}`), code);
-    matchedLine?.scrollIntoView?.({ block: "center", inline: "nearest" });
+    if (matchedLine) code.scrollTop = 0;
   }
   async function loadMatchPreview(result) {
     browseEntryDetails(result);

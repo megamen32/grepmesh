@@ -8,7 +8,7 @@ class Element {
   addEventListener(name,listener){this.events.set(name,listener);}setAttribute(key,value){this.attributes[key]=value;}
   dispatch(name,target=this,key){return this.events.get(name)?.({target,key,preventDefault(){}});}click(){return this.dispatch("click");}
   closest(selector){for(let node=this;node;node=node.parentElement)if(node.className.split(" ").includes(selector.slice(1)))return node;return null;}
-  contains(candidate){for(let node=candidate;node;node=node.parentElement)if(node===this)return true;return false;}focus(){}scrollIntoView(){this.scrolledIntoView=true;}
+  contains(candidate){for(let node=candidate;node;node=node.parentElement)if(node===this)return true;return false;}focus(){}
 }
 const entries=[{name:"zeta.txt",path:"/etc/zeta.txt",kind:"file",size:100,modified_ms:3000,created_ms:null},{name:"alpha.txt",path:"/etc/alpha.txt",kind:"file",size:3,modified_ms:1000,created_ms:2000},{name:"folder",path:"/etc/folder",kind:"directory",size:null,modified_ms:2000,created_ms:1000}];
 function fixture(options={}){
@@ -66,7 +66,7 @@ test("selecting a match opens its line and previous/next walks every match in th
   await settle();f.nodes.query.value="match";f.nodes["search-form"].dispatch("submit");await settle();
   const second=rows(f).find(row=>row.title.includes("/docs/guide.txt:19"));second.click();await settle();
   assert.equal(f.nodes["match-navigation"].hidden,false);assert.equal(f.nodes["match-position"].textContent,"Match 2 of 3 · line 19");
-  let matchLine=descendants(f.nodes.preview).find(node=>node.className.includes("preview-match"));assert.equal(matchLine.dataset.line,"19");assert.match(content(matchLine),/second match/);assert.equal(matchLine.scrolledIntoView,true);
+  let matchLine=descendants(f.nodes.preview).find(node=>node.className.includes("preview-match"));assert.equal(matchLine.dataset.line,"19");assert.match(content(matchLine),/second match/);assert.equal(descendants(f.nodes.preview).find(node=>node.className.includes("preview-code")).scrollTop,0);
   assert.equal(f.nodes["previous-match"].disabled,false);assert.equal(f.nodes["next-match"].disabled,false);
   f.nodes["previous-match"].click();await settle();assert.equal(JSON.parse(f.requests.filter(request=>request.url==="/api/preview").at(-1).options.body).preview_id,"first");assert.equal(f.nodes["match-position"].textContent,"Match 1 of 3 · line 7");assert.equal(f.nodes["previous-match"].disabled,true);
   f.nodes["next-match"].click();await settle();assert.equal(JSON.parse(f.requests.filter(request=>request.url==="/api/preview").at(-1).options.body).preview_id,"second");
