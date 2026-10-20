@@ -633,8 +633,10 @@ impl LocalBackend {
                 let reader_globs = path_globs.clone();
                 let reader_excludes = exclude_globs.clone();
                 let case_sensitive = matches!(mode, SearchMode::Literal);
-                let reader_deadline =
-                    (deadline.min(Instant::now() + Duration::from_secs(2))).into_std();
+                // Indexed reads run in spawn_blocking and already have the
+                // bounded request deadline. A separate two-second cap makes
+                // large but valid FTS lookups surface as SQLITE_INTERRUPT.
+                let reader_deadline = deadline.into_std();
                 // SQLite and cached document parsing must never occupy the async HTTP worker.
                 let indexed = tokio::task::spawn_blocking(move || {
                     index.search_text_hits_filtered_until(
