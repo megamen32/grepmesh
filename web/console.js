@@ -3,13 +3,15 @@
 
   const api = Object.freeze({ catalog: "/api/catalog", browse: "/api/browse", search: "/api/search", searchStatus: "/api/search/status", preview: "/api/preview", backup: "/api/backup/availability" });
   const $ = (id) => document.getElementById(id);
+  const markdownRenderer = typeof markdownit === "function" ? markdownit({ html: false, linkify: false, typographer: false }) : null;
   const dom = {
     connection: $("connection"), form: $("search-form"), query: $("query"), refresh: $("refresh-catalog"),
     button: $("search-button"), state: $("search-state"), hosts: $("host-sidebar"), locations: $("locations-sidebar"), results: $("results"),
     count: $("results-count"), preview: $("preview"), failures: $("host-failures"), backupBadge: $("backup-badge"), backup: $("backup-body"),
     matchNavigation: $("match-navigation"), matchPosition: $("match-position"), previousMatch: $("previous-match"), nextMatch: $("next-match"),
+    fileEditor: $("file-editor-dialog"), fileEditorTitle: $("file-editor-title"), fileEditorClose: $("file-editor-close"), fileEditorSidebar: $("file-editor-sidebar"), fileEditorMain: $("file-editor-main"),
   };
-  const state = { catalog: null, selected: null, selectedHost: "", selectedRoot: null, browseTarget: null, results: [], matches: [], matchIndex: -1, mode: "browse", sort: "name", direction: 1, history: [], historyIndex: -1, statuses: [], telemetry: [], bookmarks: readBookmarks(), viewVersion: 0 };
+  const state = { catalog: null, selected: null, selectedHost: "", selectedRoot: null, browseTarget: null, hostRootView: false, results: [], matches: [], matchIndex: -1, mode: "browse", sort: "name", direction: 1, history: [], historyIndex: -1, statuses: [], telemetry: [], bookmarks: readBookmarks(), viewVersion: 0, previewBody: null, previewEntry: null, previewPayload: null, previewPayloads: {}, previewMode: "source", fileEditorReturnParent: null };
 
   function text(value) { return value == null ? "" : String(value); }
   function pick(object, keys, fallback = undefined) { for (const key of keys) if (object && object[key] !== undefined && object[key] !== null) return object[key]; return fallback; }
@@ -46,6 +48,7 @@
   }
   function resetPreview() {
     resetMatchNavigation();
+    state.previewBody = null; state.previewEntry = null; state.previewPayload = null; state.previewPayloads = {}; state.previewMode = "source";
     const preview = clear(dom.preview); preview.className = "preview-empty";
     preview.append(element("span", "file-icon folder large"), element("p", "", "No file selected."), element("small", "", "Choose a file or folder to inspect its details."));
   }
@@ -61,8 +64,14 @@
       button.addEventListener("click", () => selectHost(host.id)); hosts.append(button);
     });
   }
-  function selectHost(hostId) { state.viewVersion++; state.selectedHost = hostId; state.selectedRoot = null; state.browseTarget = null; state.selected = null; state.results = []; state.mode = "browse"; renderHosts(); renderLocations(); renderBrowsePlaceholder(); resetPreview(); renderPath(); renderHostDetail(); renderHostFailures([]); showFiles(); }
-  function selectRoot(root) { state.selectedRoot = root; state.browseTarget = root; state.selected = null; state.mode = "browse"; renderLocations(); resetPreview(); browseDirectory(root); }
+  function rootEntries() { return visibleRoots().map(root => ({ host: root.host, name: root.name && root.name !== root.path ? root.name : basename(root.path), path: root.path, kind: "directory", size: null, modified: null, created: null, key: `root:${root.host}:${root.path}` })); }
+  function renderHostRootEntries() {
+    const entries = rootEntries(); state.results = entries;
+    if (!entries.length) { clear(dom.results).append(element("div","empty-results",state.selectedHost ? "No configured folders are available for this Device." : "No configured folders are available.")); dom.count.textContent = "0 folders"; setSearchState("complete","No folders configured."); return; }
+    renderBrowseEntries(entries); dom.count.textContent = `${entries.length} ${entries.length === 1 ? "folder" : "folders"}`; setSearchState("complete","Locations ready.");
+  }
+  function selectHost(hostId) { state.viewVersion++; state.selectedHost = hostId; state.selectedRoot = null; state.browseTarget = null; state.hostRootView = true; state.selected = null; state.results = []; state.mode = "browse"; renderHosts(); renderLocations(); renderHostRootEntries(); resetPreview(); renderPath(); renderHostDetail(); renderHostFailures([]); showFiles(); }
+  function selectRoot(root) { state.selectedRoot = root; state.browseTarget = root; state.hostRootView = false; state.selected = null; state.mode = "browse"; renderLocations(); resetPreview(); browseDirectory(root); }
   function selectLocation(event) { const button = event.target?.closest?.(".location-item"); if (!button || !dom.locations.contains(button)) return; const root = visibleRoots().find((candidate) => candidate.host === button.dataset.host && candidate.path === button.dataset.root); if (root) selectRoot(root); }
   function renderLocations() {
     const locations = clear(dom.locations); const roots = visibleRoots();
@@ -73,18 +82,42 @@
     });
   }
   function renderBrowsePlaceholder() { clear(dom.results); dom.count.textContent = "Choose a Location"; const empty = element("div", "empty-results"); empty.append(element("span", "empty-icon", "▱"), element("p", "", "Select a Location to browse its immediate entries."), element("small", "", "Devices and Locations stay available in the sidebar while you browse.")); dom.results.append(empty); }
-  function renderCatalog(payload) { state.catalog = catalogEntries(payload); reconcileHostStatus(); if (state.selectedHost && !state.catalog.hosts.some((host) => host.id === state.selectedHost)) state.selectedHost = ""; if (state.selectedRoot && !state.catalog.roots.some((root) => root.host === state.selectedRoot.host && root.path === state.selectedRoot.path)) state.selectedRoot = null; renderHosts(); renderLocations(); renderPath(); if (!state.browseTarget && state.mode === "browse") renderBrowsePlaceholder(); setConnection("ready", state.catalog.hosts.length ? `${state.catalog.hosts.length} hosts configured` : "Catalog is ready"); }
+  function renderCatalog(payload) { state.catalog = catalogEntries(payload); reconcileHostStatus(); if (state.selectedHost && !state.catalog.hosts.some((host) => host.id === state.selectedHost)) state.selectedHost = ""; if (state.selectedRoot && !state.catalog.roots.some((root) => root.host === state.selectedRoot.host && root.path === state.selectedRoot.path)) state.selectedRoot = null; renderHosts(); renderLocations(); renderPath(); if (!state.browseTarget && state.mode === "browse") { if (state.hostRootView) renderHostRootEntries(); else renderBrowsePlaceholder(); } setConnection("ready", state.catalog.hosts.length ? `${state.catalog.hosts.length} hosts configured` : "Catalog is ready"); }
   async function loadCatalog() { setConnection("", "Loading catalog…"); try { renderCatalog(await request(api.catalog)); } catch (error) { clear(dom.hosts).append(element("p", "sidebar-empty", "Catalog unavailable")); clear(dom.locations).append(element("p", "sidebar-empty", "Catalog unavailable")); clear(dom.results).append(element("div", "empty-results", `Catalog unavailable: ${errorMessage(error)}`)); setConnection("error", "Catalog unavailable"); setSearchState("error", `Catalog unavailable: ${errorMessage(error)}`); } }
-  function normalizeEntries(payload, host) { const source = dataOf(payload); return (Array.isArray(source.entries) ? source.entries : []).map((entry, index) => ({ host: text(pick(entry, ["host_id", "host"], host)), name: text(pick(entry, ["name"], "Unnamed entry")), path: text(pick(entry, ["path"], "")), kind: text(pick(entry, ["kind"], "other")), size: pick(entry, ["size"]), modified: pick(entry, ["modified_ms"]), created: pick(entry, ["created_ms"]), key: `${host}:${pick(entry, ["path"], index)}` })).filter((entry) => entry.path); }
+  function normalizeEntries(payload, host) { const source = dataOf(payload); return (Array.isArray(source.entries) ? source.entries : []).map((entry, index) => ({ host: text(pick(entry, ["host_id", "host"], host)), name: text(pick(entry, ["name"], "Unnamed entry")), path: text(pick(entry, ["path"], "")), kind: text(pick(entry, ["kind"], "other")), previewId: text(pick(entry, ["preview_id"], "")), previewUnavailable: text(pick(entry, ["preview_unavailable"], "")), size: pick(entry, ["size"]), modified: pick(entry, ["modified_ms"]), created: pick(entry, ["created_ms"]), key: `${host}:${pick(entry, ["path"], index)}` })).filter((entry) => entry.path); }
   function browseEntryDetails(entry) {
+    state.previewBody = null; state.previewEntry = null; state.previewPayload = null; state.previewPayloads = {}; state.previewMode = "source";
     const content = clear(dom.preview); content.className = "preview-content";
     content.append(element("span", `file-icon ${entry.kind === "directory" ? "folder" : "file"} large`), element("h2", "inspector-name", entry.name || entry.path.split(/[\\/]/).pop()), element("p", "inspector-kind", entry.kind === "directory" ? "Folder" : "File"));
-    const details = element("dl", "detail-grid");
+    if (entry.kind !== "directory") {
+      state.previewBody = element("div", "file-preview"); state.previewEntry = entry; state.previewPayload = null;
+      content.append(state.previewBody);
+      if (!entry.previewId) state.previewBody.append(element("small", "", entry.previewUnavailable === "handle_limit" ? "Preview limit reached for this folder. Open a smaller folder to preview this file." : "A bounded content preview is unavailable for this entry."));
+    }
+    const detailPanel=element("details","detail-panel"),detailSummary=element("summary","","File details"),details = element("dl", "detail-grid");detailPanel.open=false;
     for (const [label,value] of [["Size",formatBytes(entry.size)],["Kind",entry.kind],["Created",formatDate(entry.created,true)],["Modified",formatDate(entry.modified,true)],["Host",entry.host],["Path",entry.path]]) details.append(element("dt","",label),element("dd","",value));
-    content.append(details);
+    detailPanel.append(detailSummary,details);
+    content.append(detailPanel);
     if (entry.kind === "directory") { const open = element("button","quiet-button","Open folder"); open.addEventListener("click",()=>browseDirectory(entry)); content.append(open); }
-    else if(!entry.previewId) content.append(element("small","","Search for this file’s text to open a bounded content preview."));
+    if (dom.fileEditor.open && state.previewBody) { dom.fileEditorMain.replaceChildren(state.previewBody); updateFileEditor(entry); }
   }
+  function updateFileEditor(entry) {
+    dom.fileEditorTitle.textContent=entry.name||entry.path.split(/[\\/]/).pop()||"File view";
+    const sidebar=clear(dom.fileEditorSidebar);
+    sidebar.append(element("span","file-editor-kicker","FILE"),element("strong","file-editor-name",entry.name||entry.path.split(/[\\/]/).pop()),element("p","file-editor-path",entry.path),element("p","file-editor-host",`${entry.host||"Host"} · ${formatBytes(entry.size)}`));
+    if(state.matches.length>1){
+      const navigation=element("section","file-editor-navigation"),controls=element("div","file-editor-match-controls"),previous=element("button","quiet-button","‹ Previous"),next=element("button","quiet-button","Next ›"),match=state.matches[state.matchIndex];
+      previous.type=next.type="button";previous.disabled=state.matchIndex<=0;next.disabled=state.matchIndex>=state.matches.length-1;
+      previous.addEventListener("click",()=>selectMatch(state.matchIndex-1));next.addEventListener("click",()=>selectMatch(state.matchIndex+1));
+      controls.append(previous,next);navigation.append(element("span","file-editor-kicker","MATCHES"),element("p","file-editor-match-position",`Match ${state.matchIndex+1} of ${state.matches.length} · line ${match?.line||entry.matchLine||1}`),controls);sidebar.append(navigation);
+    }
+  }
+  function openFileEditor() {
+    if(!state.previewBody||!state.previewEntry)return;
+    state.fileEditorReturnParent=state.previewBody.parentElement;
+    updateFileEditor(state.previewEntry);dom.fileEditorMain.replaceChildren(state.previewBody);dom.fileEditor.showModal();renderFilePreview();
+  }
+  function closeFileEditor() { if(dom.fileEditor.open)dom.fileEditor.close(); }
   function renderBrowseEntries(entries) {
     clear(dom.results); dom.count.textContent = `${entries.length} ${entries.length === 1 ? "item" : "items"}`;
     if (!entries.length) { dom.results.append(element("div","empty-results","This folder is empty or its entries are excluded.")); return; }
@@ -96,34 +129,128 @@
       dom.results.append(button);
     });
   }
+  function renderSearchProgress() { const progress=element("div","search-progress"); progress.setAttribute("role","status"); progress.append(element("span","search-progress-spinner"),element("span","","Идёт поиск…")); clear(dom.results).append(progress); }
   async function browseDirectory(target, remember = true) {
     if (!target?.host || !target?.path) return;
     const version = ++state.viewVersion; state.mode = "browse"; state.browseTarget = target; state.selectedHost = target.host; state.selected = null; showFiles();
     state.selectedRoot = (state.catalog?.roots || []).filter(root=>root.host === target.host && pathContains(root.path,target.path)).sort((a,b)=>b.path.length-a.path.length)[0] || target;
     if(remember && (state.history[state.historyIndex]?.path !== target.path || state.history[state.historyIndex]?.host !== target.host)) { state.history = state.history.slice(0,state.historyIndex+1); state.history.push({host:target.host,path:target.path}); state.historyIndex = state.history.length-1; }
     renderPath(); renderHosts(); renderLocations(); renderHostDetail(); resetPreview();
-    renderHostFailures([]); clear(dom.results).append(element("div","empty-results","Loading folder…")); setSearchState("running","Loading folder…"); dom.count.textContent = "Loading…";
+    state.hostRootView = false; renderHostFailures([]); clear(dom.results).append(element("div","empty-results","Loading folder…")); setSearchState("running","Loading folder…"); dom.count.textContent = "Loading…";
     try { const payload = await request(api.browse,{method:"POST",body:JSON.stringify({host:target.host,path:target.path})}); if(version !== state.viewVersion) return; state.results = normalizeEntries(payload,target.host); renderBrowseEntries(state.results); setSearchState("complete","Ready"); }
     catch(error) { if(version !== state.viewVersion) return; clear(dom.results).append(element("div","empty-results",`Browse unavailable: ${errorMessage(error)}`)); dom.count.textContent = "Unavailable"; setSearchState("error",errorMessage(error)); }
   }
-  function selectBrowseEntry(entry, button) { resetMatchNavigation(); state.selected = entry; document.querySelectorAll(".result.selected").forEach(item=>item.classList.remove("selected")); button.classList.add("selected"); browseEntryDetails(entry); }
+  function selectBrowseEntry(entry, button) { resetMatchNavigation(); state.selected = entry; document.querySelectorAll(".result.selected").forEach(item=>item.classList.remove("selected")); button.classList.add("selected"); browseEntryDetails(entry); if(entry.kind !== "directory" && entry.previewId) loadFilePreview(entry); }
   function normalizeResults(payload) { const source = dataOf(payload); const raw = pick(source, ["results", "matches", "hits"], []); return (Array.isArray(raw) ? raw : []).map((item, index) => ({ previewId: text(pick(item, ["preview_id"], "")), host: text(pick(item, ["host_id", "host"], "local")), path: text(pick(item, ["path", "file"], "")), kind: "file", size: pick(item,["size"]), modified: pick(item,["modified_ms"]), created: pick(item,["created_ms"]), line: Number(pick(item, ["line_number", "line", "start_line"], 1)) || 1, snippet: text(pick(item, ["snippet", "text", "line_text", "match"], "")), key: `${pick(item, ["preview_id", "id"], "")}:${index}` })).filter((item) => item.path || item.previewId); }
   function statusDetails(payload) { const source = dataOf(payload); const hostStatus = pick(source, ["host_status", "hosts"], []); const failures = (Array.isArray(hostStatus) ? hostStatus : []).filter((item) => item && item.ok === false).map((item) => ({ host: text(pick(item, ["host_id", "host", "id"], "unknown host")), error: text(pick(item, ["error", "message"], "No error detail was returned.")) })); return { partial: Boolean(pick(source, ["partial"], false)), truncated: Boolean(pick(source, ["truncated"], false)), failures }; }
-  function renderHostFailures(failures) { clear(dom.failures); if (!failures.length) { dom.failures.hidden = true; return; } dom.failures.append(element("p", "host-failures-heading", "Mesh host errors")); failures.forEach((failure) => { const item = element("div", "host-failure"); item.append(element("strong", "", `Host ${failure.host} reported an error`), element("code", "", failure.error)); dom.failures.append(item); }); dom.failures.hidden = false; }
+  function renderHostFailures(failures) {
+    const wasOpen=dom.failures.open===true;
+    clear(dom.failures);
+    if(!failures.length){dom.failures.hidden=true;dom.failures.open=false;return;}
+    dom.failures.append(element("summary","host-failures-summary",`Mesh errors · ${failures.length}`));
+    const list=element("div","host-failures-list");
+    failures.forEach(failure=>{const item=element("div","host-failure");item.append(element("strong","",`Host ${failure.host} reported an error`),element("code","",failure.error));list.append(item);});
+    dom.failures.append(list);dom.failures.open=wasOpen;dom.failures.hidden=false;
+  }
   function renderResults(results) { clear(dom.results); if(!results.length){dom.results.append(element("div","empty-results","No matching files."));return;}sortedEntries(results).forEach(result=>{const button=fileRow(result);button.title=`${result.host} · ${result.path}:${result.line}\n${result.snippet}`;button.addEventListener("click",()=>selectResult(result,button));dom.results.append(button);}); }
-  function renderSearch(payload) { const source = dataOf(payload); state.mode = "search"; state.results = normalizeResults(payload); renderResults(state.results); dom.count.textContent = formatCount(state.results.length); const details = statusDetails(payload); renderHostFailures(details.failures);
-    if(pick(source,["state","status"],"") === "running") { const pending=Array.isArray(source.pending_hosts) ? source.pending_hosts.length : null; setSearchState("running",`Searching${pending == null ? "…" : ` · ${pending} host${pending === 1 ? "" : "s"} pending`}${details.failures.length ? ` · ${details.failures.length} failed` : ""}`);return; }
+  function renderSearch(payload) { const source = dataOf(payload); state.mode = "search"; state.hostRootView = false; state.results = normalizeResults(payload); const details = statusDetails(payload),running=pick(source,["state","status"],"") === "running"; if(running && !state.results.length) { renderSearchProgress(); dom.count.textContent = "Идёт поиск…"; } else { renderResults(state.results); dom.count.textContent = formatCount(state.results.length); } renderHostFailures(details.failures);
+    if(running) { const pending=Array.isArray(source.pending_hosts) ? source.pending_hosts.length : null; setSearchState("running",`Идёт поиск${pending == null ? "…" : ` · ожидает узлов: ${pending}`}${details.failures.length ? ` · с ошибкой: ${details.failures.length}` : ""}`);return; }
     if(details.partial && details.truncated)setSearchState("partial","Partial result and truncated result set. Narrow the query, then retry.");else if(details.partial)setSearchState("partial",`Partial result: ${details.failures.length || "one or more"} host responses were unavailable.`);else if(details.truncated)setSearchState("truncated","Results are truncated to the allowed limit. Narrow the query or scope.");else setSearchState("complete",state.results.length ? "Search complete." : "Search complete with no matches.");
   }
   async function pollSearch(payload,version) { let current=payload;if(version===state.viewVersion)renderSearch(current);while(pick(dataOf(current),["state"],"")==="running"){const source=dataOf(current),jobId=source.job_id;if(!jobId)throw new Error("The local API did not return a search job ID.");await new Promise(resolve=>setTimeout(resolve,Math.max(100,Math.min(500,Number(source.next_poll_after_ms)||100))));current=await request(api.searchStatus,{method:"POST",body:JSON.stringify({job_id:jobId})});if(version===state.viewVersion)renderSearch(current);}return current; }
   async function performSearch(event) {
     event.preventDefault();const query=dom.query.value.trim();if(!query){dom.query.focus();setSearchState("error","Enter text or a pattern before searching.");return;}
-    const version=++state.viewVersion;showFiles();dom.button.disabled=true;dom.button.firstElementChild.textContent="Searching";setSearchState("running","Searching…");dom.count.textContent="Searching…";state.selected=null;resetPreview();
+    const version=++state.viewVersion;showFiles();dom.button.disabled=true;dom.button.firstElementChild.textContent="Searching";setSearchState("running","Идёт поиск…");dom.count.textContent="Идёт поиск…";state.results=[];state.selected=null;resetPreview();renderSearchProgress();renderHostFailures([]);
     try{const body={query};if(state.selectedHost)body.hosts=state.selectedHost;if(state.browseTarget){body.hosts=state.browseTarget.host;body.roots=[state.browseTarget.path];}await pollSearch(await request(api.search,{method:"POST",body:JSON.stringify(body)}),version);}
     catch(error){if(version===state.viewVersion){dom.count.textContent="Unavailable";setSearchState("error",`Search failed: ${errorMessage(error)}`);clear(dom.results).append(element("div","empty-results","Search unavailable."));}}
     finally{dom.button.disabled=false;dom.button.firstElementChild.textContent="Search";loadTelemetry();}
   }
-  function previewText(payload) { const source = dataOf(payload); if (typeof source.text === "string") return source.text; if (typeof source.content === "string") return source.content; if (Array.isArray(source.chunks)) return source.chunks.map((chunk) => typeof chunk === "string" ? chunk : pick(chunk, ["text", "content"], "")).join("\n"); return "No preview text was returned."; }
+  function previewText(payload) { const source = dataOf(payload); if (typeof source.text === "string") return source.text; if (typeof source.content === "string") return source.content; if (Array.isArray(source.chunks)) return source.chunks.map((chunk) => typeof chunk === "string" ? chunk : pick(chunk, ["text", "content"], "")).join("\n"); if (Array.isArray(source.lines)) return source.lines.map(line => typeof line === "string" ? line : pick(line, ["text", "content"], "")).join("\n"); return "No preview text was returned."; }
+  function previewType(path) { const name=text(path).split(/[\\/]/).pop().toLowerCase(); if(name.endsWith(".md")||name.endsWith(".markdown"))return "markdown"; if(name.endsWith(".json"))return "json"; if(name.endsWith(".html")||name.endsWith(".htm"))return "html"; if(/\.(png|jpe?g|webp|tiff?|bmp|gif|avif|pdf)$/.test(name))return "ocr"; return "text"; }
+  function sourcePreviewView(entry) { return (entry.matchLine||entry.line)&&previewType(entry.path)!=="ocr"?"window":"match"; }
+  function renderSandboxedDocument(frame, markup, title) {
+    const style = "body{margin:0;padding:20px;color:#222;background:#fff;font:14px/1.6 system-ui,-apple-system,sans-serif;overflow-wrap:anywhere}pre,code{font-family:ui-monospace,monospace}pre{overflow:auto;padding:12px;background:#f3f4f6;border-radius:6px}table{border-collapse:collapse}th,td{border:1px solid #bbb;padding:5px 8px}img,svg,video{max-width:100%;height:auto}a{color:#175ea8}blockquote{border-left:3px solid #aaa;padding-left:12px;color:#555}h1,h2,h3{line-height:1.25}hr{border:0;border-top:1px solid #ddd}";
+    const policy = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src 'none'; connect-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; navigate-to 'none'";
+    frame.title = title; frame.setAttribute("sandbox", ""); frame.setAttribute("referrerpolicy", "no-referrer");
+    frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${policy}"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${style}</style></head><body>${markup}</body></html>`;
+  }
+  function jsonKind(value) { if(value===null)return "null"; if(Array.isArray(value))return "array"; return typeof value; }
+  function renderJsonTree(value, key, depth, budget) {
+    if (--budget.remaining < 0) return element("div", "json-value json-limit", "Further values omitted from this preview.");
+    const type=jsonKind(value);
+    if(type!=="object"&&type!=="array") { const row=element("div","json-value"), name=element("span","json-key",key==null?"(value)":key), primitive=element("code",`json-primitive ${type}`,JSON.stringify(value)); row.append(name,primitive); return row; }
+    const entries=type==="array"?value.map((item,index)=>[String(index),item]):Object.entries(value);
+    const details=element("details","json-node"), summary=element("summary","",`${key==null?(type==="array"?"Array":"Object"):key} · ${entries.length} ${type==="array"?"items":"keys"}`);
+    details.open=depth===0; details.append(summary);
+    if(depth>=16) { details.append(element("div","json-value json-limit","Nested values collapsed at the preview depth limit.")); return details; }
+    for(const [childKey,childValue] of entries) details.append(renderJsonTree(childValue,childKey,depth+1,budget));
+    return details;
+  }
+  function renderJsonPreview(body, source) {
+    let parsed;
+    try { parsed=JSON.parse(source); } catch { body.append(element("p","preview-note","This bounded preview is not complete valid JSON. Showing the available source text.")); return false; }
+    const actions=element("div","json-tree-actions"), expand=element("button","","Expand all"), collapse=element("button","","Collapse all"); expand.type=collapse.type="button";
+    const tree=element("div","json-tree"); tree.setAttribute("role","region"); tree.setAttribute("aria-label","Formatted JSON preview");
+    tree.append(renderJsonTree(parsed,null,0,{remaining:3000}));
+    expand.addEventListener("click",()=>tree.querySelectorAll("details").forEach(node=>{node.open=true;})); collapse.addEventListener("click",()=>tree.querySelectorAll("details").forEach(node=>{node.open=false;}));
+    actions.append(expand,collapse); body.append(actions,tree); return true;
+  }
+  function renderSourcePreview(body, payload, matchLine) {
+    const data=dataOf(payload),source=previewText(payload), startLine=Math.max(1,Number(pick(data,["start_line","line"],matchLine||1))||matchLine||1), lines=source.split(/\r?\n/), exactLines=Array.isArray(data.lines)?data.lines:[], code=element("div","preview-code");
+    const isOcr=previewType(state.previewEntry?.path)==="ocr";
+    code.setAttribute("role","region"); code.setAttribute("aria-label",matchLine?(isOcr?`Extracted text near match on line ${matchLine}`:`File source near match on line ${matchLine}`):"File source preview"); code.tabIndex=0;
+    let matchRow=null;
+    lines.forEach((line,offset)=>{const lineNumber=Number(pick(exactLines[offset], ["line_number"]))||startLine+offset,isMatch=lineNumber===matchLine,row=element("div",`preview-line${isMatch?" preview-match":""}`);row.dataset.line=String(lineNumber);row.append(element("span","line-number",lineNumber),element("span","line-text",line||" "));code.append(row);if(isMatch)matchRow=row;});
+    code.scrollTop=matchRow&&Number.isFinite(matchRow.offsetTop)&&Number.isFinite(code.clientHeight)?Math.max(0,matchRow.offsetTop-Math.floor(code.clientHeight/2)):0;
+    body.append(code);
+  }
+  function renderFilePreview() {
+    const body=state.previewBody, entry=state.previewEntry, view=state.previewMode==="rendered"?"document":sourcePreviewView(entry), payload=state.previewPayloads[view]||state.previewPayload;
+    if(!body||!entry||!payload)return;
+    state.previewPayload=payload;
+    clear(body); const type=previewType(entry.path), source=previewText(payload), data=dataOf(payload), startLine=Math.max(1,Number(pick(data,["start_line","line"],view==="document"?1:entry.matchLine||1))||1), truncated=Boolean(data.truncated), supported=type==="markdown"||type==="html"||type==="json", canRender=type==="markdown"||type==="html"||(type==="json"&&!truncated);
+    if(truncated)body.append(element("p","preview-note","Bounded preview only: the rest of this file was not loaded."));
+    if(data.window_fallback)body.append(element("p","preview-note","The preview hit a safe read limit. Showing the bounded search context instead."));
+    if(data.document_fallback)body.append(element("p","preview-note","The full document hit a safe read limit. Showing the bounded search context instead."));
+    if(type==="json"&&truncated)body.append(element("p","preview-note","JSON formatting needs the complete file. Showing the bounded source instead."));
+    if(type==="markdown"&&!markdownRenderer)body.append(element("p","preview-note","Markdown renderer is unavailable. Showing the source instead."));
+    if(state.previewMode==="rendered"&&(type==="html"||type==="markdown"))body.append(element("p","preview-note","Scripts and external resources are blocked in this preview."));
+    body.append(element("p","detail-label",entry.matchLine?(view==="document"?`Document preview · match at line ${entry.matchLine}`:`Source · match at line ${entry.matchLine}`):`Content · starts at line ${startLine}`));
+    if(entry.matchLine&&view==="document")body.append(element("p","preview-note","Rendered view starts at the beginning. Source opens at the selected match."));
+    const useTabs=supported&&(type!=="markdown"||Boolean(markdownRenderer));
+    {
+      const editorIsOpen=dom.fileEditor.open,toolbar=element("div","preview-toolbar"),editor=element("button","preview-editor-open",editorIsOpen?"Close editor":"↗ Open in editor");editor.type="button";editor.setAttribute("aria-label",editorIsOpen?"Close file editor view":"Open file in editor view");editor.addEventListener("click",editorIsOpen?closeFileEditor:openFileEditor);toolbar.append(editor);
+      const tabs=element("div","preview-tabs");tabs.setAttribute("role","tablist");tabs.setAttribute("aria-label","File preview mode");
+      if(useTabs){
+      for(const [mode,label] of [["rendered","Rendered"],["source","Source"]]){const tab=element("button","",label);tab.type="button";tab.setAttribute("aria-pressed",String(state.previewMode===mode));tab.disabled=mode==="rendered"&&!canRender;tab.addEventListener("click",()=>{if(!tab.disabled)loadPreviewMode(mode);});tabs.append(tab);}
+      toolbar.append(tabs);
+      }
+      body.append(toolbar);
+    }
+    if(state.previewMode==="rendered"&&useTabs){
+      if(type==="markdown"){const frame=element("iframe","preview-frame");renderSandboxedDocument(frame,markdownRenderer.render(source),"Rendered Markdown preview");body.append(frame);}
+      else if(type==="html"){const frame=element("iframe","preview-frame");renderSandboxedDocument(frame,source,"Isolated HTML preview");body.append(frame);}
+      else if(!renderJsonPreview(body,source))renderSourcePreview(body,payload,state.previewEntry.matchLine);
+      return;
+    }
+    renderSourcePreview(body,payload,state.previewEntry.matchLine);
+  }
+  async function loadPreviewMode(mode) {
+    const body=state.previewBody,entry=state.previewEntry;if(!body||!entry)return;
+    const view=mode==="rendered"?"document":sourcePreviewView(entry),needsDocument=Boolean(entry.matchLine)&&view==="document";
+    if(state.previewPayloads[view]){state.previewMode=mode;renderFilePreview();return;}
+    if(!needsDocument){state.previewPayloads[view]=state.previewPayloads[view==="document"?"match":"document"]||state.previewPayload;state.previewMode=mode;renderFilePreview();return;}
+    clear(body).append(element("div","preview-loading","Loading document preview…"));
+    try{const payload=await request(api.preview,{method:"POST",body:JSON.stringify({preview_id:entry.previewId,view})});if(state.previewEntry!==entry||state.previewBody!==body)return;state.previewPayloads[view]=payload;if(dataOf(payload).document_fallback){state.previewPayloads[sourcePreviewView(entry)]=payload;state.previewMode="source";}else state.previewMode=mode;renderFilePreview();}
+    catch(error){if(state.previewEntry!==entry||state.previewBody!==body)return;clear(body).append(element("p","preview-error",`Document preview unavailable: ${errorMessage(error)}`));}
+  }
+  async function loadFilePreview(entry) {
+    const body=state.previewBody; if(!body||!entry.previewId)return;
+    if(previewType(entry.path)==="ocr"&&!entry.line){clear(body).append(element("p","preview-note","This is a binary file. Text preview is available when search has indexed OCR text for a matching line."));return;}
+    clear(body).append(element("div","preview-loading","Loading bounded file preview…"));
+    try { const type=previewType(entry.path),view=entry.line?sourcePreviewView(entry):"document",payload=await request(api.preview,{method:"POST",body:JSON.stringify({preview_id:entry.previewId,view})}); if(state.selected!==entry||state.previewBody!==body)return; state.previewEntry={...entry,matchLine:entry.line};state.previewPayload=payload;state.previewPayloads[view]=payload;state.previewMode=entry.line||type==="text"||type==="ocr"||Boolean(dataOf(payload).truncated&&type==="json")?"source":"rendered";renderFilePreview(); }
+    catch(error){if(state.selected!==entry||state.previewBody!==body)return;clear(body).append(element("p","preview-error",`Preview unavailable: ${errorMessage(error)}`));}
+  }
   function renderMatchNavigation() {
     const count = state.matches.length, match = state.matches[state.matchIndex];
     dom.matchNavigation.hidden = !match;
@@ -142,35 +269,10 @@
     }
     renderMatchNavigation(); loadMatchPreview(match);
   }
-  function renderMatchPreview(placeholder, payload, result) {
-    const source = dataOf(payload);
-    const startLine = Math.max(1, Number(pick(source, ["start_line", "line"], result.line)) || result.line);
-    const lines = previewText(payload).split(/\r?\n/), code = element("div", "preview-code");
-    code.setAttribute("role", "region"); code.setAttribute("aria-label", `File content near match on line ${result.line}`); code.tabIndex = 0;
-    let matchedLine = null;
-    lines.forEach((line, offset) => {
-      const lineNumber = startLine + offset, isMatch = lineNumber === result.line;
-      const row = element("div", `preview-line${isMatch ? " preview-match" : ""}`);
-      row.dataset.line = String(lineNumber);
-      row.append(element("span", "line-number", lineNumber), element("span", "line-text", line || " "));
-      code.append(row); if (isMatch) matchedLine = row;
-    });
-    clear(placeholder); placeholder.textContent = ""; placeholder.className = "bounded-preview";
-    placeholder.append(element("p", "detail-label", `Content · line ${result.line}`), code);
-    if (matchedLine) code.scrollTop = 0;
-  }
   async function loadMatchPreview(result) {
     browseEntryDetails(result);
-    const preview = element("div", "preview-loading", `Loading match at line ${result.line}…`); dom.preview.append(preview);
-    if (!result.previewId) { preview.className = "preview-error"; preview.textContent = "Preview is unavailable because this result has no server-issued preview ID."; return; }
-    try {
-      const payload = await request(api.preview, { method: "POST", body: JSON.stringify({ preview_id: result.previewId }) });
-      if (state.selected !== result) return;
-      renderMatchPreview(preview, payload, result);
-    } catch (error) {
-      if (state.selected !== result) return;
-      preview.className = "preview-error"; preview.textContent = `Preview unavailable: ${errorMessage(error)}`;
-    }
+    if (!result.previewId) { state.previewBody.append(element("p", "preview-error", "Preview is unavailable because this result has no server-issued preview ID.")); return; }
+    await loadFilePreview(result);
   }
   function selectResult(result) {
     state.matches = state.results.filter(item => item.host === result.host && item.path === result.path).sort((a, b) => a.line - b.line);
@@ -246,6 +348,8 @@
   $("go-back").addEventListener("click",()=>{if(state.historyIndex>0)browseDirectory(state.history[--state.historyIndex],false);});$("go-forward").addEventListener("click",()=>{if(state.historyIndex<state.history.length-1)browseDirectory(state.history[++state.historyIndex],false);});
   $("bookmark-current").addEventListener("click",()=>{const target=state.browseTarget;if(!target)return;const index=state.bookmarks.findIndex(item=>item.host===target.host && item.path===target.path);if(index>=0)state.bookmarks.splice(index,1);else state.bookmarks.push({host:target.host,path:target.path});saveBookmarks();});
   $("toggle-inspector").addEventListener("click",()=>document.querySelector(".finder-window").classList.toggle("hide-inspector"));
+  dom.fileEditorClose.addEventListener("click",closeFileEditor);
+  dom.fileEditor.addEventListener("close",()=>{if(state.previewBody&&state.fileEditorReturnParent){const details=state.fileEditorReturnParent.querySelector(".detail-panel");if(details)state.fileEditorReturnParent.insertBefore(state.previewBody,details);else state.fileEditorReturnParent.append(state.previewBody);}state.fileEditorReturnParent=null;if(state.previewPayload)renderFilePreview();dom.fileEditorMain.replaceChildren();});
   document.querySelectorAll("[data-sort]").forEach(button=>button.addEventListener("click",()=>{state.direction=state.sort === button.dataset.sort ? -state.direction : 1;state.sort=button.dataset.sort;document.querySelectorAll("[data-sort]").forEach(item=>{item.setAttribute("aria-sort",item.dataset.sort===state.sort ? state.direction===1 ? "ascending" : "descending" : "none");item.lastElementChild.textContent=item.dataset.sort===state.sort ? state.direction===1 ? "⌃" : "⌄" : "";});if(state.mode === "browse")renderBrowseEntries(state.results);else renderResults(state.results);}));
   dom.form.addEventListener("submit", performSearch); dom.locations.addEventListener("click", selectLocation); dom.refresh.addEventListener("click", () => { loadCatalog(); loadBackup(); loadHostStatus(); loadTelemetry(); }); renderPath();renderBookmarks();loadCatalog();loadBackup();loadHostStatus();loadTelemetry();
   if(typeof setInterval === "function")setInterval(()=>{if(!document.hidden)loadHostStatus();},15000);

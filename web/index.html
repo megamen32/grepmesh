@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="dark">
-  <title>GrepMesh — Files</title><link rel="stylesheet" href="/ui/console.css">
+  <title>GrepMesh — Files</title><link rel="stylesheet" href="/ui/console.css?v=file-preview-20261020i">
 </head>
 <body class="finder-app">
 <main class="finder-window">
@@ -32,7 +32,6 @@
       <input id="query" name="query" type="search" autocomplete="off" placeholder="Search text or pattern in this location">
       <button id="search-button" class="quiet-button" type="submit"><span>Search</span></button>
     </form>
-    <div id="host-failures" class="host-failures" hidden></div>
     <div class="file-table" id="file-table">
       <div class="list-header" role="row">
         <button type="button" data-sort="name" aria-sort="ascending">Name <span>⌃</span></button>
@@ -43,6 +42,7 @@
       </div>
       <div id="results" class="results finder-list" aria-live="polite"></div>
     </div>
+    <details id="host-failures" class="host-failures" hidden></details>
     <section id="telemetry-panel" class="telemetry-panel" hidden aria-label="Search history"><div class="history-heading"><h2>Search history</h2><button id="close-telemetry" class="quiet-button">Back to files</button></div><p id="telemetry-retention" class="muted"></p><div id="telemetry-records"></div></section>
     <footer class="browser-status"><span id="results-count">Choose a location</span><div id="search-state" class="search-state idle" role="status"><span class="state-dot"></span><span>Ready</span></div></footer>
   </section>
@@ -58,5 +58,10 @@
     <details class="backup-card"><summary>Backup catalog <span id="backup-badge" class="backup-state">Checking…</span></summary><div id="backup-body" class="backup-body"></div></details>
   </aside>
 </main>
-<script src="/ui/console.js?v=finder-match-nav-1c56464" defer></script>
+<dialog id="file-editor-dialog" class="file-editor-dialog" aria-labelledby="file-editor-title">
+  <header class="file-editor-header"><div><span class="file-editor-kicker">GrepMesh file view</span><h2 id="file-editor-title">File preview</h2></div><button id="file-editor-close" class="icon-button" type="button" aria-label="Close file view">✕</button></header>
+  <div class="file-editor-layout"><aside id="file-editor-sidebar" class="file-editor-sidebar"></aside><section id="file-editor-main" class="file-editor-main" aria-label="File contents"></section></div>
+</dialog>
+<script src="/ui/markdown-it.js?v=15.0.3" defer></script>
+<script src="/ui/console.js?v=file-preview-20261020i" defer></script>
 </body></html>

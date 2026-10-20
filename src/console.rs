@@ -5,6 +5,7 @@
 //! handles so a browser never submits an arbitrary filesystem path.
 
 use crate::{
+    backend::MatchLine,
     backup_catalog::{read_fixture_availability, BackupCatalogConfig},
     config::{AppConfig, SttConfig},
     jobs::SearchJobs,
@@ -51,6 +52,8 @@ struct PreviewTarget {
     host: String,
     path: String,
     line_number: usize,
+    match_lines: Vec<MatchLine>,
+    match_truncated: bool,
 }
 
 /// Browser-only routes. The caller deliberately mounts this router exclusively
@@ -74,6 +77,7 @@ pub fn router(
         .route("/ui/", get(index))
         .route("/ui/console.css", get(stylesheet))
         .route("/ui/console.js", get(script))
+        .route("/ui/markdown-it.js", get(markdown_script))
         .route("/ui/settings", get(settings_page))
         .route("/ui/settings.js", get(settings_script))
         .route("/api/settings", get(settings).post(save_settings))
@@ -180,6 +184,13 @@ async fn script() -> impl IntoResponse {
     (
         [("content-type", "application/javascript; charset=utf-8")],
         include_str!("../web/console.js"),
+    )
+}
+
+async fn markdown_script() -> impl IntoResponse {
+    (
+        [("content-type", "application/javascript; charset=utf-8")],
+        include_str!("../web/vendor/markdown-it-15.0.3.min.js"),
     )
 }
 
@@ -299,7 +310,11 @@ async fn browse(State(state): State<ConsoleState>, Json(request): Json<Value>) -
         })
         .await
     {
-        Ok(result) => Json(result.data).into_response(),
+        Ok(result) => {
+            let mut data = result.data;
+            issue_browse_preview_handles(&state, &mut data, host);
+            Json(data).into_response()
+        }
         Err(err) => bad_request(err.to_string()),
     }
 }
@@ -386,15 +401,41 @@ async fn preview(State(state): State<ConsoleState>, Json(request): Json<Value>) 
     let Some(target) = take_preview_target(&state, preview_id) else {
         return bad_request("unknown or expired preview_id");
     };
-    let end_line = target
-        .line_number
-        .saturating_add(MAX_PREVIEW_LINES.saturating_sub(1));
+    let view = request
+        .get("view")
+        .and_then(Value::as_str)
+        .unwrap_or("match");
+    if !matches!(view, "match" | "window" | "document") {
+        return bad_request("view must be match, window, or document");
+    }
+    let mut preview_target = target.clone();
+    if view == "document" {
+        preview_target.line_number = 1;
+    }
+    if view == "match" && !target.match_lines.is_empty() {
+        preview_target.line_number = target.match_lines[0].line_number;
+        let data = json!({"chunks": [{"lines": target.match_lines}]});
+        return Json(bounded_preview(data, &preview_target)).into_response();
+    }
+    if view == "window" {
+        preview_target.line_number = target
+            .line_number
+            .saturating_sub(MAX_PREVIEW_LINES / 2)
+            .max(1);
+    }
+    let end_line = if view == "document" {
+        MAX_PREVIEW_LINES.saturating_add(1)
+    } else {
+        preview_target
+            .line_number
+            .saturating_add(MAX_PREVIEW_LINES.saturating_sub(1))
+    };
     match state
         .service
         .call_read_text(ReadTextArgs {
             host: target.host.clone(),
             path: target.path.clone().into(),
-            start_line: Some(target.line_number.max(1)),
+            start_line: Some(preview_target.line_number.max(1)),
             end_line: Some(end_line),
             request_id: None,
             origin_host: None,
@@ -402,9 +443,37 @@ async fn preview(State(state): State<ConsoleState>, Json(request): Json<Value>) 
         })
         .await
     {
-        Ok(result) => Json(bounded_preview(result.data, &target)).into_response(),
+        Ok(result) => Json(bounded_preview(result.data, &preview_target)).into_response(),
+        Err(err)
+            if matches!(view, "window" | "document")
+                && !target.match_lines.is_empty()
+                && is_preview_size_limit(&err) =>
+        {
+            tracing::warn!(
+                host_id = %target.host,
+                reason = "bounded_read_limit",
+                "file preview fell back to indexed match context"
+            );
+            let mut fallback_target = target.clone();
+            fallback_target.line_number = target.match_lines[0].line_number;
+            let data = json!({"chunks": [{"lines": target.match_lines.clone()}]});
+            let mut preview = bounded_preview(data, &fallback_target);
+            if view == "document" {
+                preview["document_fallback"] = Value::Bool(true);
+            } else {
+                preview["window_fallback"] = Value::Bool(true);
+            }
+            Json(preview).into_response()
+        }
         Err(err) => bad_request(err.to_string()),
     }
+}
+
+fn is_preview_size_limit(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let message = cause.to_string().to_ascii_lowercase();
+        message.contains("read limit") || message.contains("max_file_bytes")
+    })
 }
 
 async fn backup_availability(State(state): State<ConsoleState>) -> Json<Value> {
@@ -421,30 +490,139 @@ fn issue_preview_handles(state: &ConsoleState, data: &mut Value) {
     let Some(results) = data.get_mut("results").and_then(Value::as_array_mut) else {
         return;
     };
+    issue_entry_preview_handles(state, results, None, false);
+    data["matches"] = Value::Array(results.clone());
+}
+
+fn issue_browse_preview_handles(state: &ConsoleState, data: &mut Value, host: &str) {
+    let Some(entries) = data.get_mut("entries").and_then(Value::as_array_mut) else {
+        return;
+    };
+    issue_entry_preview_handles(state, entries, Some(host), true);
+}
+
+fn issue_entry_preview_handles(
+    state: &ConsoleState,
+    entries: &mut [Value],
+    fallback_host: Option<&str>,
+    files_only: bool,
+) {
     let mut previews = match state.previews.lock() {
         Ok(previews) => previews,
         Err(_) => return,
     };
-    prune_preview_handles(&mut previews);
-    for result in results.iter_mut() {
-        let Some(host) = result.get("host_id").and_then(Value::as_str) else {
+    issue_entry_preview_handles_in_map(&mut previews, entries, fallback_host, files_only);
+}
+
+fn issue_entry_preview_handles_in_map(
+    previews: &mut BTreeMap<String, PreviewTarget>,
+    entries: &mut [Value],
+    fallback_host: Option<&str>,
+    files_only: bool,
+) {
+    prune_preview_handles(previews);
+    let eligible_count = entries
+        .iter()
+        .filter(|entry| {
+            let is_file = entry
+                .get("kind")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("file"));
+            (!files_only || is_file)
+                && entry.get("path").and_then(Value::as_str).is_some()
+                && entry
+                    .get("host_id")
+                    .or_else(|| entry.get("host"))
+                    .and_then(Value::as_str)
+                    .or(fallback_host)
+                    .is_some()
+        })
+        .count();
+    let batch_capacity = eligible_count.min(MAX_PREVIEW_HANDLES);
+    while previews.len() > MAX_PREVIEW_HANDLES.saturating_sub(batch_capacity) {
+        let Some(oldest) = previews.keys().next().cloned() else {
+            break;
+        };
+        previews.remove(&oldest);
+    }
+    let mut issued_in_batch = 0;
+    for entry in entries {
+        let is_file = entry
+            .get("kind")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("file"));
+        if files_only && !is_file {
+            continue;
+        }
+        let host = entry
+            .get("host_id")
+            .or_else(|| entry.get("host"))
+            .and_then(Value::as_str)
+            .or(fallback_host);
+        let Some(host) = host else { continue };
+        let Some(path) = entry.get("path").and_then(Value::as_str) else {
             continue;
         };
-        let Some(path) = result.get("path").and_then(Value::as_str) else {
+        if issued_in_batch >= batch_capacity {
+            entry["preview_unavailable"] = Value::String("handle_limit".to_string());
+            if let Some(object) = entry.as_object_mut() {
+                let _ = object.remove("preview_id");
+            }
             continue;
-        };
-        let line_number = result
+        }
+        let line_number = entry
             .get("line_number")
             .and_then(Value::as_u64)
             .and_then(|line| usize::try_from(line).ok())
             .unwrap_or(1)
             .max(1);
-        while previews.len() >= MAX_PREVIEW_HANDLES {
-            let Some(oldest) = previews.keys().next().cloned() else {
-                break;
-            };
-            previews.remove(&oldest);
+        let mut match_lines: Vec<MatchLine> = entry
+            .get("context")
+            .cloned()
+            .and_then(|context| serde_json::from_value(context).ok())
+            .unwrap_or_default();
+        if !match_lines
+            .iter()
+            .any(|line| line.line_number == line_number)
+        {
+            if let Some(text) = entry
+                .get("text")
+                .or_else(|| entry.get("snippet"))
+                .and_then(Value::as_str)
+            {
+                match_lines.push(MatchLine {
+                    line_number,
+                    text: text.to_string(),
+                });
+            }
         }
+        match_lines.sort_by_key(|line| line.line_number);
+        match_lines.dedup_by_key(|line| line.line_number);
+        match_lines.sort_by_key(|line| {
+            (
+                line.line_number != line_number,
+                line.line_number.abs_diff(line_number),
+                line.line_number,
+            )
+        });
+        let mut match_truncated = match_lines.len() > MAX_PREVIEW_LINES;
+        match_lines.truncate(MAX_PREVIEW_LINES);
+        let mut remaining_bytes = MAX_PREVIEW_BYTES;
+        let mut bounded_lines = Vec::with_capacity(match_lines.len());
+        for mut line in match_lines {
+            if remaining_bytes == 0 {
+                match_truncated = true;
+                break;
+            }
+            if line.text.len() > remaining_bytes {
+                truncate_utf8(&mut line.text, remaining_bytes);
+                match_truncated = true;
+            }
+            remaining_bytes = remaining_bytes.saturating_sub(line.text.len());
+            bounded_lines.push(line);
+        }
+        match_lines = bounded_lines;
+        match_lines.sort_by_key(|line| line.line_number);
         let preview_id = fresh_preview_id();
         previews.insert(
             preview_id.clone(),
@@ -453,11 +631,16 @@ fn issue_preview_handles(state: &ConsoleState, data: &mut Value) {
                 host: host.to_string(),
                 path: path.to_string(),
                 line_number,
+                match_lines,
+                match_truncated,
             },
         );
-        result["preview_id"] = Value::String(preview_id);
+        entry["preview_id"] = Value::String(preview_id);
+        if let Some(object) = entry.as_object_mut() {
+            let _ = object.remove("preview_unavailable");
+        }
+        issued_in_batch += 1;
     }
-    data["matches"] = Value::Array(results.clone());
 }
 
 fn take_preview_target(state: &ConsoleState, preview_id: &str) -> Option<PreviewTarget> {
@@ -478,13 +661,25 @@ fn fresh_preview_id() -> String {
     )
 }
 
+fn truncate_utf8(value: &mut String, max_bytes: usize) {
+    if value.len() <= max_bytes {
+        return;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+}
+
 fn bounded_preview(data: Value, target: &PreviewTarget) -> Value {
     let mut lines = Vec::new();
     let mut used_bytes = 0usize;
-    let mut truncated = data
-        .get("truncated")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let mut truncated = target.match_truncated
+        || data
+            .get("truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
     if let Some(chunks) = data.get("chunks").and_then(Value::as_array) {
         'chunks: for chunk in chunks {
             let Some(chunk_lines) = chunk.get("lines").and_then(Value::as_array) else {
@@ -537,4 +732,63 @@ fn bad_request(message: impl Into<String>) -> Response {
         Json(json!({"error": message.into()})),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browse_preview_capacity_never_expires_handles_from_the_same_response() {
+        let mut entries: Vec<Value> = (0..520)
+            .map(|index| {
+                json!({
+                    "kind": "file",
+                    "path": format!("/docs/file-{index:04}.txt"),
+                })
+            })
+            .collect();
+        let mut previews = BTreeMap::new();
+
+        issue_entry_preview_handles_in_map(&mut previews, &mut entries, Some("server-100"), true);
+
+        let handles: Vec<&str> = entries
+            .iter()
+            .filter_map(|entry| entry["preview_id"].as_str())
+            .collect();
+        assert_eq!(handles.len(), MAX_PREVIEW_HANDLES);
+        assert_eq!(previews.len(), MAX_PREVIEW_HANDLES);
+        assert!(
+            entries
+                .iter()
+                .filter(|entry| entry["preview_unavailable"] == "handle_limit")
+                .count()
+                == 8
+        );
+        assert!(handles.iter().all(|handle| previews.contains_key(*handle)));
+    }
+
+    #[test]
+    fn bounded_match_context_prioritizes_the_match_within_the_byte_budget() {
+        let mut entries = vec![json!({
+            "kind": "file",
+            "path": "/docs/large-context.txt",
+            "line_number": 2,
+            "context": [
+                {"line_number": 1, "text": "before"},
+                {"line_number": 2, "text": "n".repeat(MAX_PREVIEW_BYTES)}
+            ]
+        })];
+        let mut previews = BTreeMap::new();
+
+        issue_entry_preview_handles_in_map(&mut previews, &mut entries, Some("server-100"), false);
+
+        let preview = previews
+            .get(entries[0]["preview_id"].as_str().unwrap())
+            .unwrap();
+        assert!(preview.match_truncated);
+        assert_eq!(preview.match_lines.len(), 1);
+        assert_eq!(preview.match_lines[0].line_number, 2);
+        assert_eq!(preview.match_lines[0].text.len(), MAX_PREVIEW_BYTES);
+    }
 }

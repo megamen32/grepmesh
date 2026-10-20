@@ -118,7 +118,8 @@ async fn local_console_ui_and_catalog_have_a_browser_safe_success_shape() {
     for column in ["name", "size", "modified", "created"] {
         assert!(ui.contains(&format!("data-sort=\"{column}\"")));
     }
-    assert!(ui.contains("<script src=\"/ui/console.js?v=finder-20260907\" defer></script>"));
+    assert!(ui.contains("<script src=\"/ui/markdown-it.js?v=15.0.3\" defer></script>"));
+    assert!(ui.contains("<script src=\"/ui/console.js?v=file-preview-20261020i\" defer></script>"));
     assert!(!ui.contains("Directory browsing is not available yet."));
     assert!(ui.contains("id=\"host-failures\""));
 
@@ -140,6 +141,18 @@ async fn local_console_ui_and_catalog_have_a_browser_safe_success_shape() {
     assert!(script.contains("pollSearch"));
     assert!(script.contains("/api/host-status"));
     assert!(script.contains("/api/telemetry"));
+    let markdown = client
+        .get(format!("{}/ui/markdown-it.js?v=15.0.3", harness.local_base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(markdown.status(), StatusCode::OK);
+    assert!(markdown
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/javascript")));
+    assert!(markdown.text().await.unwrap().contains("markdownit"));
 
     let catalog = client
         .get(format!("{}/api/catalog", harness.local_base))
@@ -218,6 +231,14 @@ async fn local_console_browse_lists_immediate_safe_entries_for_a_catalog_root() 
     let fixture = tempfile::tempdir().unwrap();
     fs::create_dir(fixture.path().join("nested")).unwrap();
     fs::write(fixture.path().join("finder-canary.txt"), "finder canary\n").unwrap();
+    fs::write(
+        fixture.path().join("long.md"),
+        (1..=205)
+            .map(|line| format!("line {line}\n"))
+            .collect::<Vec<_>>()
+            .join(""),
+    )
+    .unwrap();
     let harness = start_console(fixture.path()).await;
     let client = Client::new();
 
@@ -254,6 +275,58 @@ async fn local_console_browse_lists_immediate_safe_entries_for_a_catalog_root() 
     assert!(entries.iter().any(|entry| {
         entry["name"] == "finder-canary.txt" && entry["kind"] == "file" && entry["size"].is_number()
     }));
+    let preview_id = entries
+        .iter()
+        .find(|entry| entry["name"] == "finder-canary.txt")
+        .and_then(|entry| entry["preview_id"].as_str())
+        .expect("a browsed file must get an opaque preview handle");
+    let preview = client
+        .post(format!("{}/api/preview", harness.local_base))
+        .json(&json!({"preview_id": preview_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(preview.status(), StatusCode::OK);
+    let preview: Value = preview.json().await.unwrap();
+    assert!(preview["text"]
+        .as_str()
+        .is_some_and(|text| text.contains("finder canary")));
+    assert_eq!(preview["start_line"], 1);
+    let long_preview_id = entries
+        .iter()
+        .find(|entry| entry["name"] == "long.md")
+        .and_then(|entry| entry["preview_id"].as_str())
+        .expect("a browsed document must receive a bounded preview handle");
+    let document_preview = client
+        .post(format!("{}/api/preview", harness.local_base))
+        .json(&json!({"preview_id": long_preview_id, "view": "document"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(document_preview.status(), StatusCode::OK);
+    let document_preview: Value = document_preview.json().await.unwrap();
+    assert_eq!(document_preview["lines"].as_array().unwrap().len(), 200);
+    assert_eq!(document_preview["truncated"], true);
+    let document_preview = client
+        .post(format!("{}/api/preview", harness.local_base))
+        .json(&json!({"preview_id": preview_id, "view": "document"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(document_preview.status(), StatusCode::OK);
+    let invalid_view = client
+        .post(format!("{}/api/preview", harness.local_base))
+        .json(&json!({"preview_id": preview_id, "view": "other"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_view.status(), StatusCode::BAD_REQUEST);
+    assert!(entries
+        .iter()
+        .find(|entry| entry["name"] == "nested")
+        .unwrap()
+        .get("preview_id")
+        .is_none());
     assert!(entries.iter().all(|entry| {
         entry.get("token").is_none() && entry.get("bearer").is_none() && entry.get("url").is_none()
     }));
@@ -265,6 +338,67 @@ async fn local_console_browse_lists_immediate_safe_entries_for_a_catalog_root() 
         .await
         .unwrap();
     assert_eq!(remote_browse.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bounded_match_context_keeps_the_match_when_prior_context_uses_the_byte_budget() {
+    let fixture = tempfile::tempdir().unwrap();
+    fs::write(
+        fixture.path().join("large-context.txt"),
+        format!("{}\nneedle\n", "x".repeat(64 * 1024)),
+    )
+    .unwrap();
+    let harness = start_console(fixture.path()).await;
+    let client = Client::new();
+    let mut search: Value = client
+        .post(format!("{}/api/search", harness.local_base))
+        .json(&json!({"query": "needle"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for _ in 0..40 {
+        if search["results"]
+            .as_array()
+            .is_some_and(|results| !results.is_empty())
+        {
+            break;
+        }
+        let Some(job_id) = search["job_id"].as_str() else {
+            break;
+        };
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        search = client
+            .post(format!("{}/api/search/status", harness.local_base))
+            .json(&json!({"job_id": job_id}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    }
+    let preview_id = search["results"][0]["preview_id"].as_str().unwrap();
+    let preview: Value = client
+        .post(format!("{}/api/preview", harness.local_base))
+        .json(&json!({"preview_id": preview_id}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(preview["truncated"], true);
+    assert!(preview["text"]
+        .as_str()
+        .is_some_and(|text| text.contains("needle")));
+    assert!(!preview["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|line| line["text"] == ""));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -310,11 +444,9 @@ async fn local_search_keeps_running_partial_truncated_and_host_status_fields() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn preview_requires_an_opaque_search_result_handle_not_an_arbitrary_path() {
     let fixture = tempfile::tempdir().unwrap();
-    fs::write(
-        fixture.path().join("preview-canary.txt"),
-        "GREP_CONSOLE_PREVIEW_CANARY\n",
-    )
-    .unwrap();
+    let mut content = vec![b'x'; 1024 * 1024 + 32];
+    content.extend_from_slice(b"\nGREP_CONSOLE_PREVIEW_CANARY\n");
+    fs::write(fixture.path().join("preview-canary.txt"), content).unwrap();
     let harness = start_console(fixture.path()).await;
     let client = Client::new();
 
@@ -324,6 +456,7 @@ async fn preview_requires_an_opaque_search_result_handle_not_an_arbitrary_path()
             "query": "GREP_CONSOLE_PREVIEW_CANARY",
             "hosts": "local",
             "max_matches": 10,
+            "context_lines": 0,
             "wait_ms": 1_000,
         }))
         .send()
@@ -370,6 +503,36 @@ async fn preview_requires_an_opaque_search_result_handle_not_an_arbitrary_path()
     assert!(approved_preview["lines"].is_array());
     assert!(approved_preview["truncated"].is_boolean());
     assert!(approved_preview["lines"].as_array().unwrap().len() <= 200);
+    assert_eq!(approved_preview["start_line"], 2);
+    assert!(approved_preview["text"]
+        .as_str()
+        .is_some_and(|text| text.contains("GREP_CONSOLE_PREVIEW_CANARY")));
+
+    let bounded_fallback = client
+        .post(format!("{}/api/preview", harness.local_base))
+        .json(&json!({"preview_id": preview_id, "view": "window"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bounded_fallback.status(), StatusCode::OK);
+    let bounded_fallback: Value = bounded_fallback.json().await.unwrap();
+    assert_eq!(bounded_fallback["window_fallback"], true);
+    assert!(bounded_fallback["text"]
+        .as_str()
+        .is_some_and(|text| text.contains("GREP_CONSOLE_PREVIEW_CANARY")));
+
+    let document_fallback = client
+        .post(format!("{}/api/preview", harness.local_base))
+        .json(&json!({"preview_id": preview_id, "view": "document"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(document_fallback.status(), StatusCode::OK);
+    let document_fallback: Value = document_fallback.json().await.unwrap();
+    assert_eq!(document_fallback["document_fallback"], true);
+    assert!(document_fallback["text"]
+        .as_str()
+        .is_some_and(|text| text.contains("GREP_CONSOLE_PREVIEW_CANARY")));
 
     let preview = client
         .post(format!("{}/api/preview", harness.local_base))
@@ -383,6 +546,87 @@ async fn preview_requires_an_opaque_search_result_handle_not_an_arbitrary_path()
         .await
         .unwrap();
     assert_eq!(preview.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_preview_window_opens_near_the_match_and_stays_bounded() {
+    let fixture = tempfile::tempdir().unwrap();
+    let content = (1..=500)
+        .map(|line| {
+            if line == 250 {
+                format!("line {line}: WINDOW_PREVIEW_CANARY")
+            } else {
+                format!("line {line}: surrounding text")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(fixture.path().join("window.txt"), content).unwrap();
+    let harness = start_console(fixture.path()).await;
+    let client = Client::new();
+    let mut search: Value = client
+        .post(format!("{}/api/search", harness.local_base))
+        .json(&json!({
+            "query": "WINDOW_PREVIEW_CANARY",
+            "hosts": "local",
+            "max_matches": 10,
+            "context_lines": 0,
+            "wait_ms": 1_000,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for _ in 0..40 {
+        if search["results"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty())
+        {
+            break;
+        }
+        let job_id = search["job_id"]
+            .as_str()
+            .expect("running search has a job id");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        search = client
+            .post(format!("{}/api/search/status", harness.local_base))
+            .json(&json!({"job_id": job_id}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    }
+    let preview_id = search["results"][0]["preview_id"]
+        .as_str()
+        .expect("a completed search result must issue a preview_id");
+    let preview: Value = client
+        .post(format!("{}/api/preview", harness.local_base))
+        .json(&json!({"preview_id": preview_id, "view": "window"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(preview["start_line"], 150);
+    assert_eq!(preview["lines"].as_array().unwrap().len(), 200);
+    assert!(preview["text"]
+        .as_str()
+        .unwrap()
+        .contains("WINDOW_PREVIEW_CANARY"));
+    assert!(preview["lines"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("line 150:"));
+    assert!(preview["lines"][199]["text"]
+        .as_str()
+        .unwrap()
+        .contains("line 349:"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    io::{BufRead, BufReader as StdBufReader, Read},
     path::{Path, PathBuf},
     process::Stdio,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -15,6 +16,8 @@ use tokio::{
     process::Command as TokioCommand,
     time::{timeout, Instant},
 };
+
+const MAX_BOUNDED_TEXT_READ_BYTES: usize = 1024 * 1024;
 
 fn rg_command() -> Option<TokioCommand> {
     let sibling = std::env::current_exe().ok().and_then(|exe| {
@@ -917,30 +920,64 @@ impl LocalBackend {
                 self.limits.max_file_bytes
             ));
         }
-        let text = fs::read_to_string(&abs).with_context(|| format!("read {}", abs.display()))?;
-        let lines: Vec<_> = text.lines().collect();
         let start = start_line.unwrap_or(1).max(1);
-        let end = end_line
-            .unwrap_or(lines.len().max(1))
-            .max(start)
-            .min(lines.len().max(start));
-        let mut out = Vec::new();
-        let mut chunk = Vec::new();
-        for idx in start..=end {
-            if idx == 0 || idx > lines.len() {
+        let mut selected_lines = Vec::new();
+        let requested_end = end_line.map(|end| end.max(start));
+        let max_read_bytes = if requested_end.is_some() {
+            MAX_BOUNDED_TEXT_READ_BYTES
+        } else {
+            usize::try_from(size).unwrap_or(usize::MAX)
+        };
+        let mut reader = StdBufReader::new(
+            fs::File::open(&abs).with_context(|| format!("read {}", abs.display()))?,
+        )
+        .take((max_read_bytes as u64).saturating_add(1));
+        let mut line_number = 0usize;
+        let mut bytes_read = 0usize;
+        let mut line = String::new();
+        loop {
+            if requested_end.is_some_and(|end| line_number >= end) {
                 break;
             }
-            chunk.push(MatchLine {
-                line_number: idx,
-                text: lines[idx - 1].to_string(),
-            });
+            line.clear();
+            if reader
+                .read_line(&mut line)
+                .with_context(|| format!("read {}", abs.display()))?
+                == 0
+            {
+                break;
+            }
+            bytes_read = bytes_read.saturating_add(line.len());
+            if bytes_read > max_read_bytes {
+                return Err(anyhow!(
+                    "requested text range in {} exceeds the {} byte read limit",
+                    abs.display(),
+                    max_read_bytes
+                ));
+            }
+            line_number = line_number.saturating_add(1);
+            if line_number >= start {
+                let text = if let Some(without_lf) = line.strip_suffix('\n') {
+                    without_lf.strip_suffix('\r').unwrap_or(without_lf)
+                } else {
+                    line.as_str()
+                };
+                selected_lines.push(MatchLine {
+                    line_number,
+                    text: text.to_string(),
+                });
+            }
         }
-        out.push(ReadChunk {
+        let end = if line_number < start {
+            start
+        } else {
+            requested_end.unwrap_or(line_number).min(line_number)
+        };
+        Ok(vec![ReadChunk {
             start_line: start,
             end_line: end,
-            lines: chunk,
-        });
-        Ok(out)
+            lines: selected_lines,
+        }])
     }
 }
 
@@ -1738,6 +1775,25 @@ mod tests {
             exclude_globs: Vec::new(),
             index: crate::index::IndexManager::disabled(),
         };
+        let partial = primary.join("partial.txt");
+        std::fs::write(&partial, b"first line\n\xffunreadable trailing bytes").unwrap();
+        let preview = backend
+            .read_text(&partial, Some(1), Some(1))
+            .expect("a bounded line read must not decode bytes beyond its window");
+        assert_eq!(preview[0].lines[0].text, "first line");
+        assert!(backend.read_text(&partial, None, None).is_err());
+        let giant_line = primary.join("giant-line.txt");
+        std::fs::write(
+            &giant_line,
+            vec![b'x'; super::MAX_BOUNDED_TEXT_READ_BYTES + 1],
+        )
+        .unwrap();
+        let bounded_error = backend
+            .read_text(&giant_line, Some(1), Some(1))
+            .expect_err("bounded preview reads must stop at the hard byte limit");
+        assert!(bounded_error
+            .to_string()
+            .contains("1048576 byte read limit"));
         assert_eq!(backend.default_search_roots(), vec![extra.clone()]);
         let found = backend
             .find_paths_bounded("needle", 5, vec!["local".into()])
