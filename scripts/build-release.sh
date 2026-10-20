@@ -3,7 +3,11 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="${1:-$repo_root/.tmp/dist}"
-rg_bin="${RG_BIN:-$(command -v rg)}"
+rg_bin="${RG_BIN:-$(command -v rg || true)}"
+if [[ -z "$rg_bin" || ! -x "$rg_bin" ]]; then
+  echo 'ripgrep is required to package a GrepMesh release; install rg or set RG_BIN.' >&2
+  exit 1
+fi
 
 case "$(uname -s):$(uname -m)" in
   Linux:x86_64) target="linux-x86_64" ;;
