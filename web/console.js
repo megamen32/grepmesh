@@ -102,7 +102,7 @@
     state.selectedRoot = (state.catalog?.roots || []).filter(root=>root.host === target.host && pathContains(root.path,target.path)).sort((a,b)=>b.path.length-a.path.length)[0] || target;
     if(remember && (state.history[state.historyIndex]?.path !== target.path || state.history[state.historyIndex]?.host !== target.host)) { state.history = state.history.slice(0,state.historyIndex+1); state.history.push({host:target.host,path:target.path}); state.historyIndex = state.history.length-1; }
     renderPath(); renderHosts(); renderLocations(); renderHostDetail(); resetPreview();
-    renderHostFailures([]); setSearchState("running","Loading folder…"); dom.count.textContent = "Loading…";
+    renderHostFailures([]); clear(dom.results).append(element("div","empty-results","Loading folder…")); setSearchState("running","Loading folder…"); dom.count.textContent = "Loading…";
     try { const payload = await request(api.browse,{method:"POST",body:JSON.stringify({host:target.host,path:target.path})}); if(version !== state.viewVersion) return; state.results = normalizeEntries(payload,target.host); renderBrowseEntries(state.results); setSearchState("complete","Ready"); }
     catch(error) { if(version !== state.viewVersion) return; clear(dom.results).append(element("div","empty-results",`Browse unavailable: ${errorMessage(error)}`)); dom.count.textContent = "Unavailable"; setSearchState("error",errorMessage(error)); }
   }
