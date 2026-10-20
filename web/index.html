@@ -48,10 +48,15 @@
   </section>
   <aside class="finder-details" aria-label="Details">
     <div class="inspector-toolbar">ⓘ <span>Details</span><div id="connection" class="connection" role="status"><span class="pulse"></span><span>Connecting…</span></div></div>
+    <nav id="match-navigation" class="match-navigation" aria-label="Matches in selected file" hidden>
+      <button id="previous-match" class="quiet-button" type="button" aria-label="Previous match">‹ Prev</button>
+      <span id="match-position" role="status" aria-live="polite"></span>
+      <button id="next-match" class="quiet-button" type="button" aria-label="Next match">Next ›</button>
+    </nav>
     <section class="inspector"><div id="preview" class="preview-empty"><span class="file-icon folder large"></span><p>Select a file or folder</p><small>Details appear here</small></div></section>
     <section id="host-detail" class="host-detail" aria-label="Host index"></section>
     <details class="backup-card"><summary>Backup catalog <span id="backup-badge" class="backup-state">Checking…</span></summary><div id="backup-body" class="backup-body"></div></details>
   </aside>
 </main>
-<script src="/ui/console.js?v=finder-20260907" defer></script>
+<script src="/ui/console.js?v=finder-match-nav-20261020" defer></script>
 </body></html>

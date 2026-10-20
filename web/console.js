@@ -7,8 +7,9 @@
     connection: $("connection"), form: $("search-form"), query: $("query"), refresh: $("refresh-catalog"),
     button: $("search-button"), state: $("search-state"), hosts: $("host-sidebar"), locations: $("locations-sidebar"), results: $("results"),
     count: $("results-count"), preview: $("preview"), failures: $("host-failures"), backupBadge: $("backup-badge"), backup: $("backup-body"),
+    matchNavigation: $("match-navigation"), matchPosition: $("match-position"), previousMatch: $("previous-match"), nextMatch: $("next-match"),
   };
-  const state = { catalog: null, selected: null, selectedHost: "", selectedRoot: null, browseTarget: null, results: [], mode: "browse", sort: "name", direction: 1, history: [], historyIndex: -1, statuses: [], telemetry: [], bookmarks: readBookmarks(), viewVersion: 0 };
+  const state = { catalog: null, selected: null, selectedHost: "", selectedRoot: null, browseTarget: null, results: [], matches: [], matchIndex: -1, mode: "browse", sort: "name", direction: 1, history: [], historyIndex: -1, statuses: [], telemetry: [], bookmarks: readBookmarks(), viewVersion: 0 };
 
   function text(value) { return value == null ? "" : String(value); }
   function pick(object, keys, fallback = undefined) { for (const key of keys) if (object && object[key] !== undefined && object[key] !== null) return object[key]; return fallback; }
@@ -38,7 +39,13 @@
     const host = state.catalog?.hosts.find((item) => item.id === state.selectedHost);
     return state.selectedHost ? (host?.roots || []) : (state.catalog?.roots || []);
   }
+  function resetMatchNavigation() {
+    state.matches = []; state.matchIndex = -1;
+    dom.matchNavigation.hidden = true; dom.matchPosition.textContent = "";
+    dom.previousMatch.disabled = true; dom.nextMatch.disabled = true;
+  }
   function resetPreview() {
+    resetMatchNavigation();
     const preview = clear(dom.preview); preview.className = "preview-empty";
     preview.append(element("span", "file-icon folder large"), element("p", "", "No file selected."), element("small", "", "Choose a file or folder to inspect its details."));
   }
@@ -99,7 +106,7 @@
     try { const payload = await request(api.browse,{method:"POST",body:JSON.stringify({host:target.host,path:target.path})}); if(version !== state.viewVersion) return; state.results = normalizeEntries(payload,target.host); renderBrowseEntries(state.results); setSearchState("complete","Ready"); }
     catch(error) { if(version !== state.viewVersion) return; clear(dom.results).append(element("div","empty-results",`Browse unavailable: ${errorMessage(error)}`)); dom.count.textContent = "Unavailable"; setSearchState("error",errorMessage(error)); }
   }
-  function selectBrowseEntry(entry, button) { state.selected = entry; document.querySelectorAll(".result.selected").forEach(item=>item.classList.remove("selected")); button.classList.add("selected"); browseEntryDetails(entry); }
+  function selectBrowseEntry(entry, button) { resetMatchNavigation(); state.selected = entry; document.querySelectorAll(".result.selected").forEach(item=>item.classList.remove("selected")); button.classList.add("selected"); browseEntryDetails(entry); }
   function normalizeResults(payload) { const source = dataOf(payload); const raw = pick(source, ["results", "matches", "hits"], []); return (Array.isArray(raw) ? raw : []).map((item, index) => ({ previewId: text(pick(item, ["preview_id"], "")), host: text(pick(item, ["host_id", "host"], "local")), path: text(pick(item, ["path", "file"], "")), kind: "file", size: pick(item,["size"]), modified: pick(item,["modified_ms"]), created: pick(item,["created_ms"]), line: Number(pick(item, ["line_number", "line", "start_line"], 1)) || 1, snippet: text(pick(item, ["snippet", "text", "line_text", "match"], "")), key: `${pick(item, ["preview_id", "id"], "")}:${index}` })).filter((item) => item.path || item.previewId); }
   function statusDetails(payload) { const source = dataOf(payload); const hostStatus = pick(source, ["host_status", "hosts"], []); const failures = (Array.isArray(hostStatus) ? hostStatus : []).filter((item) => item && item.ok === false).map((item) => ({ host: text(pick(item, ["host_id", "host", "id"], "unknown host")), error: text(pick(item, ["error", "message"], "No error detail was returned.")) })); return { partial: Boolean(pick(source, ["partial"], false)), truncated: Boolean(pick(source, ["truncated"], false)), failures }; }
   function renderHostFailures(failures) { clear(dom.failures); if (!failures.length) { dom.failures.hidden = true; return; } dom.failures.append(element("p", "host-failures-heading", "Mesh host errors")); failures.forEach((failure) => { const item = element("div", "host-failure"); item.append(element("strong", "", `Host ${failure.host} reported an error`), element("code", "", failure.error)); dom.failures.append(item); }); dom.failures.hidden = false; }
@@ -117,7 +124,61 @@
     finally{dom.button.disabled=false;dom.button.firstElementChild.textContent="Search";loadTelemetry();}
   }
   function previewText(payload) { const source = dataOf(payload); if (typeof source.text === "string") return source.text; if (typeof source.content === "string") return source.content; if (Array.isArray(source.chunks)) return source.chunks.map((chunk) => typeof chunk === "string" ? chunk : pick(chunk, ["text", "content"], "")).join("\n"); return "No preview text was returned."; }
-  async function selectResult(result, button) { state.selected = result; document.querySelectorAll(".result.selected").forEach((item) => item.classList.remove("selected")); button.classList.add("selected");browseEntryDetails(result);const preview=element("div","preview-loading","Loading bounded preview…");dom.preview.append(preview); if(!result.previewId){preview.className="preview-error";preview.textContent="Preview is unavailable because this result has no server-issued preview ID.";return;}try{const payload=await request(api.preview,{method:"POST",body:JSON.stringify({preview_id:result.previewId})});if(state.selected!==result)return;clear(preview);preview.textContent="";preview.className="bounded-preview";preview.append(element("p","detail-label",`Content · line ${pick(dataOf(payload),["start_line","line"],result.line)}`),element("pre","",previewText(payload)));}catch(error){if(state.selected!==result)return;preview.className="preview-error";preview.textContent=`Preview unavailable: ${errorMessage(error)}`;} }
+  function renderMatchNavigation() {
+    const count = state.matches.length, match = state.matches[state.matchIndex];
+    dom.matchNavigation.hidden = !match;
+    dom.previousMatch.disabled = !match || state.matchIndex <= 0;
+    dom.nextMatch.disabled = !match || state.matchIndex >= count - 1;
+    dom.matchPosition.textContent = match ? `Match ${state.matchIndex + 1} of ${count} · line ${match.line}` : "";
+  }
+  function selectMatch(index) {
+    const match = state.matches[index];
+    if (!match) return;
+    state.matchIndex = index; state.selected = match;
+    for (const row of dom.results.children) {
+      if (!row.dataset?.key) continue;
+      if (row.dataset.key === match.key) row.classList.add("selected");
+      else row.classList.remove("selected");
+    }
+    renderMatchNavigation(); loadMatchPreview(match);
+  }
+  function renderMatchPreview(placeholder, payload, result) {
+    const source = dataOf(payload);
+    const startLine = Math.max(1, Number(pick(source, ["start_line", "line"], result.line)) || result.line);
+    const lines = previewText(payload).split(/\r?\n/), code = element("div", "preview-code");
+    code.setAttribute("role", "region"); code.setAttribute("aria-label", `File content near match on line ${result.line}`); code.tabIndex = 0;
+    let matchedLine = null;
+    lines.forEach((line, offset) => {
+      const lineNumber = startLine + offset, isMatch = lineNumber === result.line;
+      const row = element("div", `preview-line${isMatch ? " preview-match" : ""}`);
+      row.dataset.line = String(lineNumber);
+      row.append(element("span", "line-number", lineNumber), element("span", "line-text", line || " "));
+      code.append(row); if (isMatch) matchedLine = row;
+    });
+    clear(placeholder); placeholder.textContent = ""; placeholder.className = "bounded-preview";
+    placeholder.append(element("p", "detail-label", `Content · line ${result.line}`), code);
+    matchedLine?.scrollIntoView?.({ block: "center", inline: "nearest" });
+  }
+  async function loadMatchPreview(result) {
+    browseEntryDetails(result);
+    const preview = element("div", "preview-loading", `Loading match at line ${result.line}…`); dom.preview.append(preview);
+    if (!result.previewId) { preview.className = "preview-error"; preview.textContent = "Preview is unavailable because this result has no server-issued preview ID."; return; }
+    try {
+      const payload = await request(api.preview, { method: "POST", body: JSON.stringify({ preview_id: result.previewId }) });
+      if (state.selected !== result) return;
+      renderMatchPreview(preview, payload, result);
+    } catch (error) {
+      if (state.selected !== result) return;
+      preview.className = "preview-error"; preview.textContent = `Preview unavailable: ${errorMessage(error)}`;
+    }
+  }
+  function selectResult(result) {
+    state.matches = state.results.filter(item => item.host === result.host && item.path === result.path).sort((a, b) => a.line - b.line);
+    const index = state.matches.findIndex(item => item.key === result.key);
+    selectMatch(index < 0 ? 0 : index);
+  }
+  dom.previousMatch.addEventListener("click", () => selectMatch(state.matchIndex - 1));
+  dom.nextMatch.addEventListener("click", () => selectMatch(state.matchIndex + 1));
   function renderBackup(payload) { const source = dataOf(payload); const rawState = text(pick(source, ["state", "status"], "unconfigured")).toLowerCase(); const valid = ["available", "stale", "unavailable", "unconfigured"].includes(rawState) ? rawState : "unconfigured"; const descriptions = { available: "A backup catalog is available.", stale: "A backup catalog is available, but its metadata is stale.", unavailable: "The backup catalog is currently unavailable.", unconfigured: "No backup catalog is configured for this Console." }; dom.backupBadge.className = `backup-state ${valid}`; dom.backupBadge.textContent = valid; const body = clear(dom.backup); body.append(element("p", "", pick(source, ["message", "detail"], descriptions[valid]))); const count = pick(source, ["snapshot_count", "count", "entries"]); const updated = pick(source, ["updated_at", "generated_at", "checked_at"]); if (count !== undefined || updated) { const meta = element("div", "backup-meta"); if (count !== undefined) meta.append(element("span", "", `${count} catalog entries`)); if (updated) meta.append(element("span", "", `Updated ${updated}`)); body.append(meta); } body.append(element("small", "", "Backup status is separate from live search. No restore or backup-content search is performed here.")); }
   async function loadBackup() { try { renderBackup(await request(api.backup)); } catch (error) { renderBackup({ state: "unavailable", message: `Backup catalog check failed: ${errorMessage(error)}` }); } }
   function basename(path) { return text(path).split(/[\\/]/).filter(Boolean).pop() || path; }
