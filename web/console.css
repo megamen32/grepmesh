@@ -108,6 +108,10 @@
 .file-editor-sidebar { min-width:0; overflow:auto; padding:20px 16px; border-right:1px solid var(--line); background:#13141a; }
 .file-editor-name { display:block; margin:9px 0; overflow-wrap:anywhere; color:#e5e6ef; font-size:14px; }
 .file-editor-path,.file-editor-host { margin:8px 0 16px; overflow-wrap:anywhere; color:var(--muted); font-size:10px; line-height:1.55; }
+.file-editor-metadata { margin-top:20px; padding-top:12px; border-top:1px solid var(--line); color:var(--muted); font-size:11px; }
+.file-editor-metadata>summary { cursor:pointer; color:#dceafa; font-weight:600; }
+.file-editor-metadata .detail-grid { margin:8px 0 0; font-size:10px; }
+.file-editor-metadata .detail-grid dd { overflow-wrap:anywhere; }
 .file-editor-navigation { margin-top:28px; padding-top:16px; border-top:1px solid var(--line); }
 .file-editor-match-position { color:#e5e6ef; font-size:12px; line-height:1.5; }
 .file-editor-match-controls { display:flex; flex-wrap:wrap; gap:6px; }

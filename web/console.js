@@ -111,6 +111,9 @@
       previous.addEventListener("click",()=>selectMatch(state.matchIndex-1));next.addEventListener("click",()=>selectMatch(state.matchIndex+1));
       controls.append(previous,next);navigation.append(element("span","file-editor-kicker","MATCHES"),element("p","file-editor-match-position",`Match ${state.matchIndex+1} of ${state.matches.length} · line ${match?.line||entry.matchLine||1}`),controls);sidebar.append(navigation);
     }
+    const metadata=element("details","file-editor-metadata"),summary=element("summary","","Metadata"),details=element("dl","detail-grid");
+    for(const [label,value] of [["Size",formatBytes(entry.size)],["Kind",entry.kind],["Created",formatDate(entry.created,true)],["Modified",formatDate(entry.modified,true)],["Host",entry.host],["Path",entry.path]])details.append(element("dt","",label),element("dd","",value));
+    metadata.append(summary,details);sidebar.append(metadata);
   }
   function openFileEditor() {
     if(!state.previewBody||!state.previewEntry)return;
@@ -271,8 +274,10 @@
   }
   async function loadMatchPreview(result) {
     browseEntryDetails(result);
-    if (!result.previewId) { state.previewBody.append(element("p", "preview-error", "Preview is unavailable because this result has no server-issued preview ID.")); return; }
-    await loadFilePreview(result);
+    if (!result.previewId) { state.previewBody.append(element("p", "preview-error", "Preview is unavailable because this result has no server-issued preview ID.")); if(!dom.fileEditor.open)openFileEditor(); return; }
+    const preview=loadFilePreview(result);
+    if(state.selected===result&&!dom.fileEditor.open)openFileEditor();
+    await preview;
   }
   function selectResult(result) {
     state.matches = state.results.filter(item => item.host === result.host && item.path === result.path).sort((a, b) => a.line - b.line);

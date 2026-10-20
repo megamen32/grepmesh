@@ -1,9 +1,10 @@
 "use strict";
 const assert=require("node:assert/strict"),fs=require("node:fs"),test=require("node:test"),vm=require("node:vm");
 class Element {
-  constructor(){this.children=[];this.dataset={};this.events=new Map();this.className="";this.textContent="";this.attributes={};this.hidden=false;this.classList={add:name=>{this.className+=" "+name;},remove:name=>{this.className=this.className.split(" ").filter(x=>x!==name).join(" ");},toggle:name=>{this.className.includes(name)?this.classList.remove(name):this.classList.add(name);}};}
+  constructor(){this.children=[];this.dataset={};this.events=new Map();this.className="";this.textContent="";this.attributes={};this.hidden=false;this.open=false;this.classList={add:name=>{this.className+=" "+name;},remove:name=>{this.className=this.className.split(" ").filter(x=>x!==name).join(" ");},toggle:name=>{this.className.includes(name)?this.classList.remove(name):this.classList.add(name);}};}
   get firstElementChild(){return this.children[0];}get lastElementChild(){return this.children.at(-1);}
   append(...children){children.forEach(child=>child.parentElement=this);this.children.push(...children);}
+  showModal(){this.open=true;}close(){this.open=false;}
   replaceChildren(...children){this.children=[];this.append(...children);}
   addEventListener(name,listener){this.events.set(name,listener);}setAttribute(key,value){this.attributes[key]=value;}
   dispatch(name,target=this,key){return this.events.get(name)?.({target,key,preventDefault(){}});}click(){return this.dispatch("click");}
@@ -92,6 +93,26 @@ test("files beyond the preview-handle capacity show a clear explanation",async()
   await browse(f);rows(f)[0].click();
   assert.match(content(f.nodes.preview),/Preview limit reached for this folder/);
   assert.equal(f.requests.filter(request=>request.url==="/api/preview").length,0);
+});
+test("selecting a search hit opens the roomy editor with collapsible file metadata",async()=>{
+  const f=fixture({responses:{"/api/search":{state:"complete",results:[
+    {path:"/docs/guide.txt",preview_id:"first",host_id:"server-100",line_number:7,snippet:"first match",size:321,modified_ms:3000,created_ms:2000},
+    {path:"/docs/guide.txt",preview_id:"second",host_id:"server-100",line_number:19,snippet:"second match",size:321,modified_ms:3000,created_ms:2000}
+  ]},"/api/preview":options=>{const id=JSON.parse(options.body).preview_id;return{id,start_line:id==="first"?7:19,text:id==="first"?"7 first match":"19 second match"};}}});
+  await settle();f.nodes.query.value="match";f.nodes["search-form"].dispatch("submit");await settle();
+  rows(f)[1].click();
+  const dialog=f.nodes["file-editor-dialog"],sidebar=f.nodes["file-editor-sidebar"];
+  assert.equal(dialog.open,true,"selecting a hit should open the roomy editor immediately");
+  await settle();
+  assert.match(content(f.nodes["file-editor-main"]),/19.*second match/);
+  assert.match(content(sidebar),/Match 2 of 2/);
+  const metadata=descendants(sidebar).find(node=>node.tagName==="DETAILS");
+  assert.ok(metadata,"the editor should contain collapsible metadata");assert.equal(metadata.open,false);
+  assert.match(content(metadata),/321 B.*server-100.*\/docs\/guide\.txt/);
+  const previous=descendants(sidebar).find(node=>node.textContent==="‹ Previous");previous.click();await settle();
+  assert.equal(dialog.open,true);assert.match(content(sidebar),/Match 1 of 2/);assert.match(content(f.nodes["file-editor-main"]),/7.*first match/);
+  const next=descendants(sidebar).find(node=>node.textContent==="Next ›");next.click();await settle();
+  assert.equal(dialog.open,true);assert.match(content(sidebar),/Match 2 of 2/);assert.match(content(f.nodes["file-editor-main"]),/19.*second match/);
 });
 test("selecting a match opens its line and previous/next walks every match in that file",async()=>{
   const previewText={first:"7 first match\n8 surrounding text",second:"19 second match\n20 surrounding text",third:"42 third match\n43 surrounding text"};
