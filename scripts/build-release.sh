@@ -34,8 +34,17 @@ else
   fi
   binary="$CARGO_TARGET_DIR/release/grepmesh-mcp"
 fi
-python3 "$repo_root/scripts/package-release.py" \
-  --target "$target" \
-  --binary "$binary" \
-  --rg "$rg_bin" \
-  --output "$out" "${runtime_args[@]}"
+if [[ "$target" == macos-aarch64 ]]; then
+  # macOS ships Bash 3.2, where an empty array expansion fails under `set -u`.
+  python3 "$repo_root/scripts/package-release.py" \
+    --target "$target" \
+    --binary "$binary" \
+    --rg "$rg_bin" \
+    --output "$out"
+else
+  python3 "$repo_root/scripts/package-release.py" \
+    --target "$target" \
+    --binary "$binary" \
+    --rg "$rg_bin" \
+    --output "$out" "${runtime_args[@]}"
+fi
