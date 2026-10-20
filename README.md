@@ -78,8 +78,9 @@ required. A valid projection remains usable if the registry is unavailable.
 Online GrepMesh child MCPs are probed through their existing `/server/.../mcp`
 paths using a local-only request (`hosts: "local"`, `hop_count: 1`). The returned
 host ID deduplicates aliases and excludes this node. Offline and failed children
-are not promoted to healthy. Probes have a three-second per-child deadline and
-a ten-second total discovery budget; partial discovery retains configured peers.
+are not promoted to healthy. Each online child probe has a six-second deadline;
+the total discovery budget scales with the number of candidates, capped at eight
+probes and fifty seconds. Partial discovery retains configured peers.
 
 Known direct peer routes stay preferred. Discovered `gptadmin_relay_url` routes
 provide a fallback on connection failure, or the primary route when no direct

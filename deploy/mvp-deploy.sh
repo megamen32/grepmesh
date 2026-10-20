@@ -10,7 +10,7 @@
 # Per-target steps (executed on the target itself; remote runs via `ssh host bash -s`):
 #   stage binary+config -> receipt with old binary/config copies + sha256s + commands
 #   -> smoke-test new binary -> atomic mv into /opt/grepmesh-custom/grepmesh-mcp
-#   -> install config -> systemctl restart grepmesh-mcp -> wait <=30s active
+#   -> install config -> systemctl restart grepmesh-mcp -> wait <=75s active
 #   -> curl http://127.0.0.1:9419/health expecting 200
 #   -> any failure after backup: restore old binary+config, restart, re-verify, exit non-zero.
 #
@@ -27,7 +27,9 @@ STATE_DIR=/var/lib/grepmesh-mcp
 SERVICE=grepmesh-mcp
 RECEIPT_ROOT=$INSTALL_DIR/.mvp-receipts
 HEALTH_URL=http://127.0.0.1:9419/health
-HEALTH_WAIT=30
+# Startup may fetch the Hub registry (10s client timeout) and probe up to eight
+# children (50s scan cap) before binding; leave margin for initialization.
+HEALTH_WAIT=75
 
 MODE=deploy
 REMOTE=
