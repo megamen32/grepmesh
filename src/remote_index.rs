@@ -82,6 +82,29 @@ impl RemoteIndexStore {
         Ok(store)
     }
 
+    /// True when the requested absolute roots are exactly the complete set of
+    /// source roots owned by this remote index. They are not present on the
+    /// index host, so scanning unrelated local roots can consume the peer
+    /// deadline before consulting this store.
+    pub fn owns_requested_roots(&self, requested: &[String]) -> bool {
+        if requested.is_empty() || requested.iter().any(|root| !Path::new(root).is_absolute()) {
+            return false;
+        }
+        let mut requested = requested
+            .iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        requested.sort();
+        let mut configured = self
+            .config
+            .allowed_roots
+            .values()
+            .flat_map(|roots| roots.values().cloned())
+            .collect::<Vec<_>>();
+        configured.sort();
+        requested == configured
+    }
+
     fn connection(&self) -> Result<Connection> {
         Connection::open(&self.config.path).context("open remote GrepMesh index")
     }
@@ -448,6 +471,29 @@ mod tests {
             .search("remote needle", 8, &SearchMode::Literal)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn remote_store_recognizes_only_the_complete_authorized_root_set() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("docs");
+        fs::create_dir(&root).unwrap();
+        let store =
+            RemoteIndexStore::open(config(&root, &tmp.path().join("remote.sqlite3"))).unwrap();
+
+        assert!(store.owns_requested_roots(&[root.display().to_string()]));
+        assert!(!store.owns_requested_roots(&[tmp.path().display().to_string()]));
+        assert!(!store.owns_requested_roots(&[tmp.path().join("other").display().to_string()]));
+        assert!(!store.owns_requested_roots(&[]));
+
+        let mut multiple_roots = config(&root, &tmp.path().join("multiple.sqlite3"));
+        multiple_roots
+            .allowed_roots
+            .get_mut("server-100")
+            .unwrap()
+            .insert("other".into(), tmp.path().join("other"));
+        let multiple_store = RemoteIndexStore::open(multiple_roots).unwrap();
+        assert!(!multiple_store.owns_requested_roots(&[root.display().to_string()]));
     }
 
     #[test]
