@@ -111,6 +111,16 @@
     "**/rutube/state/**/captcha_*/**"
   ],
   "topology_cache_path": "/var/lib/grepmesh-mcp/topology.json",
+  "remote_index_store": {
+    "index_host": "server-44",
+    "path": "/var/lib/grepmesh-mcp/remote-index.sqlite3",
+    "allowed_source_hosts": ["server-100"],
+    "allowed_roots": {
+      "server-100": {
+        "docs": "/home/roomhacker/agents-projects/grepmesh/docs"
+      }
+    }
+  },
   "limits": {
     "overall_timeout_ms": 20000,
     "peer_timeout_ms": 25000,

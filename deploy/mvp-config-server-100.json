@@ -119,6 +119,16 @@
   "gptadmin_topology_url": "http://127.0.0.1:9001/mcp-relay/agents",
   "gptadmin_token_env": "GPTADMIN_GREPMESH_TOKEN",
   "topology_ttl_ms": 30000,
+  "remote_index_source": {
+    "source_host": "server-100",
+    "index_host": "server-44",
+    "endpoint": "http://192.168.2.5:9419",
+    "roots": {
+      "docs": ["/home/roomhacker/agents-projects/grepmesh/docs"]
+    },
+    "state_path": "/var/lib/grepmesh-mcp/remote-index-sync.sqlite3",
+    "sync_interval_ms": 5000
+  },
   "limits": {
     "overall_timeout_ms": 20000,
     "peer_timeout_ms": 25000,

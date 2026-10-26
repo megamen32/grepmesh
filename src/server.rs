@@ -137,7 +137,7 @@ pub async fn run_server(mut config: AppConfig) -> Result<()> {
             }
         }
     }
-    let local = LocalBackend::from_config_with_ingestion(
+    let mut local = LocalBackend::from_config_with_ingestion(
         config.host_id.clone(),
         config.root.clone(),
         config.limits.clone(),
@@ -151,6 +151,14 @@ pub async fn run_server(mut config: AppConfig) -> Result<()> {
         config.stt.clone(),
         config.ocr.clone(),
     );
+    let remote_index_store = config
+        .remote_index_store
+        .clone()
+        .map(crate::remote_index::RemoteIndexStore::open)
+        .transpose()?;
+    if let Some(store) = remote_index_store.clone() {
+        local = local.with_remote_index_store(store);
+    }
     let peer_auth_token = config
         .peer_auth_token_env
         .as_deref()
@@ -167,6 +175,12 @@ pub async fn run_server(mut config: AppConfig) -> Result<()> {
     // deployments already protected by a GPTAdmin tunnel do not need a second
     // bearer-auth layer. Setting peer_auth_token_env explicitly enables it.
     let require_peer_auth = peer_auth_token.is_some();
+    if let (Some(sync), Some(index_path)) = (
+        config.remote_index_source.clone(),
+        config.index_path.clone(),
+    ) {
+        crate::remote_index::spawn_source_sync(sync, index_path, peer_auth_token.clone());
+    }
     let service = Arc::new(
         MeshService::new(local, topology)
             .with_peer_auth_token(peer_auth_token.clone())
@@ -276,12 +290,112 @@ fn build_app(state: AppState) -> Router {
         .route("/mcp", post(handle_rpc))
         .route("/compute/status", get(compute_status))
         .route("/compute/ocr", post(compute_extract))
+        .route("/index/v1/status", get(remote_index_status))
+        .route("/index/v1/upsert", post(remote_index_upsert))
+        .route("/index/v1/delete", post(remote_index_delete))
         .layer(DefaultBodyLimit::max(max_request_bytes))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             guard_request_intake,
         ))
         .with_state(state)
+}
+
+fn authorize_remote_index(state: &AppState, headers: &HeaderMap) -> Result<()> {
+    // Follow the same opt-in peer bearer policy as the existing mesh MCP on
+    // this listener. Source host and exact root are still checked by the store.
+    if state.require_peer_auth {
+        validate_peer_auth(headers, state.peer_auth_token.as_deref())?;
+    }
+    Ok(())
+}
+
+async fn remote_index_status(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(error) = authorize_remote_index(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": error.to_string()})),
+        )
+            .into_response();
+    }
+    match state
+        .service
+        .local
+        .remote_index
+        .as_ref()
+        .map(crate::remote_index::RemoteIndexStore::status)
+        .transpose()
+    {
+        Ok(Some(status)) => (StatusCode::OK, Json(status)).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"remote index store is disabled"})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn remote_index_upsert(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(document): Json<crate::remote_index::RemoteDocument>,
+) -> Response {
+    if let Err(error) = authorize_remote_index(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": error.to_string()})),
+        )
+            .into_response();
+    }
+    match state
+        .service
+        .local
+        .remote_index
+        .as_ref()
+        .ok_or_else(|| anyhow!("remote index store is disabled"))
+        .and_then(|store| store.upsert(document))
+    {
+        Ok(()) => (StatusCode::OK, Json(json!({"accepted":true}))).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn remote_index_delete(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(deletion): Json<crate::remote_index::RemoteDelete>,
+) -> Response {
+    if let Err(error) = authorize_remote_index(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": error.to_string()})),
+        )
+            .into_response();
+    }
+    match state
+        .service
+        .local
+        .remote_index
+        .as_ref()
+        .ok_or_else(|| anyhow!("remote index store is disabled"))
+        .and_then(|store| store.delete(deletion))
+    {
+        Ok(()) => (StatusCode::OK, Json(json!({"accepted":true}))).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":error.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 fn requires_bounded_intake(path: &str, headers: &HeaderMap) -> bool {

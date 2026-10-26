@@ -1332,6 +1332,7 @@ mod tests {
             limits,
             exclude_globs: vec![],
             index: crate::index::IndexManager::disabled(),
+            remote_index: None,
         };
         let service = MeshService::new(local, Topology::new("test", vec![]));
         let args = || serde_json::from_value::<SearchArgs>(json!({

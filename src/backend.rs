@@ -253,6 +253,7 @@ pub struct LocalBackend {
     pub limits: LimitsConfig,
     pub exclude_globs: Vec<String>,
     pub index: IndexManager,
+    pub remote_index: Option<crate::remote_index::RemoteIndexStore>,
 }
 
 impl LocalBackend {
@@ -278,6 +279,7 @@ impl LocalBackend {
             limits,
             exclude_globs: excludes,
             index,
+            remote_index: None,
         }
     }
 
@@ -342,7 +344,13 @@ impl LocalBackend {
             limits,
             exclude_globs: excludes,
             index,
+            remote_index: None,
         }
+    }
+
+    pub fn with_remote_index_store(mut self, store: crate::remote_index::RemoteIndexStore) -> Self {
+        self.remote_index = Some(store);
+        self
     }
 
     pub fn with_excludes(mut self, excludes: Vec<String>) -> Self {
@@ -757,7 +765,7 @@ impl LocalBackend {
                 break;
             }
         }
-        if successful_roots == 0 && failed_roots > 0 {
+        if successful_roots == 0 && failed_roots > 0 && self.remote_index.is_none() {
             return Err(anyhow!(
                 "all selected search roots failed: {}",
                 first_root_error.unwrap_or_else(|| "unknown root error".to_string())
@@ -768,9 +776,44 @@ impl LocalBackend {
                 "{failed_roots} of {total_roots} selected search roots failed"
             ));
         }
-        hits.sort_by(|a, b| a.path.cmp(&b.path).then(a.line_number.cmp(&b.line_number)));
-        hits.truncate(limit);
         self.enrich_search_metadata(&mut hits);
+        if let Some(remote_index) = self.remote_index.clone() {
+            if matches!(
+                mode,
+                SearchMode::Literal | SearchMode::CaseInsensitiveLiteral
+            ) {
+                let remote_query = query.clone();
+                let remote_mode = mode.clone();
+                let remote_limit = limit.saturating_sub(hits.len());
+                if remote_limit > 0 {
+                    match tokio::task::spawn_blocking(move || {
+                        remote_index.search(&remote_query, remote_limit, &remote_mode)
+                    })
+                    .await
+                    {
+                        Ok(Ok(remote_hits)) => hits.extend(remote_hits),
+                        Ok(Err(error)) => {
+                            partial = true;
+                            partial_error.get_or_insert_with(|| {
+                                format!("remote index unavailable: {error}")
+                            });
+                        }
+                        Err(_) => {
+                            partial = true;
+                            partial_error
+                                .get_or_insert_with(|| "remote index reader failed".to_string());
+                        }
+                    }
+                }
+            }
+        }
+        hits.sort_by(|a, b| {
+            a.host_id
+                .cmp(&b.host_id)
+                .then(a.path.cmp(&b.path))
+                .then(a.line_number.cmp(&b.line_number))
+        });
+        hits.truncate(limit);
         Ok(SearchOutcome {
             hits,
             truncated,
@@ -1649,6 +1692,7 @@ mod tests {
             limits: Default::default(),
             exclude_globs: vec!["**/blocked.txt".into()],
             index: crate::index::IndexManager::disabled(),
+            remote_index: None,
         };
         for mode in [super::SearchMode::Literal, super::SearchMode::Regex] {
             let result = backend.search_text_bounded(
@@ -1664,9 +1708,10 @@ mod tests {
         assert!(!paths.partial);
         assert_eq!(paths.hits.len(), 1);
         assert_eq!(paths.hits[0].path, needle.display().to_string());
-        let blocked = backend.find_paths_bounded(
-            "blocked.txt", 5, vec!["local".into()],
-        ).await.unwrap();
+        let blocked = backend
+            .find_paths_bounded("blocked.txt", 5, vec!["local".into()])
+            .await
+            .unwrap();
         assert!(!blocked.partial);
         assert!(blocked.hits.is_empty());
     }
@@ -1691,6 +1736,7 @@ mod tests {
                 temp.path().join("index.sqlite"),
                 &[],
             ),
+            remote_index: None,
         };
         for globs in [vec![], vec!["**/hostname".into()]] {
             let result = tokio::time::timeout(
@@ -1735,6 +1781,7 @@ mod tests {
                 temp.path().join("index.sqlite"),
                 &[(&pdf, "needle cached PDF extraction")],
             ),
+            remote_index: None,
         };
         let result = backend
             .search_text_bounded(
@@ -1774,6 +1821,7 @@ mod tests {
             limits: Default::default(),
             exclude_globs: Vec::new(),
             index: crate::index::IndexManager::disabled(),
+            remote_index: None,
         };
         let partial = primary.join("partial.txt");
         std::fs::write(&partial, b"first line\n\xffunreadable trailing bytes").unwrap();
@@ -1834,6 +1882,7 @@ mod tests {
             limits: Default::default(),
             exclude_globs: Vec::new(),
             index: crate::index::IndexManager::disabled(),
+            remote_index: None,
         };
         let expected = backend.list_directory(temp.path()).unwrap().remove(0);
         let paths = backend
@@ -1894,6 +1943,7 @@ mod tests {
             limits: Default::default(),
             exclude_globs: Vec::new(),
             index: crate::index::IndexManager::disabled(),
+            remote_index: None,
         };
         let entries = backend.list_directory(temp.path()).unwrap();
         let expected = std::fs::metadata(&path)
