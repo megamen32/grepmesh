@@ -947,6 +947,11 @@ impl MeshService {
                                 "mode": mode,
                                 "path_globs": path_globs,
                                 "roots": roots,
+                                // Peer requests already run inside the
+                                // caller's bounded search job. Starting a
+                                // second default-500ms job on the peer returns
+                                // an empty partial envelope instead of hits.
+                                "wait_ms": 0,
                             }),
                         )
                         .await?;
@@ -1332,6 +1337,7 @@ mod tests {
             limits,
             exclude_globs: vec![],
             index: crate::index::IndexManager::disabled(),
+            remote_index: None,
         };
         let service = MeshService::new(local, Topology::new("test", vec![]));
         let args = || serde_json::from_value::<SearchArgs>(json!({

@@ -17,6 +17,7 @@ mod ocr_png;
 #[cfg(not(feature = "ocr"))]
 #[path = "ocr_disabled.rs"]
 pub mod ocr;
+pub mod remote_index;
 pub mod server;
 pub mod stt;
 pub mod topology;

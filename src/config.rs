@@ -627,6 +627,12 @@ pub struct AppConfig {
     /// cross-host index without copying documents to a central server.
     #[serde(default)]
     pub index_path: Option<PathBuf>,
+    /// A host that owns remote SQLite indexes for one or more source hosts.
+    #[serde(default)]
+    pub remote_index_store: Option<RemoteIndexStoreConfig>,
+    /// Source-side projection into a remote index host. Originals stay local.
+    #[serde(default)]
+    pub remote_index_source: Option<RemoteIndexSourceConfig>,
     #[serde(default)]
     pub gptadmin_topology_url: Option<String>,
     #[serde(default)]
@@ -647,6 +653,35 @@ pub struct AppConfig {
     pub topology_ttl_ms: u64,
     #[serde(skip)]
     pub config_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RemoteIndexStoreConfig {
+    pub index_host: String,
+    pub path: PathBuf,
+    /// Per-source named roots. Incoming paths are rejected unless they stay
+    /// under the exact root configured here.
+    #[serde(default)]
+    pub allowed_roots: BTreeMap<String, BTreeMap<String, PathBuf>>,
+    #[serde(default)]
+    pub allowed_source_hosts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RemoteIndexSourceConfig {
+    pub source_host: String,
+    pub index_host: String,
+    pub endpoint: String,
+    /// Named, bounded source roots eligible for this remote index.
+    pub roots: BTreeMap<String, Vec<PathBuf>>,
+    #[serde(default)]
+    pub state_path: Option<PathBuf>,
+    #[serde(default = "default_remote_index_sync_interval_ms")]
+    pub sync_interval_ms: u64,
+}
+
+fn default_remote_index_sync_interval_ms() -> u64 {
+    30_000
 }
 
 fn default_bind() -> SocketAddr {
@@ -701,6 +736,25 @@ impl AppConfig {
         }
         if cfg.limits.max_file_bytes == 0 {
             cfg.limits.max_file_bytes = default_max_file_bytes();
+        }
+        if let Some(source) = cfg.remote_index_source.as_ref() {
+            if source.source_host != cfg.host_id {
+                anyhow::bail!("remote_index_source.source_host must match host_id");
+            }
+            if source.index_host == source.source_host {
+                anyhow::bail!("remote_index_source index_host must be a different host");
+            }
+            if source.endpoint.trim().is_empty() || source.roots.is_empty() {
+                anyhow::bail!("remote_index_source requires endpoint and at least one named root");
+            }
+        }
+        if let Some(store) = cfg.remote_index_store.as_ref() {
+            if store.index_host != cfg.host_id {
+                anyhow::bail!("remote_index_store.index_host must match host_id");
+            }
+            if !store.path.is_absolute() {
+                anyhow::bail!("remote_index_store.path must be absolute");
+            }
         }
         if !cfg.index_enabled {
             cfg.index_path = None;
