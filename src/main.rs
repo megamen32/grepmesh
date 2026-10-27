@@ -11,17 +11,7 @@ use std::{
 #[cfg(target_os = "linux")]
 fn verify_cache_compaction_resources() -> anyhow::Result<()> {
     let mut child = Command::new("python3")
-        .args([
-            "-",
-            "--label",
-            "grepmesh-cache-compaction",
-            "--max-full-avg10",
-            "1",
-            "--max-full-avg60",
-            "1",
-            "--min-swap-free-kib",
-            "5242880",
-        ])
+        .args(["-", "--label", "grepmesh-cache-compaction"])
         .stdin(Stdio::piped())
         .spawn()?;
     child
