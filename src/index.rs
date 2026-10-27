@@ -1796,10 +1796,7 @@ fn reconcile_new_subtrees(
         }
         let bucket = activity_bucket(&path, root, &activity_bucket_roots);
         let mut metadata_globs = activity_config.metadata_only_globs.clone();
-        if activity.iter().any(|(parent, stats)| {
-            (bucket.starts_with(parent) || parent.starts_with(&bucket))
-                && unix_time_ms() < stats.hot_until_ms
-        }) {
+        if activity_bucket_is_hot(activity, &bucket, unix_time_ms()) {
             metadata_globs.push("**".into());
         }
         let metadata_only = compile_excludes(&metadata_globs).ok();
@@ -2108,6 +2105,19 @@ fn inherit_active_parent_cooldown(
         stats.metadata_only = true;
         stats.debounce_ms = hot_debounce_ms;
     }
+}
+
+fn activity_bucket_is_hot(
+    activity: &BTreeMap<PathBuf, DirectoryActivityState>,
+    bucket: &Path,
+    now_ms: u64,
+) -> bool {
+    if let Some(stats) = activity.get(bucket) {
+        return now_ms < stats.hot_until_ms;
+    }
+    activity.iter().any(|(parent, stats)| {
+        (bucket.starts_with(parent) || parent.starts_with(bucket)) && now_ms < stats.hot_until_ms
+    })
 }
 
 /// Retry an actual pending file without fabricating filesystem activity or
@@ -2919,6 +2929,11 @@ mod tests {
         reconcile_one(&sibling, &mut activity);
         assert!(activity[&parent_bucket].hot_until_ms > guarded_until);
         assert_eq!(activity[&source].hot_until_ms, guarded_until);
+        assert!(!activity_bucket_is_hot(
+            &activity,
+            &source,
+            guarded_until.saturating_add(1)
+        ));
 
         activity.get_mut(&parent_bucket).unwrap().hot_until_ms = unix_time_ms() - 1;
         activity.get_mut(&parent_bucket).unwrap().events = 0;
