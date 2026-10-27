@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Coordinated server-44 receiver + server-100 source cutover.
-# Default is read-only preflight. --apply deploys 44 first, then 100; if the
-# second node fails, both node-level receipts are used to restore the old pair.
+# Coordinated server-100 source + server-44 receiver cutover.
+# Default is read-only preflight. --apply upgrades the bearer-capable source
+# first while old 44 remains compatible, then enables receiver enforcement.
 set -Eeuo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -27,12 +27,12 @@ but requires fresh authenticated MCP status proving the configured source root
 is not hot or metadata-only on server-100. If the installed runtime reports
 only a coarse ancestor bucket, the gate also requires a bounded ctime walk to
 prove that exact source root has been quiet for the configured cooldown. Apply
-also requires at least 8 GiB MemAvailable and low memory PSI on both hosts.
-I/O PSI and swap are recorded for diagnostics but do not block a bounded
-restart. Memory and exact source-root quiet are checked again between
-the receiver and source deploys. A held second phase leaves the 100 source
-unchanged and retains the 44 rollback receipt; it will not restart either host
-while the resource or activity guard is closed.
+also requires at least 8 GiB MemAvailable, adequate GrepMesh cgroup headroom,
+and low GrepMesh cgroup memory PSI on both hosts. Host PSI and swap are
+diagnostic only. Memory and exact source-root quiet are checked again between
+the source and receiver deploys. A held second phase leaves the
+bearer-capable source talking to the still-compatible receiver and retains its
+rollback receipt.
 EOF
   exit 2
 }

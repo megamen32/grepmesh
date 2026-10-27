@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,16 @@ class HostMetrics:
     mem_available_kib: int
     swap_total_kib: int
     swap_free_kib: int
+
+
+@dataclass(frozen=True)
+class ServiceMetrics:
+    memory_current_bytes: int
+    memory_limit_bytes: int
+    memory_full_avg10_pct: float
+    memory_full_avg60_pct: float
+    swap_current_bytes: int
+    oom_kill_events: int
 
 
 def _pressure_avgs(psi_text: str, label: str) -> tuple[float, float]:
@@ -59,6 +70,7 @@ def parse_metrics(io_psi_text: str, meminfo_text: str, memory_psi_text: str) -> 
 
 def violations(
     metrics: HostMetrics,
+    service: ServiceMetrics,
     min_mem_available_kib: int = DEFAULT_MIN_MEM_AVAILABLE_KIB,
 ) -> list[str]:
     reasons = []
@@ -67,17 +79,67 @@ def violations(
             f"MemAvailable {metrics.mem_available_kib / 1024 / 1024:.2f} GiB "
             f"< {min_mem_available_kib / 1024 / 1024:.2f} GiB"
         )
-    if metrics.memory_full_avg10_pct > MAX_MEMORY_FULL_PSI_PCT:
+    if service.memory_full_avg10_pct > MAX_MEMORY_FULL_PSI_PCT:
         reasons.append(
-            f"memory PSI full avg10 {metrics.memory_full_avg10_pct:.2f}% "
+            f"GrepMesh cgroup memory PSI full avg10 {service.memory_full_avg10_pct:.2f}% "
             f"> {MAX_MEMORY_FULL_PSI_PCT:.2f}%"
         )
-    if metrics.memory_full_avg60_pct > MAX_MEMORY_FULL_PSI_PCT:
+    if service.memory_full_avg60_pct > MAX_MEMORY_FULL_PSI_PCT:
         reasons.append(
-            f"memory PSI full avg60 {metrics.memory_full_avg60_pct:.2f}% "
+            f"GrepMesh cgroup memory PSI full avg60 {service.memory_full_avg60_pct:.2f}% "
             f"> {MAX_MEMORY_FULL_PSI_PCT:.2f}%"
+        )
+    headroom_bytes = service.memory_limit_bytes - service.memory_current_bytes
+    minimum_headroom_bytes = 512 * 1024 * 1024
+    if headroom_bytes < minimum_headroom_bytes:
+        reasons.append(
+            f"GrepMesh cgroup memory headroom {headroom_bytes / 1024 / 1024:.0f} MiB "
+            f"< {minimum_headroom_bytes / 1024 / 1024:.0f} MiB"
         )
     return reasons
+
+
+def _read_cgroup_metrics() -> ServiceMetrics:
+    control_group = subprocess.run(
+        ["systemctl", "show", "grepmesh-mcp.service", "-p", "ControlGroup", "--value"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    ).stdout.strip()
+    if not control_group.startswith("/") or ".." in Path(control_group).parts:
+        raise ValueError("GrepMesh service has no safe systemd cgroup path")
+    root = Path("/sys/fs/cgroup") / control_group.lstrip("/")
+
+    def read_int(name: str) -> int:
+        value = (root / name).read_text(encoding="ascii").strip()
+        if not value.isdigit():
+            raise ValueError(f"GrepMesh cgroup {name} is not a finite integer")
+        return int(value)
+
+    limits = []
+    for name in ("memory.high", "memory.max"):
+        value = (root / name).read_text(encoding="ascii").strip()
+        if value != "max":
+            if not value.isdigit():
+                raise ValueError(f"GrepMesh cgroup {name} is malformed")
+            limits.append(int(value))
+    if not limits:
+        raise ValueError("GrepMesh cgroup has no finite memory safety limit")
+
+    events = {}
+    for row in (root / "memory.events").read_text(encoding="ascii").splitlines():
+        key, value = row.split()
+        events[key] = int(value)
+    psi10, psi60 = _pressure_avgs((root / "memory.pressure").read_text(encoding="ascii"), "memory")
+    return ServiceMetrics(
+        memory_current_bytes=read_int("memory.current"),
+        memory_limit_bytes=min(limits),
+        memory_full_avg10_pct=psi10,
+        memory_full_avg60_pct=psi60,
+        swap_current_bytes=read_int("memory.swap.current"),
+        oom_kill_events=events.get("oom_kill", 0),
+    )
 
 
 def main() -> int:
@@ -90,6 +152,7 @@ def main() -> int:
             Path("/proc/meminfo").read_text(encoding="ascii"),
             Path("/proc/pressure/memory").read_text(encoding="ascii"),
         )
+        service = _read_cgroup_metrics()
     except (OSError, ValueError) as exc:
         print(f"[paired-cutover] resource gate FAIL {args.label}: {exc}", file=sys.stderr)
         return 1
@@ -98,11 +161,17 @@ def main() -> int:
         f"io_full_avg10={metrics.io_full_avg10_pct:.2f}% "
         f"io_full_avg60={metrics.io_full_avg60_pct:.2f}% (informational) "
         f"mem_full_avg10={metrics.memory_full_avg10_pct:.2f}% "
-        f"mem_full_avg60={metrics.memory_full_avg60_pct:.2f}% "
+        f"mem_full_avg60={metrics.memory_full_avg60_pct:.2f}% (host diagnostic) "
+        f"grepmesh_cgroup_full_avg10={service.memory_full_avg10_pct:.2f}% "
+        f"grepmesh_cgroup_full_avg60={service.memory_full_avg60_pct:.2f}% "
+        f"grepmesh_cgroup_memory={service.memory_current_bytes / 1024 / 1024:.0f}MiB/"
+        f"{service.memory_limit_bytes / 1024 / 1024:.0f}MiB "
+        f"grepmesh_cgroup_swap={service.swap_current_bytes / 1024 / 1024:.0f}MiB "
+        f"grepmesh_cgroup_oom_kills={service.oom_kill_events} "
         f"mem_available={metrics.mem_available_kib / 1024 / 1024:.2f}GiB "
         f"swap_free={metrics.swap_free_kib / 1024 / 1024:.2f}GiB"
     )
-    reasons = violations(metrics)
+    reasons = violations(metrics, service)
     if reasons:
         for reason in reasons:
             print(f"[paired-cutover] resource gate FAIL {args.label}: {reason}", file=sys.stderr)
