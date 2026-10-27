@@ -124,23 +124,29 @@ resource_guard_pair() {
 }
 
 validate_source_guard() {
-  python3 - "$GUARD_EVIDENCE" "$CFG100" <<'PY'
+  local phase=${1:-mcp}
+  python3 - "$GUARD_EVIDENCE" "$CFG100" "$phase" <<'PY'
 import json, os, sys, time
 
-evidence = json.load(open(sys.argv[1], encoding="utf-8"))
-captured = evidence.get("captured_at_ms")
-now = int(time.time() * 1000)
-assert isinstance(captured, int) and 0 <= now - captured <= 60_000, "guard evidence must be <=60s old"
-status = evidence.get("status") or {}
-assert status.get("partial") is False, "MCP status must be complete"
-healthy = {row.get("host_id") for row in status.get("host_status", []) if row.get("ok") is True}
-assert {"server-100", "server-44"}.issubset(healthy), "both production hosts must be healthy in MCP status"
-nodes = {node.get("host_id"): node for node in status.get("nodes", [])}
-assert {"server-100", "server-44"}.issubset(nodes), "both host index statuses are required"
+phase = sys.argv[3]
+assert phase in {"mcp", "live"}, "unknown source guard phase"
+if phase == "mcp":
+    evidence = json.load(open(sys.argv[1], encoding="utf-8"))
+    captured = evidence.get("captured_at_ms")
+    now = int(time.time() * 1000)
+    assert isinstance(captured, int) and 0 <= now - captured <= 60_000, "guard evidence must be <=60s old"
+    status = evidence.get("status") or {}
+    assert status.get("partial") is False, "MCP status must be complete"
+    healthy = {row.get("host_id") for row in status.get("host_status", []) if row.get("ok") is True}
+    assert {"server-100", "server-44"}.issubset(healthy), "both production hosts must be healthy in MCP status"
+    nodes = {node.get("host_id"): node for node in status.get("nodes", [])}
+    assert {"server-100", "server-44"}.issubset(nodes), "both host index statuses are required"
+else:
+    nodes = {}
 config = json.load(open(sys.argv[2], encoding="utf-8"))
 source = config.get("remote_index_source") or {}
 cooldown_ms = int(((config.get("limits") or {}).get("index_activity") or {}).get("hot_cooldown_ms", 3_600_000))
-activity = nodes["server-100"].get("index_directory_activity") or []
+activity = nodes.get("server-100", {}).get("index_directory_activity") or []
 
 def quiet_by_metadata(root, cooldown):
     """Fail closed unless bounded ctime walk proves this exact root was quiet."""
@@ -172,6 +178,10 @@ def quiet_by_metadata(root, cooldown):
 
 for roots in (source.get("roots") or {}).values():
     for root in roots:
+        if phase == "live":
+            assert quiet_by_metadata(root, cooldown_ms), \
+                f"source-root activity guard is active or exact-root quiet cannot be proven: {root}"
+            continue
         matches = [row for row in activity
                    if root == row.get("path")
                    or root.startswith(row.get("path", "").rstrip("/") + "/")
@@ -187,7 +197,8 @@ for roots in (source.get("roots") or {}).values():
                                 for row in exact_scope)
             assert not scoped_record and quiet_by_metadata(root, cooldown_ms), \
                 f"source-root activity guard is active or exact-root quiet cannot be proven: {root}"
-assert int(time.time() * 1000) - captured <= 60_000, "guard evidence expired during source-root check"
+if phase == "mcp":
+    assert int(time.time() * 1000) - captured <= 60_000, "guard evidence expired during source-root check"
 PY
 }
 
@@ -202,7 +213,7 @@ fi
 
 [[ -n "$GUARD_EVIDENCE" && -f "$GUARD_EVIDENCE" ]] \
   || die "--apply requires fresh authenticated MCP --guard-evidence"
-validate_source_guard || die "source-root activity guard is hot, stale, partial, or unproven"
+validate_source_guard mcp || die "source-root activity guard is hot, stale, partial, or unproven"
 resource_guard_pair || die "apply is held until both hosts pass the I/O PSI and swap reserve guard"
 
 receipt_from() {
@@ -221,14 +232,14 @@ if ! resource_guard_pair; then
   log "source 100 remains unchanged; retain receiver receipt for a later guarded rollback: $receipt44"
   die "resource guard closed after receiver deployment; no source cutover or rollback restart attempted"
 fi
-if ! validate_source_guard; then
+if ! validate_source_guard live; then
   log "source 100 remains unchanged; retain receiver receipt for a later guarded rollback: $receipt44"
   die "source-root quiet proof expired or changed after receiver deployment; no source cutover attempted"
 fi
 
 if ! deploy100_output=$("$DEPLOY" --binary "$BIN" --config "$CFG100" 2>&1); then
   printf '%s\n' "$deploy100_output" >&2
-  if resource_guard_pair && validate_source_guard; then
+  if resource_guard_pair && validate_source_guard live; then
     log "source deploy failed; guards remain open, restoring receiver 44 from its recorded receipt"
     "$DEPLOY" --rollback "$receipt44" --remote "$REMOTE44" || die "100 rolled back locally, but receiver rollback on 44 failed; receipt=$receipt44"
     die "100 deploy rolled back locally and receiver 44 was restored; receipt=$receipt44"
