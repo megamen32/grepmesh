@@ -1012,6 +1012,15 @@ impl LocalBackend {
             let mut file = fs::File::open(&canonical_path)
                 .with_context(|| format!("open candidate {}", path.display()))?;
             let before = file.metadata()?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                anyhow::ensure!(
+                    before.dev() == metadata.dev() && before.ino() == metadata.ino(),
+                    "candidate changed while opening: {}",
+                    path.display()
+                );
+            }
             let mut hasher = Sha256::new();
             let mut buffer = [0u8; 64 * 1024];
             loop {
