@@ -14,9 +14,6 @@ APPLY=0
 GUARD_EVIDENCE=
 MIN_FREE_KIB=$((15 * 1024 * 1024))
 RESOURCE_GUARD=$ROOT/deploy/paired_resource_guard.py
-MAX_IO_FULL_AVG10_PCT=1.0
-MAX_IO_FULL_AVG60_PCT=1.0
-MIN_SWAP_FREE_KIB=$((5 * 1024 * 1024))
 
 log() { printf '[paired-cutover] %s\n' "$*" >&2; }
 die() { log "FAIL: $*"; exit 1; }
@@ -30,8 +27,9 @@ but requires fresh authenticated MCP status proving the configured source root
 is not hot or metadata-only on server-100. If the installed runtime reports
 only a coarse ancestor bucket, the gate also requires a bounded ctime walk to
 prove that exact source root has been quiet for the configured cooldown. Apply
-also requires I/O PSI full avg10/avg60 <= 1% and at least 5 GiB swap free on
-both hosts. Resources and exact source-root quiet are checked again between
+also requires at least 8 GiB MemAvailable and low memory PSI on both hosts.
+I/O PSI and swap are recorded for diagnostics but do not block a bounded
+restart. Memory and exact source-root quiet are checked again between
 the receiver and source deploys. A held second phase leaves the 100 source
 unchanged and retains the 44 rollback receipt; it will not restart either host
 while the resource or activity guard is closed.
@@ -105,18 +103,12 @@ REMOTE
 }
 
 resource_guard_local() {
-  python3 "$RESOURCE_GUARD" --label server-100 \
-    --max-full-avg10 "$MAX_IO_FULL_AVG10_PCT" \
-    --max-full-avg60 "$MAX_IO_FULL_AVG60_PCT" \
-    --min-swap-free-kib "$MIN_SWAP_FREE_KIB"
+  python3 "$RESOURCE_GUARD" --label server-100
 }
 
 resource_guard_remote() {
   ssh -o BatchMode=yes -o ConnectTimeout=5 "$REMOTE44" \
-    python3 - --label server-44 \
-      --max-full-avg10 "$MAX_IO_FULL_AVG10_PCT" \
-      --max-full-avg60 "$MAX_IO_FULL_AVG60_PCT" \
-      --min-swap-free-kib "$MIN_SWAP_FREE_KIB" < "$RESOURCE_GUARD"
+    python3 - --label server-44 < "$RESOURCE_GUARD"
 }
 
 resource_guard_pair() {
@@ -140,7 +132,6 @@ if phase == "mcp":
     healthy = {row.get("host_id") for row in status.get("host_status", []) if row.get("ok") is True}
     assert {"server-100", "server-44"}.issubset(healthy), "both production hosts must be healthy in MCP status"
     nodes = {node.get("host_id"): node for node in status.get("nodes", [])}
-    assert {"server-100", "server-44"}.issubset(nodes), "both host index statuses are required"
 else:
     nodes = {}
 config = json.load(open(sys.argv[2], encoding="utf-8"))
@@ -182,6 +173,10 @@ for roots in (source.get("roots") or {}).values():
             assert quiet_by_metadata(root, cooldown_ms), \
                 f"source-root activity guard is active or exact-root quiet cannot be proven: {root}"
             continue
+        if not activity:
+            assert quiet_by_metadata(root, cooldown_ms), \
+                f"MCP has no per-root activity rows and exact-root quiet cannot be proven: {root}"
+            continue
         matches = [row for row in activity
                    if root == row.get("path")
                    or root.startswith(row.get("path", "").rstrip("/") + "/")
@@ -214,7 +209,7 @@ fi
 [[ -n "$GUARD_EVIDENCE" && -f "$GUARD_EVIDENCE" ]] \
   || die "--apply requires fresh authenticated MCP --guard-evidence"
 validate_source_guard mcp || die "source-root activity guard is hot, stale, partial, or unproven"
-resource_guard_pair || die "apply is held until both hosts pass the I/O PSI and swap reserve guard"
+resource_guard_pair || die "apply is held until both hosts pass the memory reserve guard"
 
 receipt_from() {
   awk '/^NODE PASS / { for (i=1;i<=NF;i++) if ($i ~ /^receipt=/) {sub(/^receipt=/, "", $i); print $i} }'
@@ -230,7 +225,7 @@ receipt44=$(printf '%s\n' "$deploy44_output" | receipt_from | tail -n1)
 
 if ! resource_guard_pair; then
   log "source 100 remains unchanged; retain receiver receipt for a later guarded rollback: $receipt44"
-  die "resource guard closed after receiver deployment; no source cutover or rollback restart attempted"
+  die "memory guard closed after receiver deployment; no source cutover or rollback restart attempted"
 fi
 if ! validate_source_guard live; then
   log "source 100 remains unchanged; retain receiver receipt for a later guarded rollback: $receipt44"

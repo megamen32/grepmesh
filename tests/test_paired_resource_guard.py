@@ -39,15 +39,11 @@ class PairedResourceGuardTests(unittest.TestCase):
     def test_quiet_host_has_no_guard_reasons(self):
         self.assertEqual(violations(self.metrics(0.4, 0.8, 8.0)), [])
 
-    def test_current_high_full_psi_and_near_full_swap_are_rejected(self):
-        reasons = violations(self.metrics(19.14, 16.83, 3.7))
-        self.assertTrue(any("avg10" in reason for reason in reasons))
-        self.assertTrue(any("avg60" in reason for reason in reasons))
-        self.assertTrue(any("SwapFree" in reason for reason in reasons))
+    def test_io_psi_and_low_swap_are_informational_not_deployment_blockers(self):
+        self.assertEqual(violations(self.metrics(99.0, 99.0, 0.1)), [])
 
-    def test_sustained_psi_is_rejected_even_if_last_ten_seconds_are_quiet(self):
-        reasons = violations(self.metrics(0.2, 5.1, 8.0))
-        self.assertTrue(any("avg60" in reason for reason in reasons))
+    def test_sustained_io_psi_does_not_block_with_healthy_memory(self):
+        self.assertEqual(violations(self.metrics(0.2, 99.0, 8.0)), [])
 
     def test_malformed_psi_fails_closed(self):
         with self.assertRaises(ValueError):

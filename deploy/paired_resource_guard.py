@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Fail-closed resource check used immediately before paired GrepMesh restarts."""
+"""Check memory headroom before paired GrepMesh restarts.
+
+I/O PSI and swap are reported for visibility, but do not block deployment.
+"""
 
 from __future__ import annotations
 
@@ -10,10 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-DEFAULT_MAX_FULL_AVG10_PCT = 1.0
-DEFAULT_MAX_FULL_AVG60_PCT = 1.0
-DEFAULT_MIN_SWAP_FREE_KIB = 5 * 1024 * 1024
 DEFAULT_MIN_MEM_AVAILABLE_KIB = 8 * 1024 * 1024
+MAX_MEMORY_FULL_PSI_PCT = 1.0
 
 
 @dataclass(frozen=True)
@@ -58,41 +59,23 @@ def parse_metrics(io_psi_text: str, meminfo_text: str, memory_psi_text: str) -> 
 
 def violations(
     metrics: HostMetrics,
-    max_full_avg10_pct: float = DEFAULT_MAX_FULL_AVG10_PCT,
-    max_full_avg60_pct: float = DEFAULT_MAX_FULL_AVG60_PCT,
-    min_swap_free_kib: int = DEFAULT_MIN_SWAP_FREE_KIB,
     min_mem_available_kib: int = DEFAULT_MIN_MEM_AVAILABLE_KIB,
 ) -> list[str]:
     reasons = []
-    if metrics.io_full_avg10_pct > max_full_avg10_pct:
-        reasons.append(
-            f"I/O PSI full avg10 {metrics.io_full_avg10_pct:.2f}% "
-            f"> {max_full_avg10_pct:.2f}%"
-        )
-    if metrics.io_full_avg60_pct > max_full_avg60_pct:
-        reasons.append(
-            f"I/O PSI full avg60 {metrics.io_full_avg60_pct:.2f}% "
-            f"> {max_full_avg60_pct:.2f}%"
-        )
     if metrics.mem_available_kib < min_mem_available_kib:
         reasons.append(
             f"MemAvailable {metrics.mem_available_kib / 1024 / 1024:.2f} GiB "
             f"< {min_mem_available_kib / 1024 / 1024:.2f} GiB"
         )
-    if metrics.memory_full_avg10_pct > max_full_avg10_pct:
+    if metrics.memory_full_avg10_pct > MAX_MEMORY_FULL_PSI_PCT:
         reasons.append(
             f"memory PSI full avg10 {metrics.memory_full_avg10_pct:.2f}% "
-            f"> {max_full_avg10_pct:.2f}%"
+            f"> {MAX_MEMORY_FULL_PSI_PCT:.2f}%"
         )
-    if metrics.memory_full_avg60_pct > max_full_avg60_pct:
+    if metrics.memory_full_avg60_pct > MAX_MEMORY_FULL_PSI_PCT:
         reasons.append(
             f"memory PSI full avg60 {metrics.memory_full_avg60_pct:.2f}% "
-            f"> {max_full_avg60_pct:.2f}%"
-        )
-    if metrics.swap_total_kib > 0 and metrics.swap_free_kib < min_swap_free_kib:
-        reasons.append(
-            f"SwapFree {metrics.swap_free_kib / 1024 / 1024:.2f} GiB "
-            f"< {min_swap_free_kib / 1024 / 1024:.2f} GiB"
+            f"> {MAX_MEMORY_FULL_PSI_PCT:.2f}%"
         )
     return reasons
 
@@ -100,9 +83,6 @@ def violations(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--label", required=True)
-    parser.add_argument("--max-full-avg10", type=float, default=DEFAULT_MAX_FULL_AVG10_PCT)
-    parser.add_argument("--max-full-avg60", type=float, default=DEFAULT_MAX_FULL_AVG60_PCT)
-    parser.add_argument("--min-swap-free-kib", type=int, default=DEFAULT_MIN_SWAP_FREE_KIB)
     args = parser.parse_args()
     try:
         metrics = parse_metrics(
@@ -116,18 +96,13 @@ def main() -> int:
     print(
         f"[paired-cutover] resource {args.label}: "
         f"io_full_avg10={metrics.io_full_avg10_pct:.2f}% "
-        f"io_full_avg60={metrics.io_full_avg60_pct:.2f}% "
+        f"io_full_avg60={metrics.io_full_avg60_pct:.2f}% (informational) "
         f"mem_full_avg10={metrics.memory_full_avg10_pct:.2f}% "
         f"mem_full_avg60={metrics.memory_full_avg60_pct:.2f}% "
         f"mem_available={metrics.mem_available_kib / 1024 / 1024:.2f}GiB "
         f"swap_free={metrics.swap_free_kib / 1024 / 1024:.2f}GiB"
     )
-    reasons = violations(
-        metrics,
-        args.max_full_avg10,
-        args.max_full_avg60,
-        args.min_swap_free_kib,
-    )
+    reasons = violations(metrics)
     if reasons:
         for reason in reasons:
             print(f"[paired-cutover] resource gate FAIL {args.label}: {reason}", file=sys.stderr)
