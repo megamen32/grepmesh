@@ -30,6 +30,7 @@ struct AppState {
     compute: Arc<ComputeWorker>,
     jobs: SearchJobs,
     peer_auth_token: Option<String>,
+    remote_index_auth_token: Option<String>,
     require_peer_auth: bool,
 }
 
@@ -172,6 +173,19 @@ pub async fn run_server(mut config: AppConfig) -> Result<()> {
         .map(env::var)
         .transpose()?
         .filter(|token| !token.trim().is_empty());
+    let remote_index_auth_token = config
+        .remote_index_auth_token_env
+        .as_deref()
+        .map(env::var)
+        .transpose()?
+        .filter(|token| !token.trim().is_empty());
+    if (config.remote_index_source.is_some() || config.remote_index_store.is_some())
+        && remote_index_auth_token.is_none()
+    {
+        return Err(anyhow!(
+            "remote index is configured but its bearer token is unavailable"
+        ));
+    }
     let remote_bind = config.bind;
     let local_bind = config.local_bind;
     if local_bind.is_some_and(|bind| !bind.ip().is_loopback()) {
@@ -186,7 +200,7 @@ pub async fn run_server(mut config: AppConfig) -> Result<()> {
         config.remote_index_source.clone(),
         config.index_path.clone(),
     ) {
-        crate::remote_index::spawn_source_sync(sync, index_path, peer_auth_token.clone());
+        crate::remote_index::spawn_source_sync(sync, index_path, remote_index_auth_token.clone());
     }
     let service = Arc::new(
         MeshService::new(local, topology)
@@ -253,6 +267,7 @@ pub async fn run_server(mut config: AppConfig) -> Result<()> {
         compute: Arc::clone(&compute),
         jobs: jobs.clone(),
         peer_auth_token: peer_auth_token.clone(),
+        remote_index_auth_token: remote_index_auth_token.clone(),
         require_peer_auth,
     });
     let listener = tokio::net::TcpListener::bind(remote_bind).await?;
@@ -263,6 +278,7 @@ pub async fn run_server(mut config: AppConfig) -> Result<()> {
             compute,
             jobs,
             peer_auth_token,
+            remote_index_auth_token,
             require_peer_auth: false,
         })
         .merge(crate::console::router(
@@ -309,12 +325,17 @@ fn build_app(state: AppState) -> Router {
 }
 
 fn authorize_remote_index(state: &AppState, headers: &HeaderMap) -> Result<()> {
-    // Follow the same opt-in peer bearer policy as the existing mesh MCP on
-    // this listener. Source host and exact root are still checked by the store.
-    if state.require_peer_auth {
-        validate_peer_auth(headers, state.peer_auth_token.as_deref())?;
-    }
-    Ok(())
+    // Remote index writes/status use their own bearer token. Do not couple this
+    // ACL to the optional general mesh peer token, which would break peers that
+    // do not participate in the remote-index source relationship.
+    validate_remote_index_auth(headers, state.remote_index_auth_token.as_deref())
+}
+
+fn validate_remote_index_auth(headers: &HeaderMap, token: Option<&str>) -> Result<()> {
+    let token = token
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow!("remote index bearer auth is not configured"))?;
+    validate_peer_auth(headers, Some(token))
 }
 
 async fn remote_index_status(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -1047,6 +1068,7 @@ mod tests {
             )),
             jobs: SearchJobs::default(),
             peer_auth_token: None,
+            remote_index_auth_token: None,
             require_peer_auth: false,
         };
         let response = handle_rpc_inner(
@@ -1078,6 +1100,7 @@ mod tests {
             )),
             jobs: SearchJobs::default(),
             peer_auth_token: None,
+            remote_index_auth_token: None,
             require_peer_auth: false,
         };
         let response = handle_rpc_inner(state.clone(), json!({"id": 1, "method": "tools/call", "params": {"name": "compute_status", "arguments": {}}})).await.unwrap();
@@ -1098,5 +1121,19 @@ mod tests {
         assert!(validate_peer_auth(&headers, Some("secret")).is_err());
         headers.insert(header::AUTHORIZATION, "Bearer secret".parse().unwrap());
         assert!(validate_peer_auth(&headers, Some("secret")).is_ok());
+    }
+
+    #[test]
+    fn remote_index_requires_its_dedicated_bearer_token() {
+        let mut headers = HeaderMap::new();
+        assert!(validate_remote_index_auth(&headers, None).is_err());
+        assert!(validate_remote_index_auth(&headers, Some("remote-secret")).is_err());
+        headers.insert(header::AUTHORIZATION, "Bearer wrong".parse().unwrap());
+        assert!(validate_remote_index_auth(&headers, Some("remote-secret")).is_err());
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer remote-secret".parse().unwrap(),
+        );
+        assert!(validate_remote_index_auth(&headers, Some("remote-secret")).is_ok());
     }
 }

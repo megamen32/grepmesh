@@ -645,6 +645,11 @@ pub struct AppConfig {
     pub gptadmin_token_env: Option<String>,
     #[serde(default)]
     pub peer_auth_token_env: Option<String>,
+    /// Dedicated bearer token for remote SQLite index status/upsert/delete.
+    /// Kept separate from the general peer MCP token so securing index writes
+    /// does not change the authorization contract of existing mesh peers.
+    #[serde(default)]
+    pub remote_index_auth_token_env: Option<String>,
     #[serde(default)]
     pub backup_catalog: Option<BackupCatalogConfig>,
     #[serde(default)]
@@ -762,6 +767,14 @@ impl AppConfig {
                 anyhow::bail!("remote_index_store.path must be absolute");
             }
         }
+        if (cfg.remote_index_source.is_some() || cfg.remote_index_store.is_some())
+            && cfg
+                .remote_index_auth_token_env
+                .as_deref()
+                .map_or(true, |name| name.trim().is_empty())
+        {
+            anyhow::bail!("remote index requires remote_index_auth_token_env");
+        }
         if !cfg.index_enabled {
             cfg.index_path = None;
         } else if cfg.index_path.is_none() {
@@ -822,6 +835,27 @@ mod tests {
     }
 
     #[test]
+    fn remote_index_requires_a_dedicated_auth_env() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        std::fs::write(
+            &path,
+            br#"{"host_id":"server-100","root":"/home/roomhacker","remote_index_source":{"source_host":"server-100","index_host":"server-44","endpoint":"http://192.168.2.5:9419","roots":{"docs":["/home/roomhacker/agents-projects/grepmesh/docs"]}}}"#,
+        )
+        .unwrap();
+        assert!(AppConfig::from_path(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("remote_index_auth_token_env"));
+        let config = std::fs::read_to_string(&path).unwrap().replace(
+            "\"remote_index_source\"",
+            "\"remote_index_auth_token_env\":\"GREPMESH_REMOTE_INDEX_TOKEN\",\"remote_index_source\"",
+        );
+        std::fs::write(&path, config).unwrap();
+        assert!(AppConfig::from_path(&path).is_ok());
+    }
+
+    #[test]
     fn defaults_exclude_runtime_pseudo_filesystems() {
         let excludes = default_exclude_globs();
         for pattern in [
@@ -862,6 +896,7 @@ mod tests {
         assert_eq!(config.bind.to_string(), "127.0.0.1:9419");
         assert!(config.peers.is_empty());
         assert!(config.peer_auth_token_env.is_none());
+        assert!(config.remote_index_auth_token_env.is_none());
         assert!(config.index_path.is_none());
         assert!(config.index_enabled);
     }

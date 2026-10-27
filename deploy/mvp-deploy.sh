@@ -136,6 +136,28 @@ wait_healthy() {
 
 restart_service() { sudo systemctl restart "$SERVICE"; }
 
+ensure_peer_env_loaded() {
+  local env_file=/etc/grepmesh-mcp/peer.env
+  if sudo systemctl show "$SERVICE" -p EnvironmentFiles --value | grep -Fq "$env_file"; then
+    return 0
+  fi
+  local dropin_dir=/etc/systemd/system/${SERVICE}.service.d
+  local dropin=$dropin_dir/90-grepmesh-peer-env.conf
+  if sudo test -e "$dropin"; then
+    sudo grep -Fxq '[Service]' "$dropin" \
+      && sudo grep -Fxq 'EnvironmentFile=-/etc/grepmesh-mcp/peer.env' "$dropin" \
+      || die "existing peer env drop-in differs; refusing to overwrite: $dropin"
+  else
+    sudo install -d -m 0755 "$dropin_dir"
+    printf '[Service]\nEnvironmentFile=-/etc/grepmesh-mcp/peer.env\n' \
+      | sudo tee "$dropin" >/dev/null
+    sudo chmod 0644 "$dropin"
+  fi
+  sudo systemctl daemon-reload
+  sudo systemctl show "$SERVICE" -p EnvironmentFiles --value | grep -Fq "$env_file" \
+    || die "peer env file was not loaded by systemd"
+}
+
 sha_any() { sudo sha256sum "$1" | awk '{print $1}'; }
 
 restore_and_verify() {
@@ -176,12 +198,23 @@ fi
 
 NEW_BIN_SHA=$(sha_any "$BINARY")
 NEW_CFG_SHA=$(sha_any "$CONFIG")
-python3 - "$CONFIG" <<'PY' || die "new config is not valid JSON or lacks host_id/bind/peers"
+sudo python3 - "$CONFIG" <<'PY' || die "new config is not valid JSON or lacks host_id/bind/peers"
 import json, sys
 cfg = json.load(open(sys.argv[1]))
 for key in ("host_id", "bind", "peers"):
     if key not in cfg:
         raise SystemExit(f"missing key: {key}")
+if cfg.get("remote_index_source") or cfg.get("remote_index_store"):
+    token_env = cfg.get("remote_index_auth_token_env")
+    if not isinstance(token_env, str) or not token_env.strip():
+        raise SystemExit("remote index requires remote_index_auth_token_env")
+    import pathlib
+    env_file = pathlib.Path("/etc/grepmesh-mcp/peer.env")
+    if not env_file.is_file():
+        raise SystemExit("remote index peer env file is missing")
+    prefix = token_env + "="
+    if not any(line.startswith(prefix) and line[len(prefix):].strip() for line in env_file.read_text().splitlines()):
+        raise SystemExit("remote index bearer token is absent from peer env file")
 PY
 
 RECEIPT_DIR=$RECEIPT_ROOT/$TS
@@ -249,6 +282,7 @@ if [[ "$INSTALLED_CFG_SHA" != "$NEW_CFG_SHA" ]]; then
   rollback_on_error 1
 fi
 
+ensure_peer_env_loaded
 run sudo systemctl restart "$SERVICE"
 
 if ! wait_healthy; then

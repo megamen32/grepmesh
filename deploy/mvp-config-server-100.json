@@ -118,6 +118,7 @@
   "topology_cache_path": "/var/lib/grepmesh-mcp/topology.json",
   "gptadmin_topology_url": "http://127.0.0.1:9001/mcp-relay/agents",
   "gptadmin_token_env": "GPTADMIN_GREPMESH_TOKEN",
+  "remote_index_auth_token_env": "GREPMESH_REMOTE_INDEX_TOKEN",
   "topology_ttl_ms": 30000,
   "remote_index_source": {
     "source_host": "server-100",

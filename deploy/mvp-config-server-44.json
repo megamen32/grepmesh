@@ -111,6 +111,7 @@
     "**/rutube/state/**/captcha_*/**"
   ],
   "topology_cache_path": "/var/lib/grepmesh-mcp/topology.json",
+  "remote_index_auth_token_env": "GREPMESH_REMOTE_INDEX_TOKEN",
   "remote_index_store": {
     "index_host": "server-44",
     "path": "/var/lib/grepmesh-mcp/remote-index.sqlite3",
