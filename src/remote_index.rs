@@ -19,6 +19,12 @@ use std::{
 };
 
 pub const MAX_REMOTE_DOCUMENT_BYTES: usize = 1024 * 1024;
+const SOURCE_DOCUMENTS_QUERY: &str = "SELECT cache.path,cache.size,cache.mtime_ns,\
+     CASE WHEN cache.body='' THEN documents.body ELSE cache.body END \
+     FROM grepmesh_extraction_cache AS cache \
+     JOIN grepmesh_document_rows AS rows ON rows.path=cache.path \
+     JOIN grepmesh_documents AS documents ON documents.rowid=rows.fts_rowid \
+     WHERE cache.path>=?1 AND cache.path<?2 ORDER BY cache.path";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteDocument {
@@ -430,7 +436,7 @@ fn sync_once(
                 .with_context(|| format!("resolve selected source root {}", root.display()))?;
             let lower = format!("{}/", root.display().to_string().trim_end_matches('/'));
             let upper = format!("{}\u{10ffff}", lower);
-            let mut stmt = source.prepare("SELECT path,size,mtime_ns,body FROM grepmesh_extraction_cache WHERE path>=?1 AND path<?2 ORDER BY path")?;
+            let mut stmt = source.prepare(SOURCE_DOCUMENTS_QUERY)?;
             let mut rows = stmt.query(params![lower, upper])?;
             let mut seen = BTreeSet::new();
             while let Some(row) = rows.next()? {
@@ -602,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn source_sync_deletes_only_missing_paths_from_the_current_root() {
+    fn lossless_body_copy_sync_deletes_only_missing_paths_from_the_current_root() {
         let tmp = tempdir().unwrap();
         let root_a = tmp.path().join("docs-a");
         let root_b = tmp.path().join("docs-b");
@@ -621,5 +627,55 @@ mod tests {
 
         assert_eq!(stale, vec![missing]);
         assert!(!stale.contains(&sibling_root));
+    }
+
+    #[test]
+    fn lossless_body_copy_remote_sync_reads_cache_or_fts_without_losing_text() {
+        let source = Connection::open_in_memory().unwrap();
+        source
+            .execute_batch(
+                "CREATE VIRTUAL TABLE grepmesh_documents USING fts5(path UNINDEXED,body,tokenize='trigram');\
+                 CREATE TABLE grepmesh_extraction_cache(path TEXT PRIMARY KEY,size INTEGER,mtime_ns TEXT,body TEXT NOT NULL);\
+                 CREATE TABLE grepmesh_document_rows(path TEXT PRIMARY KEY,fts_rowid INTEGER UNIQUE);",
+            )
+            .unwrap();
+        let path = "/source/docs/memory.md";
+        source
+            .execute(
+                "INSERT INTO grepmesh_documents(path,body) VALUES(?1,?2)",
+                params![path, "durable searchable memory"],
+            )
+            .unwrap();
+        let rowid = source.last_insert_rowid();
+        source
+            .execute(
+                "INSERT INTO grepmesh_document_rows(path,fts_rowid) VALUES(?1,?2)",
+                params![path, rowid],
+            )
+            .unwrap();
+        source
+            .execute(
+                "INSERT INTO grepmesh_extraction_cache(path,size,mtime_ns,body) VALUES(?1,24,'7','')",
+                params![path],
+            )
+            .unwrap();
+        let read_body = || {
+            source
+                .query_row(
+                    SOURCE_DOCUMENTS_QUERY,
+                    params!["/source/docs/", "/source/docs/\u{10ffff}"],
+                    |row| row.get::<_, String>(3),
+                )
+                .unwrap()
+        };
+        assert_eq!(read_body(), "durable searchable memory");
+
+        source
+            .execute(
+                "UPDATE grepmesh_extraction_cache SET body='legacy cached text' WHERE path=?1",
+                params![path],
+            )
+            .unwrap();
+        assert_eq!(read_body(), "legacy cached text");
     }
 }

@@ -159,6 +159,16 @@ pub struct PersistentIndex {
     path: PathBuf,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CacheBodyCompactionBatch {
+    pub scanned_rows: usize,
+    pub cleared_rows: usize,
+    pub cleared_body_bytes: u64,
+    pub preserved_mismatches: usize,
+    pub preserved_oversized: usize,
+    pub complete: bool,
+}
+
 impl PersistentIndex {
     pub fn open(path: PathBuf) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
@@ -166,8 +176,33 @@ impl PersistentIndex {
         }
         let store = Self { path };
         store.connection()?;
+        store.migrate_cache_update_trigger()?;
         store.migrate_document_rows()?;
         store.backfill_cache_from_fts()?;
+        Ok(store)
+    }
+
+    /// Open the existing database for one bounded body-deduplication batch.
+    /// This avoids the startup row-map reconciliation performed by `open`.
+    pub fn open_for_body_compaction(path: PathBuf) -> Result<Self, String> {
+        if !path.is_file() {
+            return Err("body compaction requires an existing SQLite index file".into());
+        }
+        let store = Self { path };
+        store.connection()?;
+        store.migrate_cache_update_trigger()?;
+        let connection = store.connection()?;
+        let ready: Option<String> = connection
+            .query_row(
+                "SELECT value FROM grepmesh_metadata WHERE key='document_rows_v1'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if ready.as_deref() != Some("1") {
+            return Err("body compaction requires the existing keyed FTS row map".into());
+        }
         Ok(store)
     }
 
@@ -217,6 +252,163 @@ impl PersistentIndex {
             )
             .map_err(|error| error.to_string())?;
         Ok(connection)
+    }
+
+    fn migrate_cache_update_trigger(&self) -> Result<(), String> {
+        let mut connection = self.connection()?;
+        let migrated: Option<String> = connection
+            .query_row(
+                "SELECT value FROM grepmesh_metadata WHERE key='cache_update_trigger_v2'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if migrated.as_deref() == Some("1") {
+            return Ok(());
+        }
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute_batch(
+                "DROP TRIGGER IF EXISTS grepmesh_cache_rows_after_update;\
+                 CREATE TRIGGER grepmesh_cache_rows_after_update \
+                 AFTER UPDATE OF path ON grepmesh_extraction_cache BEGIN \
+                   DELETE FROM grepmesh_document_rows \
+                   WHERE path=OLD.path OR path=NEW.path; \
+                   DELETE FROM grepmesh_metadata WHERE key='document_rows_v1'; \
+                 END;",
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO grepmesh_metadata(key,value) VALUES('cache_update_trigger_v2','1') \
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())
+    }
+
+    /// Clear a bounded batch of extraction-cache bodies only when they exactly
+    /// match the authoritative FTS body. The path, fingerprint and searchable
+    /// FTS record remain intact; mismatches are preserved for investigation.
+    pub fn compact_duplicate_cache_bodies_batch(
+        &self,
+        batch_rows: usize,
+    ) -> Result<CacheBodyCompactionBatch, String> {
+        let batch_rows = batch_rows.clamp(1, 256) as i64;
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        let done: Option<String> = transaction
+            .query_row(
+                "SELECT value FROM grepmesh_metadata WHERE key='cache_body_compaction_v1_done'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if done.as_deref() == Some("1") {
+            return Ok(CacheBodyCompactionBatch {
+                complete: true,
+                ..Default::default()
+            });
+        }
+        let cursor: String = transaction
+            .query_row(
+                "SELECT value FROM grepmesh_metadata WHERE key='cache_body_compaction_v1_cursor'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default();
+        let candidates = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT cache.path,length(CAST(cache.body AS BLOB)) \
+                     FROM grepmesh_extraction_cache AS cache \
+                     JOIN grepmesh_document_rows AS rows ON rows.path=cache.path \
+                     WHERE cache.path>?1 AND cache.body<>'' \
+                     ORDER BY cache.path LIMIT ?2",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map(params![cursor, batch_rows], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+                })
+                .map_err(|error| error.to_string())?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|error| error.to_string())?
+        };
+        let mut result = CacheBodyCompactionBatch {
+            complete: candidates.len() < batch_rows as usize,
+            ..Default::default()
+        };
+        let mut last_path = cursor;
+        let mut body_bytes = 0u64;
+        const MAX_BATCH_BODY_BYTES: u64 = 8 * 1024 * 1024;
+        for (path, size) in &candidates {
+            if *size > MAX_BATCH_BODY_BYTES {
+                last_path = path.clone();
+                result.scanned_rows += 1;
+                result.preserved_oversized += 1;
+                continue;
+            }
+            if body_bytes > 0 && body_bytes + *size > MAX_BATCH_BODY_BYTES {
+                result.complete = false;
+                break;
+            }
+            let (cached_body, fts_body): (String, String) = transaction
+                .query_row(
+                    "SELECT cache.body,documents.body \
+                     FROM grepmesh_extraction_cache AS cache \
+                     JOIN grepmesh_document_rows AS rows ON rows.path=cache.path \
+                     JOIN grepmesh_documents AS documents ON documents.rowid=rows.fts_rowid \
+                     WHERE cache.path=?1",
+                    params![path],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|error| error.to_string())?;
+            last_path = path.clone();
+            result.scanned_rows += 1;
+            body_bytes += *size;
+            if cached_body != fts_body {
+                result.preserved_mismatches += 1;
+                continue;
+            }
+            transaction
+                .execute(
+                    "UPDATE grepmesh_extraction_cache SET body='' WHERE path=?1 AND body=?2",
+                    params![path, cached_body],
+                )
+                .map_err(|error| error.to_string())?;
+            result.cleared_rows += 1;
+            result.cleared_body_bytes += *size;
+        }
+        if result.scanned_rows > 0 {
+            transaction
+                .execute(
+                    "INSERT INTO grepmesh_metadata(key,value) VALUES('cache_body_compaction_v1_cursor',?1) \
+                     ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    params![last_path],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        if result.complete && result.scanned_rows == candidates.len() {
+            transaction
+                .execute(
+                    "INSERT INTO grepmesh_metadata(key,value) VALUES('cache_body_compaction_v1_done','1') \
+                     ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    [],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(result)
     }
 
     fn document_count(&self) -> Result<usize, String> {
@@ -419,7 +611,7 @@ impl PersistentIndex {
                 "SELECT \
                    EXISTS(SELECT 1 FROM grepmesh_extraction_cache WHERE path=?1), \
                    EXISTS(SELECT 1 FROM grepmesh_extraction_cache \
-                          WHERE path=?1 AND size=?2 AND mtime_ns=?3 AND body=?4), \
+                          WHERE path=?1 AND size=?2 AND mtime_ns=?3 AND (body='' OR body=?4)), \
                    (SELECT fts_rowid FROM grepmesh_document_rows WHERE path=?1)",
                 params![
                     path,
@@ -487,8 +679,8 @@ impl PersistentIndex {
         let fts_rowid = transaction.last_insert_rowid();
         transaction
             .execute(
-                "INSERT INTO grepmesh_extraction_cache(path, size, mtime_ns, body) VALUES (?1, ?2, ?3, ?4)                  ON CONFLICT(path) DO UPDATE SET size=excluded.size, mtime_ns=excluded.mtime_ns, body=excluded.body",
-                params![path, document.size as i64, document.mtime_ns.to_string(), document.body],
+                "INSERT INTO grepmesh_extraction_cache(path, size, mtime_ns, body) VALUES (?1, ?2, ?3, '')                  ON CONFLICT(path) DO UPDATE SET size=excluded.size, mtime_ns=excluded.mtime_ns, body=excluded.body",
+                params![path, document.size as i64, document.mtime_ns.to_string()],
             )
             .map_err(|error| error.to_string())?;
         transaction
@@ -546,7 +738,13 @@ impl PersistentIndex {
     ) -> Result<Option<String>, String> {
         let connection = self.connection()?;
         let mut statement = connection
-            .prepare("SELECT body FROM grepmesh_extraction_cache WHERE path=?1 AND size=?2 AND mtime_ns=?3")
+            .prepare(
+                "SELECT CASE WHEN cache.body='' THEN documents.body ELSE cache.body END \
+                      FROM grepmesh_extraction_cache AS cache \
+                      LEFT JOIN grepmesh_document_rows AS rows ON rows.path=cache.path \
+                      LEFT JOIN grepmesh_documents AS documents ON documents.rowid=rows.fts_rowid \
+                      WHERE cache.path=?1 AND cache.size=?2 AND cache.mtime_ns=?3",
+            )
             .map_err(|error| error.to_string())?;
         let mut rows = statement
             .query(params![
@@ -557,8 +755,7 @@ impl PersistentIndex {
             .map_err(|error| error.to_string())?;
         match rows.next().map_err(|error| error.to_string())? {
             Some(row) => row
-                .get::<_, String>(0)
-                .map(Some)
+                .get::<_, Option<String>>(0)
                 .map_err(|error| error.to_string()),
             None => Ok(None),
         }
@@ -771,16 +968,9 @@ impl PersistentIndex {
                 Ok(metadata) if metadata.is_file() => metadata,
                 _ => continue,
             };
-            let body = transaction
-                .query_row(
-                    "SELECT body FROM grepmesh_documents WHERE rowid=?1",
-                    params![rowid],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(|error| error.to_string())?;
             transaction.execute(
-                "INSERT OR IGNORE INTO grepmesh_extraction_cache(path, size, mtime_ns, body) VALUES (?1, ?2, ?3, ?4)",
-                params![path, metadata.len() as i64, metadata_mtime_ns(&metadata).to_string(), body],
+                "INSERT OR IGNORE INTO grepmesh_extraction_cache(path, size, mtime_ns, body) VALUES (?1, ?2, ?3, '')",
+                params![path, metadata.len() as i64, metadata_mtime_ns(&metadata).to_string()],
             ).map_err(|error| error.to_string())?;
             transaction
                 .execute(
@@ -4441,6 +4631,87 @@ mod tests {
             .cached_body(&document, size, mtime_ns + 1)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn lossless_body_copy_compaction_preserves_fts_and_only_clears_exact_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.sqlite");
+        let exact = dir.path().join("exact.txt");
+        let mismatch = dir.path().join("mismatch.txt");
+        fs::write(&exact, "exact searchable body").unwrap();
+        fs::write(&mismatch, "mismatch searchable body").unwrap();
+        let index = PersistentIndex::open(db).unwrap();
+        index
+            .replace_document(&exact, "exact searchable body")
+            .unwrap();
+        index
+            .replace_document(&mismatch, "mismatch searchable body")
+            .unwrap();
+
+        let connection = index.connection().unwrap();
+        let new_cache_body: String = connection
+            .query_row(
+                "SELECT body FROM grepmesh_extraction_cache WHERE path=?1",
+                params![exact.display().to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            new_cache_body.is_empty(),
+            "new rows keep their body only in FTS"
+        );
+        connection
+            .execute(
+                "UPDATE grepmesh_extraction_cache SET body=?2 WHERE path=?1",
+                params![exact.display().to_string(), "exact searchable body"],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE grepmesh_extraction_cache SET body=?2 WHERE path=?1",
+                params![mismatch.display().to_string(), "legacy divergent body"],
+            )
+            .unwrap();
+
+        let batch = index.compact_duplicate_cache_bodies_batch(16).unwrap();
+        assert_eq!(batch.scanned_rows, 2);
+        assert_eq!(batch.cleared_rows, 1);
+        assert_eq!(batch.preserved_mismatches, 1);
+        assert!(batch.complete);
+        assert_eq!(
+            index
+                .cached_body(
+                    &exact,
+                    fs::metadata(&exact).unwrap().len(),
+                    metadata_mtime_ns(&fs::metadata(&exact).unwrap())
+                )
+                .unwrap()
+                .as_deref(),
+            Some("exact searchable body")
+        );
+        assert_eq!(
+            index
+                .cached_body(
+                    &mismatch,
+                    fs::metadata(&mismatch).unwrap().len(),
+                    metadata_mtime_ns(&fs::metadata(&mismatch).unwrap())
+                )
+                .unwrap()
+                .as_deref(),
+            Some("legacy divergent body")
+        );
+        let row_map_marker: String = connection
+            .query_row(
+                "SELECT value FROM grepmesh_metadata WHERE key='document_rows_v1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            row_map_marker, "1",
+            "body-only migration keeps the path map valid"
+        );
     }
 
     #[test]
