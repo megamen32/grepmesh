@@ -1016,7 +1016,7 @@ fn load_activity_guard(
     match fs::read(path) {
         Ok(bytes) => match serde_json::from_slice::<ActivityGuardFile>(&bytes) {
             Ok(file) if file.version == 1 => {
-                let mut known_isolated = file.isolated_roots;
+                let known_isolated = file.isolated_roots;
                 let mut activity = file
                     .buckets
                     .into_iter()
@@ -1031,25 +1031,7 @@ fn load_activity_guard(
                     })
                     .collect::<BTreeMap<_, _>>();
                 for root in &config.activity_bucket_roots {
-                    if !activity.contains_key(root) {
-                        if !known_isolated.contains(root)
-                            && !activity_root_is_quiet(
-                                root,
-                                now,
-                                config.hot_cooldown_ms,
-                                MAX_ACTIVITY_ROOT_STAT_ENTRIES,
-                            )
-                        {
-                            inherit_active_parent_cooldown(
-                                &mut activity,
-                                root,
-                                now,
-                                config.hot_debounce_ms,
-                            );
-                        }
-                        activity.entry(root.clone()).or_default();
-                    }
-                    known_isolated.insert(root.clone());
+                    ensure_isolated_activity_root(&mut activity, root, now, config);
                 }
                 activity
             }
@@ -1133,6 +1115,46 @@ fn activity_root_is_quiet_impl(_: &Path, _: u64, _: usize) -> bool {
     false
 }
 
+fn ensure_isolated_activity_root(
+    activity: &mut BTreeMap<PathBuf, DirectoryActivityState>,
+    root: &Path,
+    now_ms: u64,
+    config: &IndexActivityConfig,
+) {
+    let quiet = activity_root_is_quiet(
+        root,
+        now_ms,
+        config.hot_cooldown_ms,
+        MAX_ACTIVITY_ROOT_STAT_ENTRIES,
+    );
+    if let Some(stats) = activity.get_mut(root) {
+        if stats.hot_until_ms <= now_ms && !quiet {
+            stats.hot_until_ms = now_ms.saturating_add(config.hot_cooldown_ms);
+            stats.events = stats.events.max(config.hot_event_threshold);
+            stats.changed_bytes = stats.changed_bytes.max(config.hot_changed_bytes_threshold);
+            stats.metadata_only = true;
+            stats.debounce_ms = config.hot_debounce_ms;
+        } else if stats.hot_until_ms <= now_ms && quiet {
+            stats.hot_until_ms = 0;
+            stats.metadata_only = false;
+        }
+        return;
+    }
+    if !quiet {
+        inherit_active_parent_cooldown(activity, root, now_ms, config.hot_debounce_ms);
+    }
+    let stats = activity.entry(root.to_path_buf()).or_default();
+    if !quiet {
+        stats.hot_until_ms = stats
+            .hot_until_ms
+            .max(now_ms.saturating_add(config.hot_cooldown_ms));
+        stats.events = stats.events.max(config.hot_event_threshold);
+        stats.changed_bytes = stats.changed_bytes.max(config.hot_changed_bytes_threshold);
+        stats.metadata_only = true;
+        stats.debounce_ms = config.hot_debounce_ms;
+    }
+}
+
 fn bootstrap_and_isolate_activity_guard(
     roots: &BTreeMap<String, Vec<PathBuf>>,
     config: &IndexActivityConfig,
@@ -1157,20 +1179,7 @@ fn bootstrap_and_isolate_activity_guard(
         })
         .collect::<BTreeMap<_, _>>();
     for root in &config.activity_bucket_roots {
-        let quiet = activity_root_is_quiet(
-            root,
-            now_ms,
-            config.hot_cooldown_ms,
-            MAX_ACTIVITY_ROOT_STAT_ENTRIES,
-        );
-        if quiet {
-            let isolated = activity.entry(root.clone()).or_default();
-            isolated.metadata_only = false;
-            isolated.hot_until_ms = 0;
-        } else {
-            inherit_active_parent_cooldown(&mut activity, root, now_ms, config.hot_debounce_ms);
-            activity.entry(root.clone()).or_default();
-        }
+        ensure_isolated_activity_root(&mut activity, root, now_ms, config);
     }
     activity
 }

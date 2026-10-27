@@ -169,6 +169,7 @@ for roots in (source.get("roots") or {}).values():
                                 for row in exact_scope)
             assert not scoped_record and quiet_by_metadata(root, cooldown_ms), \
                 f"source-root activity guard is active or exact-root quiet cannot be proven: {root}"
+assert int(time.time() * 1000) - captured <= 60_000, "guard evidence expired during source-root check"
 PY
 
 receipt_from() {
