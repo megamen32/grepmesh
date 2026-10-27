@@ -1012,7 +1012,16 @@ fn load_activity_guard(
     config: &IndexActivityConfig,
     had_persistent_index: bool,
 ) -> BTreeMap<PathBuf, DirectoryActivityState> {
-    let now = unix_time_ms();
+    load_activity_guard_at(path, roots, config, had_persistent_index, unix_time_ms())
+}
+
+fn load_activity_guard_at(
+    path: &Path,
+    roots: &BTreeMap<String, Vec<PathBuf>>,
+    config: &IndexActivityConfig,
+    had_persistent_index: bool,
+    now: u64,
+) -> BTreeMap<PathBuf, DirectoryActivityState> {
     match fs::read(path) {
         Ok(bytes) => match serde_json::from_slice::<ActivityGuardFile>(&bytes) {
             Ok(file) if file.version == 1 => {
@@ -3196,6 +3205,7 @@ mod tests {
         let path = temp.path().join("index.activity-guard.json");
         let root = temp.path().join("home");
         let source = root.join("agents-projects/grepmesh/docs");
+        fs::create_dir_all(&source).unwrap();
         let roots = BTreeMap::from([("home".to_string(), vec![root.clone()])]);
         let config = IndexActivityConfig {
             hot_cooldown_ms: 60_000,
@@ -3237,7 +3247,13 @@ mod tests {
             &config.activity_bucket_roots,
         )
         .unwrap();
-        let restored_cold = load_activity_guard(&path, &roots, &config, true);
+        let restored_cold = load_activity_guard_at(
+            &path,
+            &roots,
+            &config,
+            true,
+            now.saturating_add(config.hot_cooldown_ms.saturating_mul(2)),
+        );
         assert!(!activity_bucket_is_hot(&restored_cold, &source, now));
 
         let seeded = load_activity_guard(&temp.path().join("missing.json"), &roots, &config, true);
