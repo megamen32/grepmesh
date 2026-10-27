@@ -13,6 +13,10 @@ REMOTE44=${GREPMESH_SERVER44_SSH:-roomhacker@192.168.2.5}
 APPLY=0
 GUARD_EVIDENCE=
 MIN_FREE_KIB=$((15 * 1024 * 1024))
+RESOURCE_GUARD=$ROOT/deploy/paired_resource_guard.py
+MAX_IO_FULL_AVG10_PCT=1.0
+MAX_IO_FULL_AVG60_PCT=1.0
+MIN_SWAP_FREE_KIB=$((5 * 1024 * 1024))
 
 log() { printf '[paired-cutover] %s\n' "$*" >&2; }
 die() { log "FAIL: $*"; exit 1; }
@@ -25,7 +29,12 @@ pair. --apply performs the coordinated restart using mvp-deploy.sh receipts,
 but requires fresh authenticated MCP status proving the configured source root
 is not hot or metadata-only on server-100. If the installed runtime reports
 only a coarse ancestor bucket, the gate also requires a bounded ctime walk to
-prove that exact source root has been quiet for the configured cooldown.
+prove that exact source root has been quiet for the configured cooldown. Apply
+also requires I/O PSI full avg10/avg60 <= 1% and at least 5 GiB swap free on
+both hosts. Resources and exact source-root quiet are checked again between
+the receiver and source deploys. A held second phase leaves the 100 source
+unchanged and retains the 44 rollback receipt; it will not restart either host
+while the resource or activity guard is closed.
 EOF
   exit 2
 }
@@ -95,34 +104,49 @@ available=$(df -Pk /var/lib/grepmesh-mcp | awk 'NR==2 {print $4}')
 REMOTE
 }
 
-local_preflight
-remote_preflight || die "server-44 health/free-space preflight failed"
-log "preflight PASS: both nodes healthy; reciprocal peer and source-root authorization preserved"
-log "binary sha256=$BIN_SHA config100=$CFG100_SHA config44=$CFG44_SHA"
-if ((APPLY == 0)); then
-  log "dry-run only: no files changed and no services restarted"
-  exit 0
-fi
+resource_guard_local() {
+  python3 "$RESOURCE_GUARD" --label server-100 \
+    --max-full-avg10 "$MAX_IO_FULL_AVG10_PCT" \
+    --max-full-avg60 "$MAX_IO_FULL_AVG60_PCT" \
+    --min-swap-free-kib "$MIN_SWAP_FREE_KIB"
+}
 
-[[ -n "$GUARD_EVIDENCE" && -f "$GUARD_EVIDENCE" ]] \
-  || die "--apply requires fresh authenticated MCP --guard-evidence"
-python3 - "$GUARD_EVIDENCE" "$CFG100" <<'PY' || die "source-root activity guard is hot, stale, partial, or unproven"
+resource_guard_remote() {
+  ssh -o BatchMode=yes -o ConnectTimeout=5 "$REMOTE44" \
+    python3 - --label server-44 \
+      --max-full-avg10 "$MAX_IO_FULL_AVG10_PCT" \
+      --max-full-avg60 "$MAX_IO_FULL_AVG60_PCT" \
+      --min-swap-free-kib "$MIN_SWAP_FREE_KIB" < "$RESOURCE_GUARD"
+}
+
+resource_guard_pair() {
+  resource_guard_local && resource_guard_remote
+}
+
+validate_source_guard() {
+  local phase=${1:-mcp}
+  python3 - "$GUARD_EVIDENCE" "$CFG100" "$phase" <<'PY'
 import json, os, sys, time
 
-evidence = json.load(open(sys.argv[1], encoding="utf-8"))
-captured = evidence.get("captured_at_ms")
-now = int(time.time() * 1000)
-assert isinstance(captured, int) and 0 <= now - captured <= 60_000, "guard evidence must be <=60s old"
-status = evidence.get("status") or {}
-assert status.get("partial") is False, "MCP status must be complete"
-healthy = {row.get("host_id") for row in status.get("host_status", []) if row.get("ok") is True}
-assert {"server-100", "server-44"}.issubset(healthy), "both production hosts must be healthy in MCP status"
-nodes = {node.get("host_id"): node for node in status.get("nodes", [])}
-assert {"server-100", "server-44"}.issubset(nodes), "both host index statuses are required"
+phase = sys.argv[3]
+assert phase in {"mcp", "live"}, "unknown source guard phase"
+if phase == "mcp":
+    evidence = json.load(open(sys.argv[1], encoding="utf-8"))
+    captured = evidence.get("captured_at_ms")
+    now = int(time.time() * 1000)
+    assert isinstance(captured, int) and 0 <= now - captured <= 60_000, "guard evidence must be <=60s old"
+    status = evidence.get("status") or {}
+    assert status.get("partial") is False, "MCP status must be complete"
+    healthy = {row.get("host_id") for row in status.get("host_status", []) if row.get("ok") is True}
+    assert {"server-100", "server-44"}.issubset(healthy), "both production hosts must be healthy in MCP status"
+    nodes = {node.get("host_id"): node for node in status.get("nodes", [])}
+    assert {"server-100", "server-44"}.issubset(nodes), "both host index statuses are required"
+else:
+    nodes = {}
 config = json.load(open(sys.argv[2], encoding="utf-8"))
 source = config.get("remote_index_source") or {}
 cooldown_ms = int(((config.get("limits") or {}).get("index_activity") or {}).get("hot_cooldown_ms", 3_600_000))
-activity = nodes["server-100"].get("index_directory_activity") or []
+activity = nodes.get("server-100", {}).get("index_directory_activity") or []
 
 def quiet_by_metadata(root, cooldown):
     """Fail closed unless bounded ctime walk proves this exact root was quiet."""
@@ -154,6 +178,10 @@ def quiet_by_metadata(root, cooldown):
 
 for roots in (source.get("roots") or {}).values():
     for root in roots:
+        if phase == "live":
+            assert quiet_by_metadata(root, cooldown_ms), \
+                f"source-root activity guard is active or exact-root quiet cannot be proven: {root}"
+            continue
         matches = [row for row in activity
                    if root == row.get("path")
                    or root.startswith(row.get("path", "").rstrip("/") + "/")
@@ -169,8 +197,24 @@ for roots in (source.get("roots") or {}).values():
                                 for row in exact_scope)
             assert not scoped_record and quiet_by_metadata(root, cooldown_ms), \
                 f"source-root activity guard is active or exact-root quiet cannot be proven: {root}"
-assert int(time.time() * 1000) - captured <= 60_000, "guard evidence expired during source-root check"
+if phase == "mcp":
+    assert int(time.time() * 1000) - captured <= 60_000, "guard evidence expired during source-root check"
 PY
+}
+
+local_preflight
+remote_preflight || die "server-44 health/free-space preflight failed"
+log "preflight PASS: both nodes healthy; reciprocal peer and source-root authorization preserved"
+log "binary sha256=$BIN_SHA config100=$CFG100_SHA config44=$CFG44_SHA"
+if ((APPLY == 0)); then
+  log "dry-run only: no files changed and no services restarted"
+  exit 0
+fi
+
+[[ -n "$GUARD_EVIDENCE" && -f "$GUARD_EVIDENCE" ]] \
+  || die "--apply requires fresh authenticated MCP --guard-evidence"
+validate_source_guard mcp || die "source-root activity guard is hot, stale, partial, or unproven"
+resource_guard_pair || die "apply is held until both hosts pass the I/O PSI and swap reserve guard"
 
 receipt_from() {
   awk '/^NODE PASS / { for (i=1;i<=NF;i++) if ($i ~ /^receipt=/) {sub(/^receipt=/, "", $i); print $i} }'
@@ -184,11 +228,24 @@ printf '%s\n' "$deploy44_output" >&2
 receipt44=$(printf '%s\n' "$deploy44_output" | receipt_from | tail -n1)
 [[ -n "$receipt44" ]] || die "receiver deployment passed but returned no rollback receipt: $deploy44_output"
 
+if ! resource_guard_pair; then
+  log "source 100 remains unchanged; retain receiver receipt for a later guarded rollback: $receipt44"
+  die "resource guard closed after receiver deployment; no source cutover or rollback restart attempted"
+fi
+if ! validate_source_guard live; then
+  log "source 100 remains unchanged; retain receiver receipt for a later guarded rollback: $receipt44"
+  die "source-root quiet proof expired or changed after receiver deployment; no source cutover attempted"
+fi
+
 if ! deploy100_output=$("$DEPLOY" --binary "$BIN" --config "$CFG100" 2>&1); then
   printf '%s\n' "$deploy100_output" >&2
-  log "source deploy failed; restoring receiver 44 from its recorded receipt"
-  "$DEPLOY" --rollback "$receipt44" --remote "$REMOTE44" || die "100 rolled back locally, but receiver rollback on 44 failed; receipt=$receipt44"
-  die "100 deployment failed; 100 node rollback and 44 pair rollback were requested"
+  if resource_guard_pair && validate_source_guard live; then
+    log "source deploy failed; guards remain open, restoring receiver 44 from its recorded receipt"
+    "$DEPLOY" --rollback "$receipt44" --remote "$REMOTE44" || die "100 rolled back locally, but receiver rollback on 44 failed; receipt=$receipt44"
+    die "100 deploy rolled back locally and receiver 44 was restored; receipt=$receipt44"
+  fi
+  log "100 node deploy handled its local rollback; do not restart receiver 44 while guards are closed"
+  die "source deploy failed; receiver 44 remains at the candidate with rollback receipt=$receipt44"
 fi
 printf '%s\n' "$deploy100_output" >&2
 log "paired node deploy PASS; verify the authenticated external MCP consumer and CRUD before retiring either receipt"

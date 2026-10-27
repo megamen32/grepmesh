@@ -64,6 +64,12 @@ jobs:
         with:
           targets: ${{ matrix.rust_target }}
       - uses: Swatinem/rust-cache@v2
+      - name: Focused paired rollout and lossless storage regressions
+        if: matrix.target == 'linux-x86_64'
+        shell: bash
+        run: |
+          python3 tests/test_paired_resource_guard.py
+          cargo test --locked --no-default-features --lib lossless_body_copy
       - name: Build GrepMesh
         shell: bash
         run: |
