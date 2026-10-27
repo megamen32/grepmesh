@@ -215,32 +215,33 @@ receipt_from() {
   awk '/^NODE PASS / { for (i=1;i<=NF;i++) if ($i ~ /^receipt=/) {sub(/^receipt=/, "", $i); print $i} }'
 }
 
+# Upgrade the source first. The new source sends the dedicated bearer token;
+# the old receiver remains backward-compatible and accepts it during the short
+# interval before 44 is upgraded. Reversing this order would make the old 100
+# source-sync calls fail authentication until its restart completed.
+deploy100_output=$("$DEPLOY" --binary "$BIN" --config "$CFG100" 2>&1) || {
+  printf '%s\n' "$deploy100_output" >&2
+  die "source deploy failed; node-level script handled its rollback"
+}
+printf '%s\n' "$deploy100_output" >&2
+receipt100=$(printf '%s\n' "$deploy100_output" | receipt_from | tail -n1)
+[[ -n "$receipt100" ]] || die "source deployment passed but returned no rollback receipt: $deploy100_output"
+
+if ! resource_guard_pair; then
+  log "source 100 is bearer-capable and remains compatible with the old receiver; keep receipt for rollback: $receipt100"
+  die "memory guard closed after source deployment; receiver 44 remains unchanged"
+fi
+if ! validate_source_guard live; then
+  log "source 100 is bearer-capable and remains compatible with the old receiver; keep receipt for rollback: $receipt100"
+  die "source-root quiet proof expired or changed after source deployment; receiver 44 remains unchanged"
+fi
+
 deploy44_output=$("$DEPLOY" --binary "$BIN" --config "$CFG44" --remote "$REMOTE44" 2>&1) || {
   printf '%s\n' "$deploy44_output" >&2
-  die "receiver deploy failed; node-level script handled its rollback"
+  log "source 100 remains compatible with the old receiver; retain source receipt: $receipt100"
+  die "receiver deploy failed; node-level script handled its rollback; source receipt=$receipt100"
 }
 printf '%s\n' "$deploy44_output" >&2
 receipt44=$(printf '%s\n' "$deploy44_output" | receipt_from | tail -n1)
 [[ -n "$receipt44" ]] || die "receiver deployment passed but returned no rollback receipt: $deploy44_output"
-
-if ! resource_guard_pair; then
-  log "source 100 remains unchanged; retain receiver receipt for a later guarded rollback: $receipt44"
-  die "memory guard closed after receiver deployment; no source cutover or rollback restart attempted"
-fi
-if ! validate_source_guard live; then
-  log "source 100 remains unchanged; retain receiver receipt for a later guarded rollback: $receipt44"
-  die "source-root quiet proof expired or changed after receiver deployment; no source cutover attempted"
-fi
-
-if ! deploy100_output=$("$DEPLOY" --binary "$BIN" --config "$CFG100" 2>&1); then
-  printf '%s\n' "$deploy100_output" >&2
-  if resource_guard_pair && validate_source_guard live; then
-    log "source deploy failed; guards remain open, restoring receiver 44 from its recorded receipt"
-    "$DEPLOY" --rollback "$receipt44" --remote "$REMOTE44" || die "100 rolled back locally, but receiver rollback on 44 failed; receipt=$receipt44"
-    die "100 deploy rolled back locally and receiver 44 was restored; receipt=$receipt44"
-  fi
-  log "100 node deploy handled its local rollback; do not restart receiver 44 while guards are closed"
-  die "source deploy failed; receiver 44 remains at the candidate with rollback receipt=$receipt44"
-fi
-printf '%s\n' "$deploy100_output" >&2
-log "paired node deploy PASS; verify the authenticated external MCP consumer and CRUD before retiring either receipt"
+log "paired node deploy PASS; source receipt=$receipt100 receiver receipt=$receipt44; verify authenticated MCP consumer and CRUD before retiring either receipt"
