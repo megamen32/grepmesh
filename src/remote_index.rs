@@ -6,6 +6,7 @@ use crate::{
     config::{RemoteIndexSourceConfig, RemoteIndexStoreConfig},
 };
 use anyhow::{anyhow, Context, Result};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -201,13 +202,39 @@ impl RemoteIndexStore {
     }
 
     pub fn search(&self, query: &str, limit: usize, mode: &SearchMode) -> Result<Vec<SearchHit>> {
+        self.search_filtered(query, limit, mode, &[])
+    }
+
+    pub fn search_filtered(
+        &self,
+        query: &str,
+        limit: usize,
+        mode: &SearchMode,
+        path_globs: &[String],
+    ) -> Result<Vec<SearchHit>> {
         if query.chars().count() < 3 || limit == 0 || matches!(mode, SearchMode::Regex) {
             return Ok(Vec::new());
         }
+        let positive = path_globs
+            .iter()
+            .filter(|glob| !glob.starts_with('!'))
+            .cloned()
+            .collect::<Vec<_>>();
+        let negative = path_globs
+            .iter()
+            .filter_map(|glob| glob.strip_prefix('!').map(str::to_owned))
+            .collect::<Vec<_>>();
+        let includes = compile_path_globs(&positive)?;
+        let rejects = compile_path_globs(&negative)?;
         let db = self.connection()?;
         let fts_query = format!("\"{}\"", query.replace('"', "\"\""));
-        let mut stmt = db.prepare("SELECT d.source_host,d.path,d.body,r.size,r.mtime_ns FROM grepmesh_remote_documents d JOIN grepmesh_remote_rows r ON r.fts_rowid=d.rowid WHERE grepmesh_remote_documents MATCH ?1 ORDER BY d.source_host,d.path LIMIT ?2")?;
-        let mut rows = stmt.query(params![fts_query, limit as i64])?;
+        // Keep large extracted bodies out of the FTS candidate scan. A path
+        // filter can reject most candidates, so fetch the body only after the
+        // source root and requested globs have both been authorized.
+        let mut stmt = db.prepare("SELECT d.rowid,d.source_host,d.root_name,d.path,r.size,r.mtime_ns FROM grepmesh_remote_documents d JOIN grepmesh_remote_rows r ON r.fts_rowid=d.rowid WHERE grepmesh_remote_documents MATCH ?1 ORDER BY d.source_host,d.path")?;
+        let mut rows = stmt.query(params![fts_query])?;
+        let mut body_stmt =
+            db.prepare("SELECT body FROM grepmesh_remote_documents WHERE rowid=?1")?;
         let needle = if matches!(mode, SearchMode::CaseInsensitiveLiteral) {
             query.to_lowercase()
         } else {
@@ -215,11 +242,28 @@ impl RemoteIndexStore {
         };
         let mut hits = Vec::new();
         while let Some(row) = rows.next()? {
-            let host: String = row.get(0)?;
-            let path: String = row.get(1)?;
-            let body: String = row.get(2)?;
-            let size: u64 = row.get(3)?;
-            let modified_ns: String = row.get(4)?;
+            let rowid: i64 = row.get(0)?;
+            let host: String = row.get(1)?;
+            let root_name: String = row.get(2)?;
+            let path: String = row.get(3)?;
+            let size: u64 = row.get(4)?;
+            let modified_ns: String = row.get(5)?;
+            let source_root = self
+                .config
+                .allowed_roots
+                .get(&host)
+                .and_then(|roots| roots.get(&root_name))
+                .ok_or_else(|| anyhow!("remote index row has no authorized root"))?;
+            let source_path = Path::new(&path);
+            if !source_path.starts_with(source_root) {
+                continue;
+            }
+            let relative = source_path.strip_prefix(source_root).unwrap_or(source_path);
+            let matches = |set: &GlobSet| set.is_match(source_path) || set.is_match(relative);
+            if (!positive.is_empty() && !matches(&includes)) || matches(&rejects) {
+                continue;
+            }
+            let body: String = body_stmt.query_row(params![rowid], |row| row.get(0))?;
             let modified_ms = (modified_ns.parse::<u128>().unwrap_or_default() / 1_000_000)
                 .min(u64::MAX as u128) as u64;
             let mut lines = Vec::new();
@@ -264,6 +308,16 @@ impl RemoteIndexStore {
         let db = self.connection()?;
         db.query_row("SELECT size,updated_ms FROM grepmesh_remote_rows WHERE source_host=?1 AND path=?2 LIMIT 1", params![source_host, path.to_string_lossy()], |row| Ok((row.get(0)?,row.get(1)?))).optional().map_err(Into::into)
     }
+}
+
+fn compile_path_globs(patterns: &[String]) -> Result<GlobSet> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        builder.add(Glob::new(pattern).map_err(|error| anyhow!("invalid path glob: {error}"))?);
+    }
+    builder
+        .build()
+        .map_err(|error| anyhow!("invalid path glob set: {error}"))
 }
 
 fn unix_time_ms() -> u64 {

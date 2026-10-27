@@ -609,9 +609,11 @@ impl LocalBackend {
         // A source root authorized by this host's remote index lives on the
         // source machine. Scanning unrelated local roots first can use the
         // entire peer deadline before the remote SQLite result is read.
-        let remote_index_only = path_globs.is_empty()
-            && query.chars().count() >= 3
-            && matches!(mode, SearchMode::Literal | SearchMode::CaseInsensitiveLiteral)
+        let remote_index_only = query.chars().count() >= 3
+            && matches!(
+                mode,
+                SearchMode::Literal | SearchMode::CaseInsensitiveLiteral
+            )
             && self
                 .remote_index
                 .as_ref()
@@ -801,7 +803,12 @@ impl LocalBackend {
                 let remote_limit = limit.saturating_sub(hits.len());
                 if remote_limit > 0 {
                     match tokio::task::spawn_blocking(move || {
-                        remote_index.search(&remote_query, remote_limit, &remote_mode)
+                        remote_index.search_filtered(
+                            &remote_query,
+                            remote_limit,
+                            &remote_mode,
+                            &path_globs,
+                        )
                     })
                     .await
                     {
@@ -1695,8 +1702,8 @@ mod tests {
         std::fs::create_dir(&local_root).unwrap();
         let source_root = temp.path().join("source-docs");
         let source_path = source_root.join("pilot.md");
-        let store = crate::remote_index::RemoteIndexStore::open(
-            crate::config::RemoteIndexStoreConfig {
+        let store =
+            crate::remote_index::RemoteIndexStore::open(crate::config::RemoteIndexStoreConfig {
                 index_host: "server-44".into(),
                 path: temp.path().join("remote.sqlite3"),
                 allowed_source_hosts: vec!["server-100".into()],
@@ -1704,9 +1711,8 @@ mod tests {
                     "server-100".into(),
                     std::collections::BTreeMap::from([("docs".into(), source_root.clone())]),
                 )]),
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
         store
             .upsert(crate::remote_index::RemoteDocument {
                 source_host: "server-100".into(),
@@ -1717,6 +1723,8 @@ mod tests {
                 body: "remote scoped pilot marker".into(),
             })
             .unwrap();
+        let local_match = local_root.join("unrelated.md");
+        std::fs::write(&local_match, "remote scoped pilot marker").unwrap();
         let backend = super::LocalBackend {
             host_id: "server-44".into(),
             root: local_root.clone(),
@@ -1733,7 +1741,7 @@ mod tests {
                 5,
                 0,
                 super::SearchMode::Literal,
-                Vec::new(),
+                vec!["**/pilot.md".into()],
                 vec![source_root.display().to_string()],
             )
             .await
@@ -1741,6 +1749,20 @@ mod tests {
         assert_eq!(result.hits.len(), 1);
         assert_eq!(result.hits[0].host_id, "server-100");
         assert_eq!(result.hits[0].path, source_path.display().to_string());
+
+        let excluded = backend
+            .search_text_bounded(
+                "remote scoped pilot",
+                5,
+                0,
+                super::SearchMode::Literal,
+                vec!["!**/pilot.md".into()],
+                vec![source_root.display().to_string()],
+            )
+            .await
+            .unwrap();
+        assert!(excluded.hits.is_empty());
+        assert!(local_match.is_file());
     }
 
     #[tokio::test]
