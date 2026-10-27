@@ -641,6 +641,7 @@ async fn handle_rpc_inner(state: AppState, payload: Value) -> Result<Value> {
             "tools": [
                 tool_meta("search", "Search file names and indexed content across one or more hosts."),
                 tool_meta("find_paths", "Find file paths across one or more hosts."),
+                tool_meta("find_duplicates", "Hash a bounded sample from configured roots or validated subpaths and report duplicate paths and reclaimable bytes without deleting files."),
                 tool_meta("read_text", "Read a text file from a specific host."),
                 tool_meta("list_locations", "List configured browse locations across hosts."),
                 tool_meta("list_directory", "List immediate safe directory entries for one host."),
@@ -727,6 +728,16 @@ fn tool_meta(name: &str, description: &str) -> Value {
                 "max_matches": {"type": "integer", "minimum": 1}
             }
         }),
+        "find_duplicates" => json!({
+            "type": "object",
+            "required": ["roots"],
+            "properties": {
+                "hosts": hosts,
+                "roots": {"type": "array", "minItems": 1, "items": {"type": "string"}, "description": "Explicit configured root names only."},
+                "paths": {"type": "array", "maxItems": 16, "items": {"type": "string"}, "description": "Optional narrower directory paths; each is canonicalized and must remain inside a selected configured root."},
+                "max_files": {"type": "integer", "minimum": 2, "maximum": 250, "default": 100, "description": "Maximum files per host. Files over 64 MiB or beyond a 512 MiB total hash budget are skipped; physical reclaimable bytes are null where allocated-block metadata is unavailable."}
+            }
+        }),
         "read_text" => json!({
             "type": "object",
             "required": ["host", "path"],
@@ -811,6 +822,11 @@ async fn call_tool(service: &MeshService, jobs: &SearchJobs, params: Value) -> R
         "find_paths" => {
             service
                 .call_find_paths(serde_json::from_value(arguments)?)
+                .await?
+        }
+        "find_duplicates" => {
+            service
+                .call_find_duplicates(serde_json::from_value(arguments)?)
                 .await?
         }
         "read_text" => {

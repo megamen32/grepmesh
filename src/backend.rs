@@ -11,6 +11,7 @@ use std::{
     process::Stdio,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, BufReader},
     process::Command as TokioCommand,
@@ -76,6 +77,28 @@ pub struct SearchOutcome {
     pub truncated: bool,
     pub partial: bool,
     pub partial_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateFileHash {
+    pub host_id: String,
+    pub path: String,
+    pub size: u64,
+    pub sha256: String,
+    pub allocated_bytes: Option<u64>,
+    pub physical_file_id: Option<String>,
+    pub hard_link_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateScan {
+    pub files: Vec<DuplicateFileHash>,
+    pub scanned_files: usize,
+    pub bytes_hashed: u64,
+    pub skipped_oversized: usize,
+    pub skipped_unsafe_paths: usize,
+    pub partial: bool,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -942,6 +965,160 @@ impl LocalBackend {
         })
     }
 
+    pub async fn find_duplicates_bounded(
+        &self,
+        max_files: usize,
+        root_names: Vec<String>,
+        requested_paths: Vec<PathBuf>,
+    ) -> Result<DuplicateScan> {
+        anyhow::ensure!(
+            !root_names.is_empty(),
+            "find_duplicates requires explicit configured root names"
+        );
+        let max_files = max_files.clamp(2, 250);
+        anyhow::ensure!(requested_paths.len() <= 16, "at most 16 duplicate-scan paths are allowed");
+        let configured_roots = self.selected_roots(&root_names)?;
+        let allowed_roots = configured_roots
+            .iter()
+            .into_iter()
+            .filter_map(|root| fs::canonicalize(root).ok())
+            .collect::<Vec<_>>();
+        let mut truncated = false;
+        let mut partial = false;
+        let mut hits = Vec::new();
+        if requested_paths.is_empty() {
+            let result = self
+                .find_paths_bounded("", max_files, root_names)
+                .await?;
+            hits = result.hits;
+            truncated = result.truncated;
+            partial = result.partial;
+        } else {
+            let mut canonical_paths = BTreeSet::new();
+            for requested in requested_paths {
+                let path = fs::canonicalize(&requested).with_context(|| {
+                    format!("canonicalize requested duplicate root {}", requested.display())
+                })?;
+                anyhow::ensure!(
+                    allowed_roots.iter().any(|root| path.starts_with(root)),
+                    "duplicate scan path is outside the selected configured roots"
+                );
+                anyhow::ensure!(path.is_dir(), "duplicate scan path must be a directory");
+                canonical_paths.insert(path);
+            }
+            let deadline = Instant::now() + Duration::from_millis(self.limits.overall_timeout_ms);
+            for root in canonical_paths {
+                let remaining = max_files.saturating_sub(hits.len());
+                if remaining == 0 {
+                    truncated = true;
+                    break;
+                }
+                let result = find_paths_impl(
+                    &self.host_id,
+                    &root,
+                    "",
+                    remaining,
+                    &self.exclude_globs,
+                    self.limits.max_response_bytes,
+                    deadline,
+                )
+                .await?;
+                hits.extend(result.hits);
+                partial |= result.partial;
+                if result.truncated {
+                    truncated = true;
+                    break;
+                }
+            }
+        }
+        let mut files = Vec::new();
+        let mut bytes_hashed = 0u64;
+        let mut skipped_oversized = 0usize;
+        let mut skipped_unsafe_paths = 0usize;
+        let mut seen_paths = BTreeSet::new();
+        for hit in &hits {
+            let path = PathBuf::from(&hit.path);
+            let canonical_path = match fs::canonicalize(&path) {
+                Ok(path) if allowed_roots.iter().any(|root| path.starts_with(root)) => path,
+                _ => {
+                    skipped_unsafe_paths += 1;
+                    continue;
+                }
+            };
+            if !seen_paths.insert(canonical_path.clone()) {
+                continue;
+            }
+            let metadata = match fs::metadata(&canonical_path) {
+                Ok(metadata) if metadata.is_file() => metadata,
+                _ => continue,
+            };
+            let size = metadata.len();
+            if size > 64 * 1024 * 1024 || bytes_hashed.saturating_add(size) > 512 * 1024 * 1024 {
+                skipped_oversized += 1;
+                continue;
+            }
+            let mut file = fs::File::open(&canonical_path)
+                .with_context(|| format!("open candidate {}", path.display()))?;
+            let before = file.metadata()?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                anyhow::ensure!(
+                    before.dev() == metadata.dev() && before.ino() == metadata.ino(),
+                    "candidate changed while opening: {}",
+                    path.display()
+                );
+            }
+            let mut hasher = Sha256::new();
+            let mut buffer = [0u8; 64 * 1024];
+            loop {
+                let count = file.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..count]);
+            }
+            let after = file.metadata()?;
+            anyhow::ensure!(
+                before.len() == after.len()
+                    && before.modified().ok() == after.modified().ok()
+                    && before.len() == size,
+                "candidate changed while hashing: {}",
+                path.display()
+            );
+            bytes_hashed += size;
+            #[cfg(unix)]
+            let (allocated_bytes, physical_file_id, hard_link_count) = {
+                use std::os::unix::fs::MetadataExt;
+                (
+                    Some(after.blocks().saturating_mul(512)),
+                    Some(format!("{}:{}", after.dev(), after.ino())),
+                    Some(after.nlink()),
+                )
+            };
+            #[cfg(not(unix))]
+            let (allocated_bytes, physical_file_id, hard_link_count) = (None, None, None);
+            files.push(DuplicateFileHash {
+                host_id: self.host_id.clone(),
+                path: path.to_string_lossy().to_string(),
+                size,
+                sha256: format!("{:x}", hasher.finalize()),
+                allocated_bytes,
+                physical_file_id,
+                hard_link_count,
+            });
+        }
+        Ok(DuplicateScan {
+            scanned_files: hits.len(),
+            bytes_hashed,
+            skipped_oversized,
+            skipped_unsafe_paths,
+            partial: partial || skipped_oversized > 0 || skipped_unsafe_paths > 0,
+            truncated,
+            files,
+        })
+    }
+
     /// Only stat returned local paths, once per file even with many matching lines.
     fn enrich_search_metadata(&self, hits: &mut [SearchHit]) {
         let mut metadata = BTreeMap::new();
@@ -1695,6 +1872,43 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn find_duplicates_hashes_only_an_explicit_bounded_root_without_mutating_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("docs");
+        std::fs::create_dir_all(&root).unwrap();
+        let first = root.join("first.md");
+        let second = root.join("second.md");
+        let unique = root.join("unique.md");
+        std::fs::write(&first, b"same content").unwrap();
+        std::fs::write(&second, b"same content").unwrap();
+        std::fs::write(&unique, b"other content").unwrap();
+        let backend = super::LocalBackend {
+            host_id: "test".into(),
+            root: root.clone(),
+            root_paths: std::collections::BTreeMap::from([("docs".into(), vec![root.clone()])]),
+            limits: Default::default(),
+            exclude_globs: Vec::new(),
+            index: crate::index::IndexManager::disabled(),
+            remote_index: None,
+        };
+        let scan = backend
+            .find_duplicates_bounded(10, vec!["docs".into()], vec![root])
+            .await
+            .unwrap();
+        assert_eq!(scan.scanned_files, 3);
+        assert_eq!(scan.files.len(), 3);
+        assert_eq!(scan.bytes_hashed, 37);
+        let duplicate_hashes = scan
+            .files
+            .iter()
+            .filter(|file| file.size == 12)
+            .map(|file| file.sha256.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(duplicate_hashes.len(), 1);
+        assert!(first.exists() && second.exists() && unique.exists());
+    }
+
     #[tokio::test]
     async fn lossless_body_copy_remote_root_alias_search_does_not_scan_unrelated_local_roots() {
         let temp = tempfile::tempdir().unwrap();
