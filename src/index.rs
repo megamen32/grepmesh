@@ -652,6 +652,39 @@ impl PersistentIndex {
             }
             return Ok(());
         }
+        if cache_exists && fts_matches {
+            // A file can be touched without changing its extracted text.
+            // Refresh only its fingerprint/cache row and retain the FTS row;
+            // deleting and reinserting identical text amplifies every such
+            // event into writes across the trigram index.
+            transaction
+                .execute(
+                    "UPDATE grepmesh_extraction_cache \
+                     SET size=?2, mtime_ns=?3, body='' WHERE path=?1",
+                    params![path, document.size as i64, document.mtime_ns.to_string()],
+                )
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    "DELETE FROM grepmesh_pending_ocr WHERE path=?1",
+                    params![path],
+                )
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    "DELETE FROM grepmesh_ocr_empty_results WHERE path=?1 AND size=?2 AND mtime_ns=?3",
+                    params![path, document.size as i64, document.mtime_ns.to_string()],
+                )
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    "DELETE FROM grepmesh_ocr_attempts WHERE path=?1 AND size=?2 AND mtime_ns=?3",
+                    params![path, document.size as i64, document.mtime_ns.to_string()],
+                )
+                .map_err(|error| error.to_string())?;
+            transaction.commit().map_err(|error| error.to_string())?;
+            return Ok(());
+        }
         if let Some(rowid) = fts_rowid {
             transaction
                 .execute(
@@ -1259,59 +1292,55 @@ fn load_activity_guard_at(
 
 const MAX_ACTIVITY_ROOT_STAT_ENTRIES: usize = 20_000;
 
+#[cfg(test)]
 fn activity_root_is_quiet(root: &Path, now_ms: u64, cooldown_ms: u64, max_entries: usize) -> bool {
-    activity_root_is_quiet_impl(root, now_ms.saturating_sub(cooldown_ms), max_entries)
+    activity_root_quiet_deadline(root, cooldown_ms, max_entries)
+        .is_some_and(|deadline| deadline <= now_ms)
 }
 
 #[cfg(unix)]
-fn activity_root_is_quiet_impl(root: &Path, cutoff_ms: u64, max_entries: usize) -> bool {
+fn activity_root_quiet_deadline(root: &Path, cooldown_ms: u64, max_entries: usize) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
 
-    let Ok(root_metadata) = fs::symlink_metadata(root) else {
-        return false;
-    };
+    let root_metadata = fs::symlink_metadata(root).ok()?;
     if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
-        return false;
+        return None;
     }
-    let recent = |metadata: &fs::Metadata| {
+    let ctime_ms = |metadata: &fs::Metadata| {
         let ctime_ms = (metadata.ctime() as i128 * 1_000)
             .saturating_add(metadata.ctime_nsec() as i128 / 1_000_000);
-        ctime_ms >= cutoff_ms as i128
+        ctime_ms.clamp(0, u64::MAX as i128) as u64
     };
-    if recent(&root_metadata) {
-        return false;
-    }
+    let mut latest_ctime_ms = ctime_ms(&root_metadata);
     let mut pending = vec![root.to_path_buf()];
     let mut visited = 1usize;
     while let Some(directory) = pending.pop() {
         let Ok(entries) = fs::read_dir(directory) else {
-            return false;
+            return None;
         };
         for entry in entries {
             let Ok(entry) = entry else {
-                return false;
+                return None;
             };
             visited = visited.saturating_add(1);
             if visited > max_entries {
-                return false;
+                return None;
             }
             let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
-                return false;
+                return None;
             };
-            if recent(&metadata) {
-                return false;
-            }
+            latest_ctime_ms = latest_ctime_ms.max(ctime_ms(&metadata));
             if metadata.is_dir() && !metadata.file_type().is_symlink() {
                 pending.push(entry.path());
             }
         }
     }
-    true
+    Some(latest_ctime_ms.saturating_add(cooldown_ms))
 }
 
 #[cfg(not(unix))]
-fn activity_root_is_quiet_impl(_: &Path, _: u64, _: usize) -> bool {
-    false
+fn activity_root_quiet_deadline(_: &Path, _: u64, _: usize) -> Option<u64> {
+    None
 }
 
 fn ensure_isolated_activity_root(
@@ -1320,33 +1349,22 @@ fn ensure_isolated_activity_root(
     now_ms: u64,
     config: &IndexActivityConfig,
 ) {
-    let quiet = activity_root_is_quiet(
-        root,
-        now_ms,
-        config.hot_cooldown_ms,
-        MAX_ACTIVITY_ROOT_STAT_ENTRIES,
-    );
-    if let Some(stats) = activity.get_mut(root) {
-        if stats.hot_until_ms <= now_ms && !quiet {
-            stats.hot_until_ms = now_ms.saturating_add(config.hot_cooldown_ms);
-            stats.events = stats.events.max(config.hot_event_threshold);
-            stats.changed_bytes = stats.changed_bytes.max(config.hot_changed_bytes_threshold);
-            stats.metadata_only = true;
-            stats.debounce_ms = config.hot_debounce_ms;
-        } else if stats.hot_until_ms <= now_ms && quiet {
-            stats.hot_until_ms = 0;
-            stats.metadata_only = false;
-        }
-        return;
-    }
-    if !quiet {
-        inherit_active_parent_cooldown(activity, root, now_ms, config.hot_debounce_ms);
-    }
+    let quiet_deadline =
+        activity_root_quiet_deadline(root, config.hot_cooldown_ms, MAX_ACTIVITY_ROOT_STAT_ENTRIES);
     let stats = activity.entry(root.to_path_buf()).or_default();
-    if !quiet {
-        stats.hot_until_ms = stats
-            .hot_until_ms
-            .max(now_ms.saturating_add(config.hot_cooldown_ms));
+    if quiet_deadline.is_some_and(|deadline| deadline <= now_ms) {
+        // The bounded ctime walk is authoritative for an isolated source
+        // root. A parent bucket can include unrelated sibling work and must
+        // not extend this root's cooldown across restarts.
+        stats.hot_until_ms = 0;
+        stats.window_started_ms = now_ms;
+        stats.events = 0;
+        stats.changed_bytes = 0;
+        stats.metadata_only = false;
+        stats.debounce_ms = 2_000;
+    } else {
+        stats.hot_until_ms =
+            quiet_deadline.unwrap_or_else(|| now_ms.saturating_add(config.hot_cooldown_ms));
         stats.events = stats.events.max(config.hot_event_threshold);
         stats.changed_bytes = stats.changed_bytes.max(config.hot_changed_bytes_threshold);
         stats.metadata_only = true;
@@ -2288,7 +2306,7 @@ fn reconcile_new_subtrees(
         }
         let bucket = activity_bucket(&path, root, &activity_bucket_roots);
         let mut metadata_globs = activity_config.metadata_only_globs.clone();
-        if activity_bucket_is_hot(activity, &bucket, unix_time_ms()) {
+        if activity_bucket_is_hot(activity, &bucket, unix_time_ms(), &activity_bucket_roots) {
             metadata_globs.push("**".into());
         }
         let metadata_only = compile_excludes(&metadata_globs).ok();
@@ -2369,7 +2387,6 @@ fn reconcile_event_paths(
         .iter()
         .map(|root| fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
         .collect::<Vec<_>>();
-    let mut new_activity_buckets = BTreeSet::new();
     // Count and classify the whole batch before doing any extraction. Status
     // remains current even if one document converter is slow.
     for raw_path in paths {
@@ -2389,9 +2406,6 @@ fn reconcile_event_paths(
             continue;
         }
         let bucket = activity_bucket(&path, root, &activity_bucket_roots);
-        if !activity.contains_key(&bucket) {
-            new_activity_buckets.insert(bucket.clone());
-        }
         let now = unix_time_ms();
         let changed_bytes = fs::metadata(&path)
             .map(|metadata| metadata.len())
@@ -2427,12 +2441,6 @@ fn reconcile_event_paths(
         } else {
             2_000
         };
-    }
-    // A newly isolated source root inherits any active parent cooldown. This
-    // preserves the existing hot guard when its bucket becomes more specific.
-    let now = unix_time_ms();
-    for bucket in &new_activity_buckets {
-        inherit_active_parent_cooldown(activity, bucket, now, activity_config.hot_debounce_ms);
     }
     let activity_snapshot = directory_activity_snapshot(activity);
     if let Ok(mut current) = snapshot.write() {
@@ -2590,37 +2598,19 @@ fn activity_bucket(path: &Path, root: &Path, isolated_roots: &[PathBuf]) -> Path
     }
 }
 
-fn inherit_active_parent_cooldown(
-    activity: &mut BTreeMap<PathBuf, DirectoryActivityState>,
-    bucket: &Path,
-    now_ms: u64,
-    hot_debounce_ms: u64,
-) {
-    let inherited_until = activity
-        .iter()
-        .filter(|(parent, stats)| {
-            parent.as_path() != bucket
-                && (bucket.starts_with(parent.as_path()) || parent.starts_with(bucket))
-                && now_ms < stats.hot_until_ms
-        })
-        .map(|(_, stats)| stats.hot_until_ms)
-        .max()
-        .unwrap_or_default();
-    if inherited_until > 0 {
-        let stats = activity.entry(bucket.to_path_buf()).or_default();
-        stats.hot_until_ms = stats.hot_until_ms.max(inherited_until);
-        stats.metadata_only = true;
-        stats.debounce_ms = hot_debounce_ms;
-    }
-}
-
 fn activity_bucket_is_hot(
     activity: &BTreeMap<PathBuf, DirectoryActivityState>,
     bucket: &Path,
     now_ms: u64,
+    isolated_roots: &[PathBuf],
 ) -> bool {
     if let Some(stats) = activity.get(bucket) {
         return now_ms < stats.hot_until_ms;
+    }
+    if isolated_roots.iter().any(|root| root == bucket) {
+        // Missing exact state cannot borrow a busy parent: remain fail-closed
+        // until the root-specific bounded quiet proof seeds its own bucket.
+        return true;
     }
     activity.iter().any(|(parent, stats)| {
         (bucket.starts_with(parent) || parent.starts_with(bucket)) && now_ms < stats.hot_until_ms
@@ -3421,7 +3411,12 @@ mod tests {
 
         save_activity_guard(&path, &activity, config.window_ms, &[source.clone()]).unwrap();
         let restored = load_activity_guard(&path, &roots, &config, true);
-        assert!(activity_bucket_is_hot(&restored, &source, now));
+        assert!(activity_bucket_is_hot(
+            &restored,
+            &source,
+            now,
+            &config.activity_bucket_roots
+        ));
         assert_eq!(
             restored[&parent].hot_until_ms,
             activity[&parent].hot_until_ms
@@ -3444,10 +3439,20 @@ mod tests {
             true,
             now.saturating_add(config.hot_cooldown_ms.saturating_mul(2)),
         );
-        assert!(!activity_bucket_is_hot(&restored_cold, &source, now));
+        assert!(!activity_bucket_is_hot(
+            &restored_cold,
+            &source,
+            now,
+            &config.activity_bucket_roots
+        ));
 
         let seeded = load_activity_guard(&temp.path().join("missing.json"), &roots, &config, true);
-        assert!(activity_bucket_is_hot(&seeded, &source, now));
+        assert!(activity_bucket_is_hot(
+            &seeded,
+            &source,
+            now,
+            &config.activity_bucket_roots
+        ));
         assert!(seeded[&root].metadata_only);
 
         let index_path = temp.path().join("index.sqlite3");
@@ -3462,7 +3467,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_source_bucket_preserves_guard_without_sibling_extension() {
+    fn configured_source_bucket_uses_its_activity_not_sibling_cooldown() {
         use super::*;
 
         let temp = tempfile::tempdir().unwrap();
@@ -3479,17 +3484,19 @@ mod tests {
         let roots = BTreeMap::from([("home".into(), vec![root.clone()])]);
         let config = IndexActivityConfig {
             activity_bucket_roots: vec![source.clone(), quiet_source.clone()],
+            hot_event_threshold: 2,
+            hot_changed_bytes_threshold: u64::MAX,
             ..Default::default()
         };
         let parent_bucket = root.join("agents-projects");
         let now = unix_time_ms();
-        let inherited_until = now.saturating_add(60_000);
+        let parent_until = now.saturating_add(60_000);
         let mut activity = BTreeMap::from([(
             parent_bucket.clone(),
             DirectoryActivityState {
                 window_started_ms: now,
                 events: config.hot_event_threshold - 1,
-                hot_until_ms: inherited_until,
+                hot_until_ms: parent_until,
                 ..Default::default()
             },
         )]);
@@ -3513,8 +3520,21 @@ mod tests {
         };
 
         reconcile_one(&guarded_file, &mut activity);
+        assert!(!activity[&source].metadata_only);
+        let first_metadata = fs::metadata(&guarded_file).unwrap();
+        let first_body = index
+            .cached_body(
+                &guarded_file,
+                first_metadata.len(),
+                metadata_mtime_ns(&first_metadata),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(first_body.contains("GUARDED_SOURCE_BODY"));
+
+        reconcile_one(&guarded_file, &mut activity);
         let guarded_until = activity[&source].hot_until_ms;
-        assert_eq!(guarded_until, inherited_until);
+        assert!(guarded_until > unix_time_ms());
         assert!(activity[&source].metadata_only);
         let guarded_metadata = fs::metadata(&guarded_file).unwrap();
         let guarded_body = index
@@ -3525,16 +3545,18 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        assert!(!guarded_body.contains("GUARDED_SOURCE_BODY"));
+        assert!(guarded_body.contains("GUARDED_SOURCE_BODY"));
 
         fs::write(&sibling, "SIBLING_ACTIVITY").unwrap();
         reconcile_one(&sibling, &mut activity);
-        assert!(activity[&parent_bucket].hot_until_ms > guarded_until);
+        assert!(activity[&parent_bucket].hot_until_ms >= guarded_until);
+        assert!(activity[&parent_bucket].hot_until_ms >= parent_until);
         assert_eq!(activity[&source].hot_until_ms, guarded_until);
         assert!(!activity_bucket_is_hot(
             &activity,
             &source,
-            guarded_until.saturating_add(1)
+            guarded_until.saturating_add(1),
+            &config.activity_bucket_roots
         ));
 
         activity.get_mut(&parent_bucket).unwrap().hot_until_ms = unix_time_ms() - 1;
@@ -4396,6 +4418,59 @@ mod tests {
             .unwrap();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].0, document);
+    }
+
+    #[test]
+    fn metadata_only_change_keeps_existing_fts_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = PersistentIndex::open(dir.path().join("index.sqlite")).unwrap();
+        let first = dir.path().join("first.md");
+        let second = dir.path().join("second.md");
+        let rowid = |path: &Path| {
+            index
+                .connection()
+                .unwrap()
+                .query_row(
+                    "SELECT fts_rowid FROM grepmesh_document_rows WHERE path=?1",
+                    params![path.display().to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        index
+            .replace_indexed_document(&IndexedDocument {
+                path: first.clone(),
+                body: "stable searchable text".into(),
+                size: 12,
+                mtime_ns: 100,
+            })
+            .unwrap();
+        index
+            .replace_indexed_document(&IndexedDocument {
+                path: second.clone(),
+                body: "second searchable text".into(),
+                size: 13,
+                mtime_ns: 101,
+            })
+            .unwrap();
+        let first_rowid = rowid(&first);
+        let second_rowid = rowid(&second);
+
+        index
+            .replace_indexed_document(&IndexedDocument {
+                path: first.clone(),
+                body: "stable searchable text".into(),
+                size: 14,
+                mtime_ns: 202,
+            })
+            .unwrap();
+
+        assert_eq!(rowid(&first), first_rowid);
+        assert_eq!(rowid(&second), second_rowid);
+        assert_eq!(
+            index.cached_body(&first, 14, 202).unwrap().as_deref(),
+            Some("stable searchable text")
+        );
     }
 
     #[test]
