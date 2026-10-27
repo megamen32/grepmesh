@@ -41,6 +41,9 @@ struct Args {
     /// Maximum candidate rows in this one maintenance batch (hard-capped by the index).
     #[arg(long, default_value_t = 64)]
     compaction_batch_rows: usize,
+    /// Bounded number of resumable transactions to run in this process (hard-capped at 64).
+    #[arg(long, default_value_t = 1)]
+    compaction_batches: usize,
 }
 
 #[tokio::main]
@@ -60,17 +63,32 @@ async fn main() -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("cache-body compaction requires index_path"))?;
         let index =
             PersistentIndex::open_for_body_compaction(index_path).map_err(anyhow::Error::msg)?;
-        let batch = index
-            .compact_duplicate_cache_bodies_batch(args.compaction_batch_rows)
-            .map_err(anyhow::Error::msg)?;
+        let mut total = grepmesh::index::CacheBodyCompactionBatch::default();
+        let mut batches_run = 0usize;
+        for _ in 0..args.compaction_batches.clamp(1, 64) {
+            let batch = index
+                .compact_duplicate_cache_bodies_batch(args.compaction_batch_rows)
+                .map_err(anyhow::Error::msg)?;
+            batches_run += 1;
+            total.scanned_rows += batch.scanned_rows;
+            total.cleared_rows += batch.cleared_rows;
+            total.cleared_body_bytes += batch.cleared_body_bytes;
+            total.preserved_mismatches += batch.preserved_mismatches;
+            total.preserved_oversized += batch.preserved_oversized;
+            total.complete = batch.complete;
+            if batch.complete {
+                break;
+            }
+        }
         println!(
-            "cache-body batch: scanned={} cleared={} cleared_body_bytes={} preserved_mismatches={} preserved_oversized={} complete={}",
-            batch.scanned_rows,
-            batch.cleared_rows,
-            batch.cleared_body_bytes,
-            batch.preserved_mismatches,
-            batch.preserved_oversized,
-            batch.complete,
+            "cache-body compaction: batches={} scanned={} cleared={} cleared_body_bytes={} preserved_mismatches={} preserved_oversized={} complete={}",
+            batches_run,
+            total.scanned_rows,
+            total.cleared_rows,
+            total.cleared_body_bytes,
+            total.preserved_mismatches,
+            total.preserved_oversized,
+            total.complete,
         );
         return Ok(());
     }
