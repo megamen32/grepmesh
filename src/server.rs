@@ -137,10 +137,17 @@ pub async fn run_server(mut config: AppConfig) -> Result<()> {
             }
         }
     }
+    let mut index_limits = config.limits.clone();
+    if let Some(source) = config.remote_index_source.as_ref() {
+        index_limits
+            .index_activity
+            .activity_bucket_roots
+            .extend(source.roots.values().flatten().cloned());
+    }
     let mut local = LocalBackend::from_config_with_ingestion(
         config.host_id.clone(),
         config.root.clone(),
-        config.limits.clone(),
+        index_limits,
         config.roots.clone(),
         config.exclude_globs.clone(),
         if config.index_enabled {

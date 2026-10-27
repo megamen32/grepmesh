@@ -1767,6 +1767,11 @@ fn reconcile_new_subtrees(
             (root, canonical)
         })
         .collect::<Vec<_>>();
+    let activity_bucket_roots = activity_config
+        .activity_bucket_roots
+        .iter()
+        .map(|root| fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
+        .collect::<Vec<_>>();
     for raw_path in paths {
         if raw_path
             .ancestors()
@@ -1789,17 +1794,12 @@ fn reconcile_new_subtrees(
         if !path.is_dir() || excluded(&path, root, &matcher) {
             continue;
         }
-        let relative = path.strip_prefix(root).unwrap_or(&path);
-        let bucket = relative
-            .components()
-            .next()
-            .map(|component| root.join(component.as_os_str()))
-            .unwrap_or_else(|| root.clone());
+        let bucket = activity_bucket(&path, root, &activity_bucket_roots);
         let mut metadata_globs = activity_config.metadata_only_globs.clone();
-        if activity
-            .get(&bucket)
-            .is_some_and(|stats| unix_time_ms() < stats.hot_until_ms)
-        {
+        if activity.iter().any(|(parent, stats)| {
+            (bucket.starts_with(parent) || parent.starts_with(&bucket))
+                && unix_time_ms() < stats.hot_until_ms
+        }) {
             metadata_globs.push("**".into());
         }
         let metadata_only = compile_excludes(&metadata_globs).ok();
@@ -1874,6 +1874,12 @@ fn reconcile_event_paths(
             (root, canonical)
         })
         .collect::<Vec<_>>();
+    let activity_bucket_roots = activity_config
+        .activity_bucket_roots
+        .iter()
+        .map(|root| fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
+        .collect::<Vec<_>>();
+    let mut new_activity_buckets = BTreeSet::new();
     // Count and classify the whole batch before doing any extraction. Status
     // remains current even if one document converter is slow.
     for raw_path in paths {
@@ -1892,16 +1898,10 @@ fn reconcile_event_paths(
         if path.exists() && !path.is_file() {
             continue;
         }
-        let relative = path.strip_prefix(root).unwrap_or(&path);
-        let bucket = if path.parent() == Some(root.as_path()) {
-            root.clone()
-        } else {
-            relative
-                .components()
-                .next()
-                .map(|component| root.join(component.as_os_str()))
-                .unwrap_or_else(|| root.clone())
-        };
+        let bucket = activity_bucket(&path, root, &activity_bucket_roots);
+        if !activity.contains_key(&bucket) {
+            new_activity_buckets.insert(bucket.clone());
+        }
         let now = unix_time_ms();
         let changed_bytes = fs::metadata(&path)
             .map(|metadata| metadata.len())
@@ -1938,6 +1938,12 @@ fn reconcile_event_paths(
             2_000
         };
     }
+    // A newly isolated source root inherits any active parent cooldown. This
+    // preserves the existing hot guard when its bucket becomes more specific.
+    let now = unix_time_ms();
+    for bucket in &new_activity_buckets {
+        inherit_active_parent_cooldown(activity, bucket, now, activity_config.hot_debounce_ms);
+    }
     let activity_snapshot = directory_activity_snapshot(activity);
     if let Ok(mut current) = snapshot.write() {
         current.directory_activity = activity_snapshot.clone();
@@ -1963,16 +1969,7 @@ fn reconcile_event_paths(
         if path.exists() && !path.is_file() {
             continue;
         }
-        let relative = path.strip_prefix(root).unwrap_or(path);
-        let bucket = if path.parent() == Some(root.as_path()) {
-            root.clone()
-        } else {
-            relative
-                .components()
-                .next()
-                .map(|component| root.join(component.as_os_str()))
-                .unwrap_or_else(|| root.clone())
-        };
+        let bucket = activity_bucket(path, root, &activity_bucket_roots);
         let now = unix_time_ms();
         let stats = activity.entry(bucket.clone()).or_default();
         let is_hot = now < stats.hot_until_ms;
@@ -2066,6 +2063,50 @@ fn reconcile_event_paths(
                 tracing::warn!(path = %path.display(), error = %error, "incremental index update failed");
             }
         }
+    }
+}
+
+fn activity_bucket(path: &Path, root: &Path, isolated_roots: &[PathBuf]) -> PathBuf {
+    if let Some(isolated) = isolated_roots
+        .iter()
+        .filter(|isolated| path.starts_with(isolated))
+        .max_by_key(|isolated| isolated.components().count())
+    {
+        return isolated.clone();
+    }
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    if path.parent() == Some(root) {
+        root.to_path_buf()
+    } else {
+        relative
+            .components()
+            .next()
+            .map(|component| root.join(component.as_os_str()))
+            .unwrap_or_else(|| root.to_path_buf())
+    }
+}
+
+fn inherit_active_parent_cooldown(
+    activity: &mut BTreeMap<PathBuf, DirectoryActivityState>,
+    bucket: &Path,
+    now_ms: u64,
+    hot_debounce_ms: u64,
+) {
+    let inherited_until = activity
+        .iter()
+        .filter(|(parent, stats)| {
+            parent.as_path() != bucket
+                && (bucket.starts_with(parent.as_path()) || parent.starts_with(bucket))
+                && now_ms < stats.hot_until_ms
+        })
+        .map(|(_, stats)| stats.hot_until_ms)
+        .max()
+        .unwrap_or_default();
+    if inherited_until > 0 {
+        let stats = activity.entry(bucket.to_path_buf()).or_default();
+        stats.hot_until_ms = stats.hot_until_ms.max(inherited_until);
+        stats.metadata_only = true;
+        stats.debounce_ms = hot_debounce_ms;
     }
 }
 
@@ -2809,6 +2850,94 @@ fn excluded(path: &Path, root: &Path, excludes: &GlobSet) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn configured_source_bucket_preserves_guard_without_sibling_extension() {
+        use super::*;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("home");
+        let source = root.join("agents-projects/grepmesh/docs");
+        let quiet_source = root.join("agents-projects/quiet-project/docs");
+        let sibling = root.join("agents-projects/another-project/README.md");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&quiet_source).unwrap();
+        fs::create_dir_all(sibling.parent().unwrap()).unwrap();
+        let guarded_file = source.join("canary.md");
+        fs::write(&guarded_file, "GUARDED_SOURCE_BODY").unwrap();
+        let index = PersistentIndex::open(temp.path().join("index.sqlite3")).unwrap();
+        let roots = BTreeMap::from([("home".into(), vec![root.clone()])]);
+        let config = IndexActivityConfig {
+            activity_bucket_roots: vec![source.clone(), quiet_source.clone()],
+            ..Default::default()
+        };
+        let parent_bucket = root.join("agents-projects");
+        let now = unix_time_ms();
+        let inherited_until = now.saturating_add(60_000);
+        let mut activity = BTreeMap::from([(
+            parent_bucket.clone(),
+            DirectoryActivityState {
+                window_started_ms: now,
+                events: config.hot_event_threshold - 1,
+                hot_until_ms: inherited_until,
+                ..Default::default()
+            },
+        )]);
+        let snapshot = Arc::new(RwLock::new(IndexSnapshot::default()));
+
+        let reconcile_one = |path: &Path, activity: &mut BTreeMap<_, _>| {
+            reconcile_event_paths(
+                &BTreeSet::from([path.to_path_buf()]),
+                &BTreeMap::from([(path.to_path_buf(), 1)]),
+                &roots,
+                &[],
+                &config,
+                activity,
+                &snapshot,
+                0,
+                None,
+                None,
+                &index,
+            );
+        };
+
+        reconcile_one(&guarded_file, &mut activity);
+        let guarded_until = activity[&source].hot_until_ms;
+        assert_eq!(guarded_until, inherited_until);
+        assert!(activity[&source].metadata_only);
+        let guarded_metadata = fs::metadata(&guarded_file).unwrap();
+        let guarded_body = index
+            .cached_body(
+                &guarded_file,
+                guarded_metadata.len(),
+                metadata_mtime_ns(&guarded_metadata),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(!guarded_body.contains("GUARDED_SOURCE_BODY"));
+
+        fs::write(&sibling, "SIBLING_ACTIVITY").unwrap();
+        reconcile_one(&sibling, &mut activity);
+        assert!(activity[&parent_bucket].hot_until_ms > guarded_until);
+        assert_eq!(activity[&source].hot_until_ms, guarded_until);
+
+        activity.get_mut(&parent_bucket).unwrap().hot_until_ms = unix_time_ms() - 1;
+        activity.get_mut(&parent_bucket).unwrap().events = 0;
+        let quiet_file = quiet_source.join("source.md");
+        fs::write(&quiet_file, "QUIET_SOURCE_BODY").unwrap();
+        reconcile_one(&quiet_file, &mut activity);
+        assert!(!activity[&quiet_source].metadata_only);
+        let quiet_metadata = fs::metadata(&quiet_file).unwrap();
+        let quiet_body = index
+            .cached_body(
+                &quiet_file,
+                quiet_metadata.len(),
+                metadata_mtime_ns(&quiet_metadata),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(quiet_body.contains("QUIET_SOURCE_BODY"));
+    }
+
     #[cfg(feature = "ocr")]
     #[cfg(feature = "ocr")]
     #[test]
