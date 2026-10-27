@@ -68,8 +68,11 @@ async fn main() -> anyhow::Result<()> {
         let index_path = config
             .index_path
             .ok_or_else(|| anyhow::anyhow!("cache-body compaction requires index_path"))?;
-        let index = PersistentIndex::open_for_body_compaction(index_path)?;
-        let batch = index.compact_duplicate_cache_bodies_batch(args.compaction_batch_rows)?;
+        let index =
+            PersistentIndex::open_for_body_compaction(index_path).map_err(anyhow::Error::msg)?;
+        let batch = index
+            .compact_duplicate_cache_bodies_batch(args.compaction_batch_rows)
+            .map_err(anyhow::Error::msg)?;
         println!(
             "cache-body batch: scanned={} cleared={} cleared_body_bytes={} preserved_mismatches={} preserved_oversized={} complete={}",
             batch.scanned_rows,
