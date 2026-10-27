@@ -117,84 +117,13 @@ resource_guard_pair() {
 
 validate_source_guard() {
   local phase=${1:-mcp}
-  python3 - "$GUARD_EVIDENCE" "$CFG100" "$phase" <<'PY'
-import json, os, sys, time
-
-phase = sys.argv[3]
-assert phase in {"mcp", "live"}, "unknown source guard phase"
-if phase == "mcp":
-    evidence = json.load(open(sys.argv[1], encoding="utf-8"))
-    captured = evidence.get("captured_at_ms")
-    now = int(time.time() * 1000)
-    assert isinstance(captured, int) and 0 <= now - captured <= 60_000, "guard evidence must be <=60s old"
-    status = evidence.get("status") or {}
-    assert status.get("partial") is False, "MCP status must be complete"
-    healthy = {row.get("host_id") for row in status.get("host_status", []) if row.get("ok") is True}
-    assert {"server-100", "server-44"}.issubset(healthy), "both production hosts must be healthy in MCP status"
-    nodes = {node.get("host_id"): node for node in status.get("nodes", [])}
-else:
-    nodes = {}
-config = json.load(open(sys.argv[2], encoding="utf-8"))
-source = config.get("remote_index_source") or {}
-cooldown_ms = int(((config.get("limits") or {}).get("index_activity") or {}).get("hot_cooldown_ms", 3_600_000))
-activity = nodes.get("server-100", {}).get("index_directory_activity") or []
-
-def quiet_by_metadata(root, cooldown):
-    """Fail closed unless bounded ctime walk proves this exact root was quiet."""
-    cutoff = time.time_ns() - cooldown * 1_000_000
-    try:
-        root_stat = os.stat(root, follow_symlinks=False)
-        if os.path.islink(root) or not os.path.isdir(root) or root_stat.st_ctime_ns >= cutoff:
-            return False
-    except OSError:
-        return False
-    pending = [root]
-    visited = 0
-    while pending:
-        directory = pending.pop()
-        try:
-            with os.scandir(directory) as entries:
-                for entry in entries:
-                    visited += 1
-                    if visited > 20_000:
-                        return False
-                    info = entry.stat(follow_symlinks=False)
-                    if info.st_ctime_ns >= cutoff:
-                        return False
-                    if entry.is_dir(follow_symlinks=False):
-                        pending.append(entry.path)
-        except OSError:
-            return False
-    return True
-
-for roots in (source.get("roots") or {}).values():
-    for root in roots:
-        if phase == "live":
-            assert quiet_by_metadata(root, cooldown_ms), \
-                f"source-root activity guard is active or exact-root quiet cannot be proven: {root}"
-            continue
-        if not activity:
-            assert quiet_by_metadata(root, cooldown_ms), \
-                f"MCP has no per-root activity rows and exact-root quiet cannot be proven: {root}"
-            continue
-        matches = [row for row in activity
-                   if root == row.get("path")
-                   or root.startswith(row.get("path", "").rstrip("/") + "/")
-                   or row.get("path", "").startswith(root.rstrip("/") + "/")]
-        assert matches, f"MCP status has no activity bucket covering source root {root}"
-        depth = max(len(row["path"].strip("/").split("/")) for row in matches)
-        exact_scope = [row for row in matches
-                       if len(row["path"].strip("/").split("/")) == depth]
-        if not all(row.get("hot") is False and row.get("metadata_only") is False
-                   for row in exact_scope):
-            scoped_record = any(row.get("path") == root
-                                or row.get("path", "").startswith(root.rstrip("/") + "/")
-                                for row in exact_scope)
-            assert not scoped_record and quiet_by_metadata(root, cooldown_ms), \
-                f"source-root activity guard is active or exact-root quiet cannot be proven: {root}"
-if phase == "mcp":
-    assert int(time.time() * 1000) - captured <= 60_000, "guard evidence expired during source-root check"
-PY
+  if [[ "$phase" == mcp ]]; then
+    [[ -n "$GUARD_EVIDENCE" && -f "$GUARD_EVIDENCE" ]] || die "MCP guard evidence is missing"
+    python3 "$ROOT/deploy/source_root_guard.py" \
+      --phase mcp --config "$CFG100" --evidence "$GUARD_EVIDENCE"
+  else
+    python3 "$ROOT/deploy/source_root_guard.py" --phase live --config "$CFG100"
+  fi
 }
 
 local_preflight
