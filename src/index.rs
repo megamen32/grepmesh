@@ -189,9 +189,18 @@ impl PersistentIndex {
             return Err("body compaction requires an existing SQLite index file".into());
         }
         let store = Self { path };
-        store.connection()?;
-        store.migrate_cache_update_trigger()?;
-        let connection = store.connection()?;
+        // Maintenance must coexist with the live index writer. The normal
+        // connection helper re-runs schema DDL and PRAGMA journal_mode=WAL,
+        // which can contend for a schema lock even though this command only
+        // needs the already-migrated index. Open without DDL and wait briefly
+        // for the single SQLite writer instead.
+        let connection = store.compaction_connection()?;
+        let journal_mode: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        if !journal_mode.eq_ignore_ascii_case("wal") {
+            return Err("body compaction requires the live index to use WAL mode".into());
+        }
         let ready: Option<String> = connection
             .query_row(
                 "SELECT value FROM grepmesh_metadata WHERE key='document_rows_v1'",
@@ -202,6 +211,17 @@ impl PersistentIndex {
             .map_err(|error| error.to_string())?;
         if ready.as_deref() != Some("1") {
             return Err("body compaction requires the existing keyed FTS row map".into());
+        }
+        let trigger_ready: Option<String> = connection
+            .query_row(
+                "SELECT value FROM grepmesh_metadata WHERE key='cache_update_trigger_v2'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if trigger_ready.as_deref() != Some("1") {
+            return Err("body compaction requires the current cache update trigger".into());
         }
         Ok(store)
     }
@@ -254,6 +274,14 @@ impl PersistentIndex {
         Ok(connection)
     }
 
+    fn compaction_connection(&self) -> Result<Connection, String> {
+        let connection = Connection::open(&self.path).map_err(|error| error.to_string())?;
+        connection
+            .busy_timeout(Duration::from_secs(10))
+            .map_err(|error| error.to_string())?;
+        Ok(connection)
+    }
+
     fn migrate_cache_update_trigger(&self) -> Result<(), String> {
         let mut connection = self.connection()?;
         let migrated: Option<String> = connection
@@ -299,9 +327,9 @@ impl PersistentIndex {
         batch_rows: usize,
     ) -> Result<CacheBodyCompactionBatch, String> {
         let batch_rows = batch_rows.clamp(1, 256) as i64;
-        let mut connection = self.connection()?;
+        let mut connection = self.compaction_connection()?;
         let transaction = connection
-            .transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
         let done: Option<String> = transaction
             .query_row(
@@ -4788,6 +4816,19 @@ mod tests {
             row_map_marker, "1",
             "body-only migration keeps the path map valid"
         );
+    }
+
+    #[test]
+    fn lossless_body_copy_compaction_open_avoids_schema_writes_while_live_writer_holds_wal_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.sqlite");
+        let _index = PersistentIndex::open(db.clone()).unwrap();
+        let writer = Connection::open(&db).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        assert!(PersistentIndex::open_for_body_compaction(db).is_ok());
+
+        writer.execute_batch("ROLLBACK").unwrap();
     }
 
     #[test]
