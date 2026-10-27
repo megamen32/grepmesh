@@ -1,7 +1,7 @@
 use crate::{
     backend::{
-        dedup_hits, DirectoryEntry, LocalBackend, Location, PerHostStatus, ReadResponse, SearchHit,
-        SearchMode, SearchResponse, StatusResponse,
+        dedup_hits, DirectoryEntry, DuplicateFileHash, DuplicateScan, LocalBackend, Location,
+        PerHostStatus, ReadResponse, SearchHit, SearchMode, SearchResponse, StatusResponse,
     },
     topology::Topology,
 };
@@ -65,6 +65,42 @@ pub struct FindPathsArgs {
     pub limit: Option<usize>,
     #[serde(default)]
     pub roots: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FindDuplicatesArgs {
+    #[serde(default)]
+    pub hosts: Option<HostsInput>,
+    pub roots: Vec<String>,
+    #[serde(default)]
+    pub max_files: Option<usize>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub origin_host: Option<String>,
+    #[serde(default)]
+    pub hop_count: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DuplicateGroup {
+    sha256: String,
+    files: Vec<DuplicateFileHash>,
+    logical_duplicate_bytes: u64,
+    physical_reclaimable_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DuplicateResult {
+    groups: Vec<DuplicateGroup>,
+    files: Vec<DuplicateFileHash>,
+    scanned_files: usize,
+    bytes_hashed: u64,
+    skipped_oversized: usize,
+    skipped_unsafe_paths: usize,
+    partial: bool,
+    truncated: bool,
+    host_status: Vec<PerHostStatus>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -563,6 +599,165 @@ impl MeshService {
             partial,
             truncated,
             host_status.clone(),
+            data,
+        ))
+    }
+
+    pub async fn call_find_duplicates(&self, args: FindDuplicatesArgs) -> Result<ToolResult> {
+        let FindDuplicatesArgs {
+            hosts,
+            roots,
+            max_files,
+            request_id,
+            origin_host,
+            hop_count,
+        } = args;
+        anyhow::ensure!(!roots.is_empty(), "find_duplicates requires explicit roots");
+        let normalized = normalize_request(
+            &self.local.host_id,
+            self.known_host_ids(),
+            hosts,
+            request_id,
+            origin_host,
+            hop_count,
+        )?;
+        self.claim_request(&normalized.request_id)?;
+        let max_files = max_files
+            .unwrap_or(100)
+            .clamp(2, 250)
+            .min(self.local.limits.max_results.max(2));
+        let mut files = Vec::new();
+        let mut statuses = Vec::new();
+        let mut scanned_files = 0usize;
+        let mut bytes_hashed = 0u64;
+        let mut skipped_oversized = 0usize;
+        let mut skipped_unsafe_paths = 0usize;
+        let mut partial = false;
+        let mut truncated = false;
+        for target in unique_hosts(&normalized.hosts) {
+            let scan: Result<DuplicateScan> = if target == self.local.host_id {
+                self.local
+                    .find_duplicates_bounded(max_files, roots.clone())
+                    .await
+            } else {
+                async {
+                    let peer = self
+                        .peer_config(&target)
+                        .ok_or_else(|| anyhow!("unknown peer {target}"))?;
+                    let value = self
+                        .call_remote(
+                            &peer,
+                            "find_duplicates",
+                            json!({
+                                "hosts": ["local"],
+                                "roots": roots.clone(),
+                                "max_files": max_files,
+                                "request_id": normalized.request_id.clone(),
+                                "origin_host": normalized.origin_host.clone(),
+                                "hop_count": hop_count_for(&self.local.host_id, &target, normalized.hop_count)?,
+                            }),
+                        )
+                        .await
+                        .map_err(|error| anyhow!("remote duplicate scan failed: {error}"))?;
+                    decode_tool_result::<DuplicateResult>(value).map(|response| DuplicateScan {
+                        files: response.files,
+                        scanned_files: response.scanned_files,
+                        bytes_hashed: response.bytes_hashed,
+                        skipped_oversized: response.skipped_oversized,
+                        skipped_unsafe_paths: response.skipped_unsafe_paths,
+                        partial: response.partial,
+                        truncated: response.truncated,
+                    })
+                }
+                .await
+            };
+            match scan {
+                Ok(scan) => {
+                    scanned_files += scan.scanned_files;
+                    bytes_hashed = bytes_hashed.saturating_add(scan.bytes_hashed);
+                    skipped_oversized += scan.skipped_oversized;
+                    skipped_unsafe_paths += scan.skipped_unsafe_paths;
+                    partial |= scan.partial;
+                    truncated |= scan.truncated;
+                    files.extend(scan.files);
+                    statuses.push(if scan.partial {
+                        PerHostStatus::partial(target, "duplicate scan was partial")
+                    } else {
+                        PerHostStatus::complete(target)
+                    });
+                }
+                Err(error) => {
+                    partial = true;
+                    statuses.push(PerHostStatus::failed(target, error.to_string()));
+                }
+            }
+        }
+        let all_files = files.clone();
+        let mut by_hash = BTreeMap::<String, Vec<DuplicateFileHash>>::new();
+        for file in files {
+            by_hash.entry(file.sha256.clone()).or_default().push(file);
+        }
+        let mut groups = Vec::new();
+        for (sha256, mut files) in by_hash {
+            if files.len() < 2 {
+                continue;
+            }
+            files.sort_by(|a, b| a.host_id.cmp(&b.host_id).then(a.path.cmp(&b.path)));
+            let total_bytes = files.iter().map(|file| file.size).sum::<u64>();
+            let largest = files.iter().map(|file| file.size).max().unwrap_or_default();
+            let mut physical = BTreeMap::<String, (u64, u64, usize)>::new();
+            for file in &files {
+                let key = format!("{}:{}", file.host_id, file.physical_file_id);
+                let entry = physical
+                    .entry(key)
+                    .or_insert((file.allocated_bytes, file.hard_link_count, 0));
+                entry.2 += 1;
+            }
+            let external_link_bytes = physical
+                .values()
+                .filter(|(_, links, paths)| *links > *paths as u64)
+                .map(|(bytes, _, _)| *bytes)
+                .sum::<u64>();
+            let allocated = physical.values().map(|(bytes, _, _)| *bytes).sum::<u64>();
+            let retained = if external_link_bytes > 0 {
+                external_link_bytes
+            } else {
+                physical
+                    .values()
+                    .map(|(bytes, _, _)| *bytes)
+                    .max()
+                    .unwrap_or_default()
+            };
+            groups.push(DuplicateGroup {
+                sha256,
+                files,
+                logical_duplicate_bytes: total_bytes.saturating_sub(largest),
+                physical_reclaimable_bytes: allocated.saturating_sub(retained),
+            });
+        }
+        groups.sort_by(|a, b| {
+            b.physical_reclaimable_bytes
+                .cmp(&a.physical_reclaimable_bytes)
+                .then(a.sha256.cmp(&b.sha256))
+        });
+        let data = serde_json::to_value(DuplicateResult {
+            groups,
+            files: all_files,
+            scanned_files,
+            bytes_hashed,
+            skipped_oversized,
+            skipped_unsafe_paths,
+            partial,
+            truncated,
+            host_status: statuses.clone(),
+        })?;
+        Ok(self.wrap_result(
+            normalized.request_id.clone(),
+            normalized.origin_host.clone(),
+            normalized.hop_count,
+            partial,
+            truncated,
+            statuses,
             data,
         ))
     }
@@ -1319,6 +1514,45 @@ fn normalize_host_statuses(statuses: &mut [PerHostStatus], response_partial: boo
 mod tests {
     use super::*;
     use crate::backend::HostSearchState;
+
+    #[tokio::test]
+    async fn lossless_body_copy_find_duplicates_returns_hashes_and_measured_reclaimable_bytes_without_deleting() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("docs");
+        std::fs::create_dir_all(&root).unwrap();
+        let first = root.join("first.md");
+        let second = root.join("second.md");
+        std::fs::write(&first, b"same content").unwrap();
+        std::fs::write(&second, b"same content").unwrap();
+        let local = LocalBackend {
+            host_id: "test".into(),
+            root: root.clone(),
+            root_paths: BTreeMap::from([("docs".into(), vec![root])]),
+            limits: Default::default(),
+            exclude_globs: Vec::new(),
+            index: crate::index::IndexManager::disabled(),
+            remote_index: None,
+        };
+        let service = MeshService::new(local, Topology::new("test", vec![]));
+        let response = service
+            .call_find_duplicates(FindDuplicatesArgs {
+                hosts: Some(HostsInput::One("test".into())),
+                roots: vec!["docs".into()],
+                max_files: Some(10),
+                request_id: None,
+                origin_host: None,
+                hop_count: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.data["groups"].as_array().unwrap().len(), 1);
+        assert_eq!(response.data["scanned_files"], 2);
+        assert!(response.data["groups"][0]["physical_reclaimable_bytes"]
+            .as_u64()
+            .unwrap()
+            > 0);
+        assert!(first.exists() && second.exists());
+    }
 
     #[tokio::test]
     async fn background_deadline_reaches_local_scan_without_extending_interactive_calls() {
