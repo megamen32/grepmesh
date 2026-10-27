@@ -83,19 +83,33 @@ impl RemoteIndexStore {
         Ok(store)
     }
 
-    /// True when the requested absolute roots are exactly the complete set of
-    /// source roots owned by this remote index. They are not present on the
-    /// index host, so scanning unrelated local roots can consume the peer
-    /// deadline before consulting this store.
+    /// True when requested root paths or unique root names identify exactly
+    /// the complete source-root set owned by this remote index. These paths
+    /// are not present on the index host, so scanning unrelated local roots
+    /// can consume the peer deadline before consulting this store.
     pub fn owns_requested_roots(&self, requested: &[String]) -> bool {
-        if requested.is_empty() || requested.iter().any(|root| !Path::new(root).is_absolute()) {
+        if requested.is_empty() {
             return false;
         }
-        let mut requested = requested
-            .iter()
-            .map(PathBuf::from)
-            .collect::<Vec<_>>();
-        requested.sort();
+        let mut resolved = Vec::with_capacity(requested.len());
+        for root in requested {
+            let path = Path::new(root);
+            if path.is_absolute() {
+                resolved.push(path.to_path_buf());
+                continue;
+            }
+            let matches = self
+                .config
+                .allowed_roots
+                .values()
+                .filter_map(|roots| roots.get(root))
+                .collect::<Vec<_>>();
+            if matches.len() != 1 {
+                return false;
+            }
+            resolved.push(matches[0].clone());
+        }
+        resolved.sort();
         let mut configured = self
             .config
             .allowed_roots
@@ -103,7 +117,7 @@ impl RemoteIndexStore {
             .flat_map(|roots| roots.values().cloned())
             .collect::<Vec<_>>();
         configured.sort();
-        requested == configured
+        resolved == configured
     }
 
     fn connection(&self) -> Result<Connection> {
@@ -536,6 +550,8 @@ mod tests {
             RemoteIndexStore::open(config(&root, &tmp.path().join("remote.sqlite3"))).unwrap();
 
         assert!(store.owns_requested_roots(&[root.display().to_string()]));
+        assert!(store.owns_requested_roots(&["docs".into()]));
+        assert!(!store.owns_requested_roots(&["docs".into(), "docs".into()]));
         assert!(!store.owns_requested_roots(&[tmp.path().display().to_string()]));
         assert!(!store.owns_requested_roots(&[tmp.path().join("other").display().to_string()]));
         assert!(!store.owns_requested_roots(&[]));
@@ -548,6 +564,7 @@ mod tests {
             .insert("other".into(), tmp.path().join("other"));
         let multiple_store = RemoteIndexStore::open(multiple_roots).unwrap();
         assert!(!multiple_store.owns_requested_roots(&[root.display().to_string()]));
+        assert!(!multiple_store.owns_requested_roots(&["docs".into()]));
     }
 
     #[test]
