@@ -1696,7 +1696,7 @@ where
 #[cfg(test)]
 mod tests {
     #[tokio::test]
-    async fn remote_scoped_search_does_not_scan_unrelated_local_roots() {
+    async fn lossless_body_copy_remote_root_alias_search_does_not_scan_unrelated_local_roots() {
         let temp = tempfile::tempdir().unwrap();
         let local_root = temp.path().join("local");
         std::fs::create_dir(&local_root).unwrap();
@@ -1741,8 +1741,8 @@ mod tests {
                 5,
                 0,
                 super::SearchMode::Literal,
-                vec!["**/pilot.md".into()],
-                vec![source_root.display().to_string()],
+                Vec::new(),
+                vec!["docs".into()],
             )
             .await
             .unwrap();
@@ -1757,7 +1757,7 @@ mod tests {
                 0,
                 super::SearchMode::Literal,
                 vec!["!**/pilot.md".into()],
-                vec![source_root.display().to_string()],
+                vec!["docs".into()],
             )
             .await
             .unwrap();
