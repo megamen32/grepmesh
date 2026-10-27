@@ -23,7 +23,9 @@ Usage: mvp-paired-cutover.sh --binary PATH [--config-100 PATH] [--config-44 PATH
 The default run performs read-only preflight and prints the exact deployment
 pair. --apply performs the coordinated restart using mvp-deploy.sh receipts,
 but requires fresh authenticated MCP status proving the configured source root
-is not hot or metadata-only on server-100.
+is not hot or metadata-only on server-100. If the installed runtime reports
+only a coarse ancestor bucket, the gate also requires a bounded ctime walk to
+prove that exact source root has been quiet for the configured cooldown.
 EOF
   exit 2
 }
@@ -105,7 +107,7 @@ fi
 [[ -n "$GUARD_EVIDENCE" && -f "$GUARD_EVIDENCE" ]] \
   || die "--apply requires fresh authenticated MCP --guard-evidence"
 python3 - "$GUARD_EVIDENCE" "$CFG100" <<'PY' || die "source-root activity guard is hot, stale, partial, or unproven"
-import json, sys, time
+import json, os, sys, time
 
 evidence = json.load(open(sys.argv[1], encoding="utf-8"))
 captured = evidence.get("captured_at_ms")
@@ -119,7 +121,37 @@ nodes = {node.get("host_id"): node for node in status.get("nodes", [])}
 assert {"server-100", "server-44"}.issubset(nodes), "both host index statuses are required"
 config = json.load(open(sys.argv[2], encoding="utf-8"))
 source = config.get("remote_index_source") or {}
+cooldown_ms = int(((config.get("limits") or {}).get("index_activity") or {}).get("hot_cooldown_ms", 3_600_000))
 activity = nodes["server-100"].get("index_directory_activity") or []
+
+def quiet_by_metadata(root, cooldown):
+    """Fail closed unless bounded ctime walk proves this exact root was quiet."""
+    cutoff = time.time_ns() - cooldown * 1_000_000
+    try:
+        root_stat = os.stat(root, follow_symlinks=False)
+        if os.path.islink(root) or not os.path.isdir(root) or root_stat.st_ctime_ns >= cutoff:
+            return False
+    except OSError:
+        return False
+    pending = [root]
+    visited = 0
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    visited += 1
+                    if visited > 20_000:
+                        return False
+                    info = entry.stat(follow_symlinks=False)
+                    if info.st_ctime_ns >= cutoff:
+                        return False
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(entry.path)
+        except OSError:
+            return False
+    return True
+
 for roots in (source.get("roots") or {}).values():
     for root in roots:
         matches = [row for row in activity
@@ -130,8 +162,13 @@ for roots in (source.get("roots") or {}).values():
         depth = max(len(row["path"].strip("/").split("/")) for row in matches)
         exact_scope = [row for row in matches
                        if len(row["path"].strip("/").split("/")) == depth]
-        assert all(row.get("hot") is False and row.get("metadata_only") is False
-                   for row in exact_scope), f"source-root activity guard is active: {root}"
+        if not all(row.get("hot") is False and row.get("metadata_only") is False
+                   for row in exact_scope):
+            scoped_record = any(row.get("path") == root
+                                or row.get("path", "").startswith(root.rstrip("/") + "/")
+                                for row in exact_scope)
+            assert not scoped_record and quiet_by_metadata(root, cooldown_ms), \
+                f"source-root activity guard is active or exact-root quiet cannot be proven: {root}"
 PY
 
 receipt_from() {

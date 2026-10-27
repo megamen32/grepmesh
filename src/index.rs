@@ -1032,7 +1032,14 @@ fn load_activity_guard(
                     .collect::<BTreeMap<_, _>>();
                 for root in &config.activity_bucket_roots {
                     if !activity.contains_key(root) {
-                        if !known_isolated.contains(root) {
+                        if !known_isolated.contains(root)
+                            && !activity_root_is_quiet(
+                                root,
+                                now,
+                                config.hot_cooldown_ms,
+                                MAX_ACTIVITY_ROOT_STAT_ENTRIES,
+                            )
+                        {
                             inherit_active_parent_cooldown(
                                 &mut activity,
                                 root,
@@ -1069,6 +1076,63 @@ fn load_activity_guard(
     }
 }
 
+const MAX_ACTIVITY_ROOT_STAT_ENTRIES: usize = 20_000;
+
+fn activity_root_is_quiet(root: &Path, now_ms: u64, cooldown_ms: u64, max_entries: usize) -> bool {
+    activity_root_is_quiet_impl(root, now_ms.saturating_sub(cooldown_ms), max_entries)
+}
+
+#[cfg(unix)]
+fn activity_root_is_quiet_impl(root: &Path, cutoff_ms: u64, max_entries: usize) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(root_metadata) = fs::symlink_metadata(root) else {
+        return false;
+    };
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return false;
+    }
+    let recent = |metadata: &fs::Metadata| {
+        let ctime_ms = (metadata.ctime() as i128 * 1_000)
+            .saturating_add(metadata.ctime_nsec() as i128 / 1_000_000);
+        ctime_ms >= cutoff_ms as i128
+    };
+    if recent(&root_metadata) {
+        return false;
+    }
+    let mut pending = vec![root.to_path_buf()];
+    let mut visited = 1usize;
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = fs::read_dir(directory) else {
+            return false;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return false;
+            };
+            visited = visited.saturating_add(1);
+            if visited > max_entries {
+                return false;
+            }
+            let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+                return false;
+            };
+            if recent(&metadata) {
+                return false;
+            }
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                pending.push(entry.path());
+            }
+        }
+    }
+    true
+}
+
+#[cfg(not(unix))]
+fn activity_root_is_quiet_impl(_: &Path, _: u64, _: usize) -> bool {
+    false
+}
+
 fn bootstrap_and_isolate_activity_guard(
     roots: &BTreeMap<String, Vec<PathBuf>>,
     config: &IndexActivityConfig,
@@ -1093,8 +1157,20 @@ fn bootstrap_and_isolate_activity_guard(
         })
         .collect::<BTreeMap<_, _>>();
     for root in &config.activity_bucket_roots {
-        inherit_active_parent_cooldown(&mut activity, root, now_ms, config.hot_debounce_ms);
-        activity.entry(root.clone()).or_default();
+        let quiet = activity_root_is_quiet(
+            root,
+            now_ms,
+            config.hot_cooldown_ms,
+            MAX_ACTIVITY_ROOT_STAT_ENTRIES,
+        );
+        if quiet {
+            let isolated = activity.entry(root.clone()).or_default();
+            isolated.metadata_only = false;
+            isolated.hot_until_ms = 0;
+        } else {
+            inherit_active_parent_cooldown(&mut activity, root, now_ms, config.hot_debounce_ms);
+            activity.entry(root.clone()).or_default();
+        }
     }
     activity
 }
@@ -3083,6 +3159,26 @@ fn excluded(path: &Path, root: &Path, excludes: &GlobSet) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn activity_root_recent_metadata_fails_closed() {
+        use super::*;
+
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("recent.md"), "no contents are read").unwrap();
+        assert!(!activity_root_is_quiet(
+            root.path(),
+            unix_time_ms(),
+            60_000,
+            MAX_ACTIVITY_ROOT_STAT_ENTRIES
+        ));
+        assert!(!activity_root_is_quiet(
+            &root.path().join("missing"),
+            unix_time_ms(),
+            60_000,
+            MAX_ACTIVITY_ROOT_STAT_ENTRIES
+        ));
+    }
+
     #[test]
     fn activity_guard_snapshot_survives_restart_and_bootstrap_fails_closed() {
         use super::*;
