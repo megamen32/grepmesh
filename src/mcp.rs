@@ -1601,8 +1601,11 @@ mod tests {
                 origin_host: None,
                 hop_count: None,
             })
-            .await;
-        assert!(denied.is_err());
+            .await
+            .unwrap();
+        assert_eq!(denied.partial, true);
+        assert_eq!(denied.data["files"].as_array().unwrap().len(), 0);
+        assert_eq!(denied.host_status[0].ok, false);
         assert!(outside_file.exists());
     }
 
