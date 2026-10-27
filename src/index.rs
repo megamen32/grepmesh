@@ -4343,8 +4343,9 @@ mod tests {
     #[test]
     fn directory_exclusion_prunes_the_directory_itself() {
         let root = PathBuf::from("/workspace");
-        let matcher = compile_excludes(&["**/.cache/**".to_string()]).unwrap();
+        let matcher = compile_excludes(&crate::config::default_exclude_globs()).unwrap();
         assert!(excluded(&root.join(".cache"), &root, &matcher));
+        assert!(excluded(&root.join(".venvs"), &root, &matcher));
     }
 
     #[test]
