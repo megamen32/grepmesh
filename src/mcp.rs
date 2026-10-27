@@ -1547,10 +1547,17 @@ mod tests {
             .unwrap();
         assert_eq!(response.data["groups"].as_array().unwrap().len(), 1);
         assert_eq!(response.data["scanned_files"], 2);
-        assert!(response.data["groups"][0]["physical_reclaimable_bytes"]
+        assert_eq!(response.data["groups"][0]["logical_duplicate_bytes"], 12);
+        let physical = response.data["groups"][0]["physical_reclaimable_bytes"]
             .as_u64()
+            .unwrap();
+        let allocated = response.data["files"]
+            .as_array()
             .unwrap()
-            > 0);
+            .iter()
+            .map(|file| file["allocated_bytes"].as_u64().unwrap())
+            .sum::<u64>();
+        assert!(physical <= allocated);
         assert!(first.exists() && second.exists());
     }
 
