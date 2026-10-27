@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "deploy"))
 
 from paired_resource_guard import ServiceMetrics, parse_metrics, violations  # noqa: E402
+from paired_cutover_stage import find_matching_source_receipt  # noqa: E402
 from source_root_guard import validate_source_guard  # noqa: E402
 
 
@@ -151,6 +152,27 @@ class SourceRootGuardTests(unittest.TestCase):
         activity = [{"path": str(self.root), "hot": False, "metadata_only": True}]
         with self.assertRaisesRegex(ValueError, "activity bucket"):
             validate_source_guard("mcp", self.config, self.evidence(now, activity), now_ms=now)
+
+
+class PairedCutoverStageTests(unittest.TestCase):
+    def test_reuses_only_receipt_with_matching_installed_hashes_and_rollback_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            receipt = root / "20261027T211418Z"
+            old = receipt / "old"
+            old.mkdir(parents=True)
+            (old / "grepmesh-mcp").write_bytes(b"old binary")
+            (old / "config.json").write_text("{}", encoding="utf-8")
+            (receipt / "manifest.txt").write_text(
+                "new_binary_sha256=bin\n"
+                "installed_binary_sha256=bin\n"
+                "new_config_sha256=cfg\n"
+                "installed_config_sha256=cfg\n"
+                "health_check=PASS (service active)\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(find_matching_source_receipt(root, "bin", "cfg"), receipt)
+            self.assertIsNone(find_matching_source_receipt(root, "other", "cfg"))
 
 
 if __name__ == "__main__":

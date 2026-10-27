@@ -14,6 +14,9 @@ APPLY=0
 GUARD_EVIDENCE=
 MIN_FREE_KIB=$((15 * 1024 * 1024))
 RESOURCE_GUARD=$ROOT/deploy/paired_resource_guard.py
+SOURCE_BINARY=/opt/grepmesh-custom/grepmesh-mcp
+SOURCE_CONFIG=/etc/grepmesh-mcp/config.json
+SOURCE_RECEIPTS=/opt/grepmesh-custom/.mvp-receipts
 
 log() { printf '[paired-cutover] %s\n' "$*" >&2; }
 die() { log "FAIL: $*"; exit 1; }
@@ -148,13 +151,29 @@ receipt_from() {
 # the old receiver remains backward-compatible and accepts it during the short
 # interval before 44 is upgraded. Reversing this order would make the old 100
 # source-sync calls fail authentication until its restart completed.
-deploy100_output=$("$DEPLOY" --binary "$BIN" --config "$CFG100" 2>&1) || {
+receipt100=
+if [[ -f "$SOURCE_BINARY" && -f "$SOURCE_CONFIG" ]]; then
+  installed_source_sha=$(sha256sum "$SOURCE_BINARY" | awk '{print $1}')
+  installed_config_sha=$(sha256sum "$SOURCE_CONFIG" | awk '{print $1}')
+  if [[ "$installed_source_sha" == "$BIN_SHA" && "$installed_config_sha" == "$CFG100_SHA" ]]; then
+    receipt100=$(python3 "$ROOT/deploy/paired_cutover_stage.py" \
+      --receipt-root "$SOURCE_RECEIPTS" \
+      --binary-sha256 "$BIN_SHA" \
+      --config-sha256 "$CFG100_SHA")
+    if [[ -n "$receipt100" ]]; then
+      log "source 100 already runs the target binary and config; reusing rollback receipt without restarting it: $receipt100"
+    fi
+  fi
+fi
+if [[ -z "$receipt100" ]]; then
+  deploy100_output=$("$DEPLOY" --binary "$BIN" --config "$CFG100" 2>&1) || {
+    printf '%s\n' "$deploy100_output" >&2
+    die "source deploy failed; node-level script handled its rollback"
+  }
   printf '%s\n' "$deploy100_output" >&2
-  die "source deploy failed; node-level script handled its rollback"
-}
-printf '%s\n' "$deploy100_output" >&2
-receipt100=$(printf '%s\n' "$deploy100_output" | receipt_from | tail -n1)
-[[ -n "$receipt100" ]] || die "source deployment passed but returned no rollback receipt: $deploy100_output"
+  receipt100=$(printf '%s\n' "$deploy100_output" | receipt_from | tail -n1)
+  [[ -n "$receipt100" ]] || die "source deployment passed but returned no rollback receipt: $deploy100_output"
+fi
 
 if ! resource_guard_pair; then
   log "source 100 is bearer-capable and remains compatible with the old receiver; keep receipt for rollback: $receipt100"
