@@ -171,6 +171,10 @@ pub struct IndexActivityConfig {
     pub metadata_only_globs: Vec<String>,
     #[serde(default)]
     pub exclude_globs: Vec<String>,
+    /// Runtime-only roots that need independent activity buckets. The server
+    /// populates this from explicitly configured remote index source roots.
+    #[serde(skip)]
+    pub activity_bucket_roots: Vec<PathBuf>,
 }
 
 fn default_activity_window_ms() -> u64 {
@@ -199,6 +203,7 @@ impl Default for IndexActivityConfig {
             hot_cooldown_ms: default_hot_cooldown_ms(),
             metadata_only_globs: Vec::new(),
             exclude_globs: Vec::new(),
+            activity_bucket_roots: Vec::new(),
         }
     }
 }
