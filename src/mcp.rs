@@ -73,6 +73,8 @@ pub struct FindDuplicatesArgs {
     pub hosts: Option<HostsInput>,
     pub roots: Vec<String>,
     #[serde(default)]
+    pub paths: Vec<PathBuf>,
+    #[serde(default)]
     pub max_files: Option<usize>,
     #[serde(default)]
     pub request_id: Option<String>,
@@ -607,6 +609,7 @@ impl MeshService {
         let FindDuplicatesArgs {
             hosts,
             roots,
+            paths,
             max_files,
             request_id,
             origin_host,
@@ -637,7 +640,7 @@ impl MeshService {
         for target in unique_hosts(&normalized.hosts) {
             let scan: Result<DuplicateScan> = if target == self.local.host_id {
                 self.local
-                    .find_duplicates_bounded(max_files, roots.clone())
+                    .find_duplicates_bounded(max_files, roots.clone(), paths.clone())
                     .await
             } else {
                 async {
@@ -651,6 +654,7 @@ impl MeshService {
                             json!({
                                 "hosts": ["local"],
                                 "roots": roots.clone(),
+                                "paths": paths.clone(),
                                 "max_files": max_files,
                                 "request_id": normalized.request_id.clone(),
                                 "origin_host": normalized.origin_host.clone(),
@@ -1544,7 +1548,7 @@ mod tests {
         let local = LocalBackend {
             host_id: "test".into(),
             root: root.clone(),
-            root_paths: BTreeMap::from([("docs".into(), vec![root])]),
+            root_paths: BTreeMap::from([("docs".into(), vec![root.clone()])]),
             limits: Default::default(),
             exclude_globs: Vec::new(),
             index: crate::index::IndexManager::disabled(),
@@ -1555,6 +1559,7 @@ mod tests {
             .call_find_duplicates(FindDuplicatesArgs {
                 hosts: Some(HostsInput::One("test".into())),
                 roots: vec!["docs".into()],
+                paths: vec![root],
                 max_files: Some(10),
                 request_id: None,
                 origin_host: None,
@@ -1575,12 +1580,30 @@ mod tests {
             .collect::<Option<Vec<_>>>();
         if let (Some(physical), Some(allocated)) = (physical, allocated) {
             let allocated = allocated.into_iter()
-            .sum::<u64>();
+                .sum::<u64>();
             assert!(physical <= allocated);
         } else {
             assert!(cfg!(not(unix)));
         }
         assert!(first.exists() && second.exists());
+
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let outside_file = outside.join("not-authorized.txt");
+        std::fs::write(&outside_file, b"must not be hashed").unwrap();
+        let denied = service
+            .call_find_duplicates(FindDuplicatesArgs {
+                hosts: Some(HostsInput::One("test".into())),
+                roots: vec!["docs".into()],
+                paths: vec![outside],
+                max_files: Some(10),
+                request_id: None,
+                origin_host: None,
+                hop_count: None,
+            })
+            .await;
+        assert!(denied.is_err());
+        assert!(outside_file.exists());
     }
 
     #[tokio::test]

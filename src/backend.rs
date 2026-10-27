@@ -969,26 +969,74 @@ impl LocalBackend {
         &self,
         max_files: usize,
         root_names: Vec<String>,
+        requested_paths: Vec<PathBuf>,
     ) -> Result<DuplicateScan> {
         anyhow::ensure!(
             !root_names.is_empty(),
             "find_duplicates requires explicit configured root names"
         );
         let max_files = max_files.clamp(2, 250);
-        let allowed_roots = self
-            .selected_roots(&root_names)?
+        anyhow::ensure!(requested_paths.len() <= 16, "at most 16 duplicate-scan paths are allowed");
+        let configured_roots = self.selected_roots(&root_names)?;
+        let allowed_roots = configured_roots
+            .iter()
             .into_iter()
             .filter_map(|root| fs::canonicalize(root).ok())
             .collect::<Vec<_>>();
-        let paths = self
-            .find_paths_bounded("", max_files, root_names)
-            .await?;
+        let mut truncated = false;
+        let mut partial = false;
+        let mut hits = Vec::new();
+        if requested_paths.is_empty() {
+            let result = self
+                .find_paths_bounded("", max_files, root_names)
+                .await?;
+            hits = result.hits;
+            truncated = result.truncated;
+            partial = result.partial;
+        } else {
+            let mut canonical_paths = BTreeSet::new();
+            for requested in requested_paths {
+                let path = fs::canonicalize(&requested).with_context(|| {
+                    format!("canonicalize requested duplicate root {}", requested.display())
+                })?;
+                anyhow::ensure!(
+                    allowed_roots.iter().any(|root| path.starts_with(root)),
+                    "duplicate scan path is outside the selected configured roots"
+                );
+                anyhow::ensure!(path.is_dir(), "duplicate scan path must be a directory");
+                canonical_paths.insert(path);
+            }
+            let deadline = Instant::now() + Duration::from_millis(self.limits.overall_timeout_ms);
+            for root in canonical_paths {
+                let remaining = max_files.saturating_sub(hits.len());
+                if remaining == 0 {
+                    truncated = true;
+                    break;
+                }
+                let result = find_paths_impl(
+                    &self.host_id,
+                    &root,
+                    "",
+                    remaining,
+                    &self.exclude_globs,
+                    self.limits.max_response_bytes,
+                    deadline,
+                )
+                .await?;
+                hits.extend(result.hits);
+                partial |= result.partial;
+                if result.truncated {
+                    truncated = true;
+                    break;
+                }
+            }
+        }
         let mut files = Vec::new();
         let mut bytes_hashed = 0u64;
         let mut skipped_oversized = 0usize;
         let mut skipped_unsafe_paths = 0usize;
         let mut seen_paths = BTreeSet::new();
-        for hit in &paths.hits {
+        for hit in &hits {
             let path = PathBuf::from(&hit.path);
             let canonical_path = match fs::canonicalize(&path) {
                 Ok(path) if allowed_roots.iter().any(|root| path.starts_with(root)) => path,
@@ -1061,12 +1109,12 @@ impl LocalBackend {
             });
         }
         Ok(DuplicateScan {
-            scanned_files: paths.hits.len(),
+            scanned_files: hits.len(),
             bytes_hashed,
             skipped_oversized,
             skipped_unsafe_paths,
-            partial: paths.partial || skipped_oversized > 0 || skipped_unsafe_paths > 0,
-            truncated: paths.truncated,
+            partial: partial || skipped_oversized > 0 || skipped_unsafe_paths > 0,
+            truncated,
             files,
         })
     }
@@ -1838,14 +1886,14 @@ mod tests {
         let backend = super::LocalBackend {
             host_id: "test".into(),
             root: root.clone(),
-            root_paths: std::collections::BTreeMap::from([("docs".into(), vec![root])]),
+            root_paths: std::collections::BTreeMap::from([("docs".into(), vec![root.clone()])]),
             limits: Default::default(),
             exclude_globs: Vec::new(),
             index: crate::index::IndexManager::disabled(),
             remote_index: None,
         };
         let scan = backend
-            .find_duplicates_bounded(10, vec!["docs".into()])
+            .find_duplicates_bounded(10, vec!["docs".into()], vec![root])
             .await
             .unwrap();
         assert_eq!(scan.scanned_files, 3);
