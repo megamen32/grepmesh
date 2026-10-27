@@ -11,16 +11,19 @@ CFG100=$ROOT/deploy/mvp-config-server-100.json
 CFG44=$ROOT/deploy/mvp-config-server-44.json
 REMOTE44=${GREPMESH_SERVER44_SSH:-roomhacker@192.168.2.5}
 APPLY=0
+GUARD_EVIDENCE=
 MIN_FREE_KIB=$((15 * 1024 * 1024))
 
 log() { printf '[paired-cutover] %s\n' "$*" >&2; }
 die() { log "FAIL: $*"; exit 1; }
 usage() {
   cat <<'EOF'
-Usage: mvp-paired-cutover.sh --binary PATH [--config-100 PATH] [--config-44 PATH] [--remote-44 SSH_TARGET] [--apply]
+Usage: mvp-paired-cutover.sh --binary PATH [--config-100 PATH] [--config-44 PATH] [--remote-44 SSH_TARGET] [--apply --guard-evidence STATUS.json]
 
 The default run performs read-only preflight and prints the exact deployment
-pair. --apply performs the coordinated restart using mvp-deploy.sh receipts.
+pair. --apply performs the coordinated restart using mvp-deploy.sh receipts,
+but requires fresh authenticated MCP status proving the configured source root
+is not hot or metadata-only on server-100.
 EOF
   exit 2
 }
@@ -31,6 +34,7 @@ while (($#)); do
     --config-100) CFG100=$2; shift 2 ;;
     --config-44) CFG44=$2; shift 2 ;;
     --remote-44) REMOTE44=$2; shift 2 ;;
+    --guard-evidence) GUARD_EVIDENCE=$2; shift 2 ;;
     --apply) APPLY=1; shift ;;
     -h|--help) usage ;;
     *) die "unknown argument: $1" ;;
@@ -97,6 +101,38 @@ if ((APPLY == 0)); then
   log "dry-run only: no files changed and no services restarted"
   exit 0
 fi
+
+[[ -n "$GUARD_EVIDENCE" && -f "$GUARD_EVIDENCE" ]] \
+  || die "--apply requires fresh authenticated MCP --guard-evidence"
+python3 - "$GUARD_EVIDENCE" "$CFG100" <<'PY' || die "source-root activity guard is hot, stale, partial, or unproven"
+import json, sys, time
+
+evidence = json.load(open(sys.argv[1], encoding="utf-8"))
+captured = evidence.get("captured_at_ms")
+now = int(time.time() * 1000)
+assert isinstance(captured, int) and 0 <= now - captured <= 60_000, "guard evidence must be <=60s old"
+status = evidence.get("status") or {}
+assert status.get("partial") is False, "MCP status must be complete"
+healthy = {row.get("host_id") for row in status.get("host_status", []) if row.get("ok") is True}
+assert {"server-100", "server-44"}.issubset(healthy), "both production hosts must be healthy in MCP status"
+nodes = {node.get("host_id"): node for node in status.get("nodes", [])}
+assert {"server-100", "server-44"}.issubset(nodes), "both host index statuses are required"
+config = json.load(open(sys.argv[2], encoding="utf-8"))
+source = config.get("remote_index_source") or {}
+activity = nodes["server-100"].get("index_directory_activity") or []
+for roots in (source.get("roots") or {}).values():
+    for root in roots:
+        matches = [row for row in activity
+                   if root == row.get("path")
+                   or root.startswith(row.get("path", "").rstrip("/") + "/")
+                   or row.get("path", "").startswith(root.rstrip("/") + "/")]
+        assert matches, f"MCP status has no activity bucket covering source root {root}"
+        depth = max(len(row["path"].strip("/").split("/")) for row in matches)
+        exact_scope = [row for row in matches
+                       if len(row["path"].strip("/").split("/")) == depth]
+        assert all(row.get("hot") is False and row.get("metadata_only") is False
+                   for row in exact_scope), f"source-root activity guard is active: {root}"
+PY
 
 receipt_from() {
   awk '/^NODE PASS / { for (i=1;i<=NF;i++) if ($i ~ /^receipt=/) {sub(/^receipt=/, "", $i); print $i} }'

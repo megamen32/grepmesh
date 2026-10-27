@@ -171,6 +171,10 @@ impl PersistentIndex {
         Ok(store)
     }
 
+    fn activity_guard_path(&self) -> PathBuf {
+        self.path.with_extension("activity-guard.json")
+    }
+
     fn connection(&self) -> Result<Connection, String> {
         let connection = Connection::open(&self.path).map_err(|error| error.to_string())?;
         connection
@@ -980,7 +984,7 @@ pub struct IndexDirectoryActivity {
     pub last_event_ms: u64,
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct DirectoryActivityState {
     window_started_ms: u64,
     events: u64,
@@ -991,6 +995,156 @@ struct DirectoryActivityState {
     metadata_only: bool,
     excluded: bool,
     debounce_ms: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ActivityGuardFile {
+    version: u32,
+    captured_at_ms: u64,
+    buckets: BTreeMap<PathBuf, DirectoryActivityState>,
+    #[serde(default)]
+    isolated_roots: BTreeSet<PathBuf>,
+}
+
+fn load_activity_guard(
+    path: &Path,
+    roots: &BTreeMap<String, Vec<PathBuf>>,
+    config: &IndexActivityConfig,
+    had_persistent_index: bool,
+) -> BTreeMap<PathBuf, DirectoryActivityState> {
+    let now = unix_time_ms();
+    match fs::read(path) {
+        Ok(bytes) => match serde_json::from_slice::<ActivityGuardFile>(&bytes) {
+            Ok(file) if file.version == 1 => {
+                let mut known_isolated = file.isolated_roots;
+                let mut activity = file
+                    .buckets
+                    .into_iter()
+                    .filter(|(bucket, stats)| {
+                        known_isolated.contains(bucket)
+                            || stats.hot_until_ms > now
+                            || now.saturating_sub(stats.window_started_ms) < config.window_ms
+                    })
+                    .map(|(path, mut stats)| {
+                        stats.metadata_only |= stats.hot_until_ms > now;
+                        (path, stats)
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                for root in &config.activity_bucket_roots {
+                    if !activity.contains_key(root) {
+                        if !known_isolated.contains(root) {
+                            inherit_active_parent_cooldown(
+                                &mut activity,
+                                root,
+                                now,
+                                config.hot_debounce_ms,
+                            );
+                        }
+                        activity.entry(root.clone()).or_default();
+                    }
+                    known_isolated.insert(root.clone());
+                }
+                activity
+            }
+            Ok(_) => {
+                tracing::error!(path = %path.display(), "unsupported index activity guard version; failing closed");
+                bootstrap_and_isolate_activity_guard(roots, config, now)
+            }
+            Err(error) => {
+                tracing::error!(path = %path.display(), error = %error, "invalid index activity guard; failing closed");
+                bootstrap_and_isolate_activity_guard(roots, config, now)
+            }
+        },
+        Err(error) if error.kind() == ErrorKind::NotFound && had_persistent_index => {
+            // The previous binary kept activity only in memory. On the first
+            // upgrade, preserve safety by holding each configured root in
+            // metadata-only mode for one full cooldown before full walking.
+            bootstrap_and_isolate_activity_guard(roots, config, now)
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => BTreeMap::new(),
+        Err(error) => {
+            tracing::error!(path = %path.display(), error = %error, "read index activity guard failed; failing closed");
+            bootstrap_and_isolate_activity_guard(roots, config, now)
+        }
+    }
+}
+
+fn bootstrap_and_isolate_activity_guard(
+    roots: &BTreeMap<String, Vec<PathBuf>>,
+    config: &IndexActivityConfig,
+    now_ms: u64,
+) -> BTreeMap<PathBuf, DirectoryActivityState> {
+    let mut activity = ordered_roots(roots)
+        .into_iter()
+        .map(|root| {
+            (
+                root,
+                DirectoryActivityState {
+                    window_started_ms: now_ms,
+                    events: config.hot_event_threshold,
+                    changed_bytes: config.hot_changed_bytes_threshold,
+                    hot_until_ms: now_ms.saturating_add(config.hot_cooldown_ms),
+                    last_event_ms: now_ms,
+                    metadata_only: true,
+                    debounce_ms: config.hot_debounce_ms,
+                    ..Default::default()
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for root in &config.activity_bucket_roots {
+        inherit_active_parent_cooldown(&mut activity, root, now_ms, config.hot_debounce_ms);
+        activity.entry(root.clone()).or_default();
+    }
+    activity
+}
+
+fn save_activity_guard(
+    path: &Path,
+    activity: &BTreeMap<PathBuf, DirectoryActivityState>,
+    window_ms: u64,
+    isolated_roots: &[PathBuf],
+) -> Result<(), String> {
+    let now = unix_time_ms();
+    let buckets = activity
+        .iter()
+        .filter(|(bucket, stats)| {
+            isolated_roots.contains(bucket)
+                || stats.hot_until_ms > now
+                || now.saturating_sub(stats.window_started_ms) < window_ms
+        })
+        .map(|(path, stats)| (path.clone(), stats.clone()))
+        .collect();
+    let file = ActivityGuardFile {
+        version: 1,
+        captured_at_ms: now,
+        buckets,
+        isolated_roots: isolated_roots.iter().cloned().collect(),
+    };
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
+    fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".grepmesh-activity-guard-")
+        .tempfile_in(parent)
+        .map_err(|error| error.to_string())?;
+    serde_json::to_writer(&mut temporary, &file).map_err(|error| error.to_string())?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|error| error.to_string())?;
+    temporary
+        .persist(path)
+        .map_err(|error| error.error.to_string())?;
+    Ok(())
+}
+
+fn activity_has_hot_bucket(
+    activity: &BTreeMap<PathBuf, DirectoryActivityState>,
+    now_ms: u64,
+) -> bool {
+    activity.values().any(|stats| now_ms < stats.hot_until_ms)
 }
 
 impl Default for IndexSnapshot {
@@ -1068,6 +1222,10 @@ impl IndexManager {
         let candidate_state = Arc::clone(&candidates);
         let ready_roots = Arc::new(RwLock::new(BTreeSet::new()));
         let ready_root_state = Arc::clone(&ready_roots);
+        let had_persistent_index = persistent_path
+            .as_ref()
+            .and_then(|path| fs::metadata(path).ok())
+            .is_some_and(|metadata| metadata.len() > 0);
         let persistent =
             persistent_path.and_then(|path| match PersistentIndex::open(path.clone()) {
                 Ok(index) => Some(index),
@@ -1092,6 +1250,30 @@ impl IndexManager {
         let manager_ocr = ocr.clone();
         thread::spawn(move || {
             let index_storage_path = persistent_state.as_ref().map(|index| index.path.clone());
+            let mut directory_activity = persistent_state
+                .as_ref()
+                .map(|index| {
+                    load_activity_guard(
+                        &index.activity_guard_path(),
+                        &roots,
+                        &activity_config,
+                        had_persistent_index,
+                    )
+                })
+                .unwrap_or_default();
+            if let Some(index) = persistent_state.as_ref() {
+                if let Err(error) = save_activity_guard(
+                    &index.activity_guard_path(),
+                    &directory_activity,
+                    activity_config.window_ms,
+                    &activity_config.activity_bucket_roots,
+                ) {
+                    tracing::error!(error = %error, "persist initial index activity guard failed");
+                }
+            }
+            if let Ok(mut current) = state.write() {
+                current.directory_activity = directory_activity_snapshot(&directory_activity);
+            }
             let (events, rx) = mpsc::sync_channel(1);
             let pending_event_paths =
                 Arc::new(Mutex::new(BTreeMap::<PathBuf, PendingIndexEvent>::new()));
@@ -1230,10 +1412,26 @@ impl IndexManager {
                 }
             };
             let mut generation = 0;
-            if (ocr.as_ref().is_none_or(|ocr| ocr.deferred_count() == 0)
+            let rebuild_requested = (ocr.as_ref().is_none_or(|ocr| ocr.deferred_count() == 0)
                 && rebuild_due(last_full_rebuild_ms))
-                || persistent_state.is_none()
-            {
+                || persistent_state.is_none();
+            let guard_hot = activity_has_hot_bucket(&directory_activity, unix_time_ms());
+            if rebuild_requested && guard_hot && persistent_state.is_some() {
+                // An upgrade/restart with an existing database but no prior
+                // activity snapshot bootstraps a conservative cooldown. Keep
+                // serving the durable index and defer the full walk until the
+                // guard expires; a restart must not erase a hot-root shield.
+                if let Ok(mut ready) = ready_root_state.write() {
+                    *ready = configured_roots;
+                }
+                if let Ok(mut current) = state.write() {
+                    current.state = IndexState::Ready;
+                    current.indexed_files = persistent_state
+                        .as_ref()
+                        .and_then(|index| index.document_count().ok())
+                        .unwrap_or(0);
+                }
+            } else if rebuild_requested {
                 run_rebuild(&mut last_full_rebuild_ms, &mut generation);
             } else {
                 if let Ok(mut ready) = ready_root_state.write() {
@@ -1247,8 +1445,8 @@ impl IndexManager {
                         .unwrap_or(0);
                 }
             }
-            let mut pending = ocr.as_ref().is_some_and(|ocr| ocr.deferred_count() > 0);
-            let mut directory_activity = BTreeMap::<PathBuf, DirectoryActivityState>::new();
+            let mut pending = ocr.as_ref().is_some_and(|ocr| ocr.deferred_count() > 0)
+                || (rebuild_requested && guard_hot);
             let mut running = BTreeMap::<PathBuf, thread::JoinHandle<()>>::new();
             loop {
                 let finished: Vec<_> = running
@@ -1328,6 +1526,7 @@ impl IndexManager {
                         .collect::<BTreeMap<_, _>>();
                     let changed_paths = event_counts.keys().cloned().collect::<BTreeSet<_>>();
                     if let Some(index) = persistent_state.as_ref() {
+                        let guard_path = index.activity_guard_path();
                         reconcile_event_paths(
                             &changed_paths,
                             &event_counts,
@@ -1340,6 +1539,7 @@ impl IndexManager {
                             stt.as_ref(),
                             ocr.as_deref(),
                             index,
+                            Some(&guard_path),
                         );
                         reconcile_new_subtrees(
                             &new_subtrees,
@@ -1729,7 +1929,15 @@ fn is_index_storage_path(path: &Path, index_path: &Path) -> bool {
     };
     let normalized_path = normalize(path);
     let normalized_index = normalize(index_path);
+    let guard_path = index_path.with_extension("activity-guard.json");
+    let is_guard_temp = normalized_path.parent() == normalized_index.parent()
+        && normalized_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".grepmesh-activity-guard-"));
     normalized_path == normalized_index
+        || normalized_path == normalize(&guard_path)
+        || is_guard_temp
         || ["-wal", "-shm", "-journal"].iter().any(|suffix| {
             let mut sidecar = index_path.as_os_str().to_os_string();
             sidecar.push(suffix);
@@ -1854,6 +2062,7 @@ fn reconcile_event_paths(
     stt: Option<&SttEngine>,
     ocr: Option<&OcrEngine>,
     persistent: &PersistentIndex,
+    activity_guard_path: Option<&Path>,
 ) {
     let matcher = match compile_excludes(excludes) {
         Ok(matcher) => matcher,
@@ -1944,6 +2153,20 @@ fn reconcile_event_paths(
     let activity_snapshot = directory_activity_snapshot(activity);
     if let Ok(mut current) = snapshot.write() {
         current.directory_activity = activity_snapshot.clone();
+    }
+    if let Some(path) = activity_guard_path {
+        if let Err(error) = save_activity_guard(
+            path,
+            activity,
+            activity_config.window_ms,
+            &activity_config.activity_bucket_roots,
+        ) {
+            tracing::error!(error = %error, "persist index activity guard; deferring extraction for this event batch");
+            if let Ok(mut current) = snapshot.write() {
+                current.last_error = Some(format!("persist index activity guard: {error}"));
+            }
+            return;
+        }
     }
     for path in paths {
         let Some((root, canonical_root)) = configured_roots
@@ -2861,6 +3084,73 @@ fn excluded(path: &Path, root: &Path, excludes: &GlobSet) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn activity_guard_snapshot_survives_restart_and_bootstrap_fails_closed() {
+        use super::*;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("index.activity-guard.json");
+        let root = temp.path().join("home");
+        let source = root.join("agents-projects/grepmesh/docs");
+        let roots = BTreeMap::from([("home".to_string(), vec![root.clone()])]);
+        let config = IndexActivityConfig {
+            hot_cooldown_ms: 60_000,
+            activity_bucket_roots: vec![source.clone()],
+            ..Default::default()
+        };
+        let now = unix_time_ms();
+        let parent = root.join("agents-projects");
+        let parent_state = DirectoryActivityState {
+            window_started_ms: now,
+            events: config.hot_event_threshold,
+            changed_bytes: config.hot_changed_bytes_threshold,
+            hot_until_ms: now.saturating_add(config.hot_cooldown_ms),
+            last_event_ms: now,
+            metadata_only: true,
+            debounce_ms: config.hot_debounce_ms,
+            ..Default::default()
+        };
+        let activity = BTreeMap::from([
+            (parent.clone(), parent_state.clone()),
+            (source.clone(), parent_state.clone()),
+        ]);
+
+        save_activity_guard(&path, &activity, config.window_ms, &[source.clone()]).unwrap();
+        let restored = load_activity_guard(&path, &roots, &config, true);
+        assert!(activity_bucket_is_hot(&restored, &source, now));
+        assert_eq!(
+            restored[&parent].hot_until_ms,
+            activity[&parent].hot_until_ms
+        );
+
+        let mut cooled = activity.clone();
+        cooled.get_mut(&source).unwrap().hot_until_ms = 0;
+        cooled.get_mut(&source).unwrap().metadata_only = false;
+        save_activity_guard(
+            &path,
+            &cooled,
+            config.window_ms,
+            &config.activity_bucket_roots,
+        )
+        .unwrap();
+        let restored_cold = load_activity_guard(&path, &roots, &config, true);
+        assert!(!activity_bucket_is_hot(&restored_cold, &source, now));
+
+        let seeded = load_activity_guard(&temp.path().join("missing.json"), &roots, &config, true);
+        assert!(activity_bucket_is_hot(&seeded, &source, now));
+        assert!(seeded[&root].metadata_only);
+
+        let index_path = temp.path().join("index.sqlite3");
+        assert!(is_index_storage_path(
+            &index_path.with_extension("activity-guard.json"),
+            &index_path
+        ));
+        assert!(is_index_storage_path(
+            &temp.path().join(".grepmesh-activity-guard-temp"),
+            &index_path
+        ));
+    }
+
+    #[test]
     fn configured_source_bucket_preserves_guard_without_sibling_extension() {
         use super::*;
 
@@ -2907,6 +3197,7 @@ mod tests {
                 None,
                 None,
                 &index,
+                None,
             );
         };
 
@@ -3406,6 +3697,7 @@ mod tests {
             None,
             None,
             &index,
+            None,
         );
         assert!(index.candidates("METADATA_GUARD_TOKEN").unwrap().is_empty());
     }
