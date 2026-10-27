@@ -380,6 +380,17 @@ pub fn spawn_source_sync(
     });
 }
 
+fn paths_missing_from_root(
+    root: &Path,
+    old_paths: impl IntoIterator<Item = String>,
+    seen: &BTreeSet<String>,
+) -> Vec<String> {
+    old_paths
+        .into_iter()
+        .filter(|path| Path::new(path).starts_with(root) && !seen.contains(path))
+        .collect()
+}
+
 fn sync_once(
     config: &RemoteIndexSourceConfig,
     index_path: &Path,
@@ -457,7 +468,7 @@ fn sync_once(
                 let rows = s.query_map(params![root_name], |r| r.get(0))?;
                 rows.collect::<rusqlite::Result<_>>()?
             };
-            for path in old.into_iter().filter(|path| !seen.contains(path)) {
+            for path in paths_missing_from_root(&root, old, &seen) {
                 let deletion = RemoteDelete {
                     source_host: config.source_host.clone(),
                     root_name: root_name.clone(),
@@ -588,5 +599,27 @@ mod tests {
             });
             assert!(result.is_err());
         }
+    }
+
+    #[test]
+    fn source_sync_deletes_only_missing_paths_from_the_current_root() {
+        let tmp = tempdir().unwrap();
+        let root_a = tmp.path().join("docs-a");
+        let root_b = tmp.path().join("docs-b");
+        fs::create_dir(&root_a).unwrap();
+        fs::create_dir(&root_b).unwrap();
+        let still_present = root_a.join("keep.md").to_string_lossy().into_owned();
+        let missing = root_a.join("remove.md").to_string_lossy().into_owned();
+        let sibling_root = root_b.join("keep-too.md").to_string_lossy().into_owned();
+        let seen = BTreeSet::from([still_present.clone()]);
+
+        let stale = paths_missing_from_root(
+            &root_a,
+            vec![still_present, missing.clone(), sibling_root.clone()],
+            &seen,
+        );
+
+        assert_eq!(stale, vec![missing]);
+        assert!(!stale.contains(&sibling_root));
     }
 }
