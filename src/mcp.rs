@@ -87,7 +87,7 @@ struct DuplicateGroup {
     sha256: String,
     files: Vec<DuplicateFileHash>,
     logical_duplicate_bytes: u64,
-    physical_reclaimable_bytes: u64,
+    physical_reclaimable_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -706,11 +706,22 @@ impl MeshService {
             let total_bytes = files.iter().map(|file| file.size).sum::<u64>();
             let largest = files.iter().map(|file| file.size).max().unwrap_or_default();
             let mut physical = BTreeMap::<String, (u64, u64, usize)>::new();
+            let mut physical_known = true;
             for file in &files {
-                let key = format!("{}:{}", file.host_id, file.physical_file_id);
-                let entry = physical
-                    .entry(key)
-                    .or_insert((file.allocated_bytes, file.hard_link_count, 0));
+                let (Some(allocated_bytes), Some(physical_file_id), Some(hard_link_count)) = (
+                    file.allocated_bytes,
+                    file.physical_file_id.as_ref(),
+                    file.hard_link_count,
+                ) else {
+                    physical_known = false;
+                    continue;
+                };
+                let key = format!("{}:{}", file.host_id, physical_file_id);
+                let entry = physical.entry(key).or_insert((
+                    allocated_bytes,
+                    hard_link_count,
+                    0,
+                ));
                 entry.2 += 1;
             }
             let external_link_bytes = physical
@@ -718,26 +729,32 @@ impl MeshService {
                 .filter(|(_, links, paths)| *links > *paths as u64)
                 .map(|(bytes, _, _)| *bytes)
                 .sum::<u64>();
-            let allocated = physical.values().map(|(bytes, _, _)| *bytes).sum::<u64>();
-            let retained = if external_link_bytes > 0 {
-                external_link_bytes
+            let physical_reclaimable_bytes = if physical_known {
+                let allocated = physical.values().map(|(bytes, _, _)| *bytes).sum::<u64>();
+                let retained = if external_link_bytes > 0 {
+                    external_link_bytes
+                } else {
+                    physical
+                        .values()
+                        .map(|(bytes, _, _)| *bytes)
+                        .max()
+                        .unwrap_or_default()
+                };
+                Some(allocated.saturating_sub(retained))
             } else {
-                physical
-                    .values()
-                    .map(|(bytes, _, _)| *bytes)
-                    .max()
-                    .unwrap_or_default()
+                None
             };
             groups.push(DuplicateGroup {
                 sha256,
                 files,
                 logical_duplicate_bytes: total_bytes.saturating_sub(largest),
-                physical_reclaimable_bytes: allocated.saturating_sub(retained),
+                physical_reclaimable_bytes,
             });
         }
         groups.sort_by(|a, b| {
             b.physical_reclaimable_bytes
-                .cmp(&a.physical_reclaimable_bytes)
+                .unwrap_or_default()
+                .cmp(&a.physical_reclaimable_bytes.unwrap_or_default())
                 .then(a.sha256.cmp(&b.sha256))
         });
         let data = serde_json::to_value(DuplicateResult {
@@ -1549,15 +1566,20 @@ mod tests {
         assert_eq!(response.data["scanned_files"], 2);
         assert_eq!(response.data["groups"][0]["logical_duplicate_bytes"], 12);
         let physical = response.data["groups"][0]["physical_reclaimable_bytes"]
-            .as_u64()
-            .unwrap();
+            .as_u64();
         let allocated = response.data["files"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|file| file["allocated_bytes"].as_u64().unwrap())
+            .map(|file| file["allocated_bytes"].as_u64())
+            .collect::<Option<Vec<_>>>();
+        if let (Some(physical), Some(allocated)) = (physical, allocated) {
+            let allocated = allocated.into_iter()
             .sum::<u64>();
-        assert!(physical <= allocated);
+            assert!(physical <= allocated);
+        } else {
+            assert!(cfg!(not(unix)));
+        }
         assert!(first.exists() && second.exists());
     }
 

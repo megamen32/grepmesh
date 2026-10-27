@@ -734,7 +734,7 @@ fn tool_meta(name: &str, description: &str) -> Value {
             "properties": {
                 "hosts": hosts,
                 "roots": {"type": "array", "minItems": 1, "items": {"type": "string"}, "description": "Explicit configured root names only; arbitrary filesystem paths are rejected."},
-                "max_files": {"type": "integer", "minimum": 2, "maximum": 250, "default": 100, "description": "Maximum files per host. Files over 64 MiB or beyond a 512 MiB total hash budget are skipped."}
+                "max_files": {"type": "integer", "minimum": 2, "maximum": 250, "default": 100, "description": "Maximum files per host. Files over 64 MiB or beyond a 512 MiB total hash budget are skipped; physical reclaimable bytes are null where allocated-block metadata is unavailable."}
             }
         }),
         "read_text" => json!({

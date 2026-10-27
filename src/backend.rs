@@ -85,9 +85,9 @@ pub struct DuplicateFileHash {
     pub path: String,
     pub size: u64,
     pub sha256: String,
-    pub allocated_bytes: u64,
-    pub physical_file_id: String,
-    pub hard_link_count: u64,
+    pub allocated_bytes: Option<u64>,
+    pub physical_file_id: Option<String>,
+    pub hard_link_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1043,14 +1043,13 @@ impl LocalBackend {
             let (allocated_bytes, physical_file_id, hard_link_count) = {
                 use std::os::unix::fs::MetadataExt;
                 (
-                    after.blocks().saturating_mul(512),
-                    format!("{}:{}", after.dev(), after.ino()),
-                    after.nlink(),
+                    Some(after.blocks().saturating_mul(512)),
+                    Some(format!("{}:{}", after.dev(), after.ino())),
+                    Some(after.nlink()),
                 )
             };
             #[cfg(not(unix))]
-            let (allocated_bytes, physical_file_id, hard_link_count) =
-                (after.len(), path.to_string_lossy().to_string(), 1);
+            let (allocated_bytes, physical_file_id, hard_link_count) = (None, None, None);
             files.push(DuplicateFileHash {
                 host_id: self.host_id.clone(),
                 path: path.to_string_lossy().to_string(),
