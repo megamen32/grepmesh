@@ -1,0 +1,10 @@
+# Local evidence can contain full private infrastructure documentation snippets.
+# Commit scripts, compact scores and the explanation, never captured bodies.
+*.prompt.txt
+*.events.jsonl
+*.answer.txt
+*.stderr.txt
+native-*.txt
+native-events.jsonl
+native-stderr.txt
+native-answer.txt

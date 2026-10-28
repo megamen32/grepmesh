@@ -158,6 +158,10 @@ pub struct LimitsConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IndexActivityConfig {
+    /// Positive source-only allowlist: JSON {"version":1,"files":[absolute paths]}.
+    /// Loaded at startup; invalid/missing manifests fail closed.
+    #[serde(default)]
+    pub source_manifest: Option<PathBuf>,
     #[serde(default = "default_activity_window_ms")]
     pub window_ms: u64,
     #[serde(default = "default_hot_event_threshold")]
@@ -198,6 +202,7 @@ impl Default for IndexActivityConfig {
     fn default() -> Self {
         Self {
             window_ms: default_activity_window_ms(),
+            source_manifest: None,
             hot_event_threshold: default_hot_event_threshold(),
             hot_changed_bytes_threshold: default_hot_changed_bytes_threshold(),
             hot_debounce_ms: default_hot_debounce_ms(),

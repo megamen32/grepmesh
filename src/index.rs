@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
-    io::ErrorKind,
+    io::{ErrorKind, Read},
     path::{Path, PathBuf},
     sync::{mpsc, Arc, Mutex, RwLock},
     thread,
@@ -172,6 +172,63 @@ fn device_id(_: &fs::Metadata) -> Option<u64> {
 pub struct PersistentIndex {
     path: PathBuf,
     schema_initialized: Arc<Mutex<bool>>,
+    source_policy: Option<Arc<SourcePolicy>>,
+}
+
+#[derive(Debug)]
+struct SourcePolicy {
+    files: BTreeSet<PathBuf>,
+    directories: BTreeSet<PathBuf>,
+}
+
+impl SourcePolicy {
+    fn load(path: &Path, roots: &BTreeMap<String, Vec<PathBuf>>) -> Result<Self, String> {
+        #[derive(Deserialize)]
+        struct Manifest { version: u8, files: Vec<PathBuf> }
+        let canonical_path = fs::canonicalize(path).map_err(|_| "source manifest unavailable")?;
+        if !path.is_absolute() || canonical_path != path || !path.is_file() {
+            return Err("source manifest must be an absolute regular non-symlink path".into());
+        }
+        let file = fs::File::open(path).map_err(|_| "cannot open source manifest")?;
+        let mut bytes = Vec::new();
+        std::io::Read::take(file, 16 * 1024 * 1024 + 1).read_to_end(&mut bytes).map_err(|_| "cannot read source manifest")?;
+        if bytes.len() > 16 * 1024 * 1024 { return Err("source manifest exceeds 16MiB".into()) }
+        let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|_| "invalid source manifest JSON")?;
+        if manifest.version != 1 || manifest.files.len() > 100_000 {
+            return Err("invalid source manifest version or file count".into());
+        }
+        let roots = roots.values().flatten().cloned().collect::<BTreeSet<_>>();
+        for root in &roots {
+            if !root.is_absolute() || fs::canonicalize(root).ok().as_ref() != Some(root) {
+                return Err("source-only roots must be absolute without symlink traversal".into());
+            }
+        }
+        let mut files = BTreeSet::new();
+        let mut directories = BTreeSet::new();
+        for file in manifest.files {
+            if !file.is_absolute() || file.components().any(|part| matches!(part, std::path::Component::ParentDir))
+                || !file.is_file() || fs::canonicalize(&file).ok().as_ref() != Some(&file) {
+                return Err("source manifest contains missing/non-regular/symlink paths".into());
+            }
+            let Some(root) = roots.iter().filter(|root| file.starts_with(root) && &file != *root).max_by_key(|root| root.components().count()) else {
+                return Err("source manifest file is outside configured roots".into());
+            };
+            for parent in file.ancestors().skip(1).take_while(|parent| parent.starts_with(root)) {
+                directories.insert(parent.to_path_buf());
+            }
+            files.insert(file);
+        }
+        Ok(Self { files, directories })
+    }
+
+    fn allows_file(&self, path: &Path) -> bool {
+        self.files.contains(path) && fs::canonicalize(path).ok().as_deref() == Some(path)
+            && fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
+    }
+
+    fn allows_unit(&self, path: &Path) -> bool {
+        (self.directories.contains(path) && fs::canonicalize(path).ok().as_deref() == Some(path)) || self.allows_file(path)
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -185,6 +242,14 @@ pub struct CacheBodyCompactionBatch {
 }
 
 impl PersistentIndex {
+    fn source_allows_file(&self, path: &Path) -> bool {
+        self.source_policy.as_ref().is_none_or(|policy| policy.allows_file(path))
+    }
+
+    fn source_allows_unit(&self, path: &Path) -> bool {
+        self.source_policy.as_ref().is_none_or(|policy| policy.allows_unit(path))
+    }
+
     pub fn open(path: PathBuf) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
@@ -192,6 +257,7 @@ impl PersistentIndex {
         let store = Self {
             path,
             schema_initialized: Arc::new(Mutex::new(false)),
+            source_policy: None,
         };
         store.connection()?;
         store.migrate_cache_update_trigger()?;
@@ -209,6 +275,7 @@ impl PersistentIndex {
         let store = Self {
             path,
             schema_initialized: Arc::new(Mutex::new(false)),
+            source_policy: None,
         };
         // Maintenance must coexist with the live index writer. The normal
         // connection helper re-runs schema DDL and PRAGMA journal_mode=WAL,
@@ -681,6 +748,9 @@ impl PersistentIndex {
         document: &IndexedDocument,
         preserve_existing_body: bool,
     ) -> Result<(), String> {
+        if !self.source_allows_file(&document.path) {
+            return Err("source-only manifest denies document ingestion".into());
+        }
         let mut connection = self.connection()?;
         let transaction = connection
             .transaction()
@@ -1273,7 +1343,7 @@ impl PersistentIndex {
                 }
                 let id: i64 = row.get(0).map_err(|e| e.to_string())?;
                 let path = PathBuf::from(row.get::<_, String>(1).map_err(|e| e.to_string())?);
-                if !path.starts_with(root) || !allow(&path) || !seen.insert(id) {
+                if !path.starts_with(root) || !self.source_allows_file(&path) || !allow(&path) || !seen.insert(id) {
                     continue;
                 }
                 if seen.len() > 20_000 {
@@ -1625,6 +1695,25 @@ impl IndexManager {
         stt_config: SttConfig,
         ocr_config: OcrConfig,
     ) -> Self {
+        let source_policy = match activity_config.source_manifest.as_ref().map(|path| SourcePolicy::load(path, &roots)).transpose() {
+            Ok(policy) => policy.map(Arc::new),
+            Err(error) => {
+                let manager = Self::disabled();
+                if let Ok(mut state) = manager.snapshot.write() {
+                    state.state = IndexState::Degraded;
+                    state.last_error = Some(format!("source-only indexing refused: {error}"));
+                }
+                return manager;
+            }
+        };
+        if source_policy.is_some() && persistent_path.is_none() {
+            let manager = Self::disabled();
+            if let Ok(mut state) = manager.snapshot.write() {
+                state.state = IndexState::Degraded;
+                state.last_error = Some("source-only manifest requires a persistent index".into());
+            }
+            return manager;
+        }
         let snapshot = Arc::new(RwLock::new(IndexSnapshot {
             state: IndexState::Building,
             ..Default::default()
@@ -1638,7 +1727,7 @@ impl IndexManager {
             .as_ref()
             .and_then(|path| fs::metadata(path).ok())
             .is_some_and(|metadata| metadata.len() > 0);
-        let persistent =
+        let mut persistent =
             persistent_path.and_then(|path| match PersistentIndex::open(path.clone()) {
                 Ok(index) => Some(index),
                 Err(error) => {
@@ -1650,6 +1739,29 @@ impl IndexManager {
                     None
                 }
             });
+        if let Some(policy) = source_policy {
+            let result = persistent.as_mut().ok_or_else(|| "source-only persistent index unavailable".to_owned()).and_then(|index| {
+                index.source_policy = Some(Arc::clone(&policy));
+                index.prune_except(&policy.files)?;
+                let connection = index.connection()?;
+                // Re-evaluate newly admitted files on restart, independent of
+                // the ordinary weekly full-rebuild marker.
+                connection.execute("DELETE FROM grepmesh_metadata WHERE key='last_full_rebuild_ms'", []).map_err(|e| e.to_string())?;
+                let (pending, _) = index.load_pending_ocr()?;
+                for path in pending.into_iter().filter(|path| !policy.allows_file(path)) {
+                    index.ack_pending_ocr(&path)?;
+                }
+                Ok(())
+            });
+            if let Err(error) = result {
+                let manager = Self::disabled();
+                if let Ok(mut current) = manager.snapshot.write() {
+                    current.state = IndexState::Degraded;
+                    current.last_error = Some(format!("source-only index preparation failed: {error}"));
+                }
+                return manager;
+            }
+        }
         let persistent_state = persistent.clone();
         let stt = SttEngine::new(stt_config);
         let ocr = OcrEngine::new(ocr_config).map(Arc::new);
@@ -1695,6 +1807,7 @@ impl IndexManager {
             let watch_excludes = compile_excludes(&excludes).unwrap_or_default();
             let callback_roots = watch_roots.clone();
             let callback_excludes = watch_excludes.clone();
+            let callback_source_policy = persistent_state.as_ref().and_then(|index| index.source_policy.clone());
             let (watch_events, watch_rx) = mpsc::sync_channel(MAX_WATCH_RECOVERY_UNITS);
             thread::spawn(move || {
                 let mut watcher: RecommendedWatcher = match notify::recommended_watcher(
@@ -1712,7 +1825,8 @@ impl IndexManager {
                                     .paths
                                     .into_iter()
                                     .filter(|path| {
-                                        !watched_index_storage_path.as_ref().is_some_and(
+                                        callback_source_policy.as_ref().is_none_or(|policy| policy.files.contains(path) || policy.directories.contains(path))
+                                        && !watched_index_storage_path.as_ref().is_some_and(
                                             |index_path| is_index_storage_path(path, index_path),
                                         ) && callback_roots
                                             .iter()
@@ -2132,6 +2246,72 @@ impl IndexManager {
         case_sensitive: bool,
     ) -> Option<Vec<IndexTextHit>> {
         self.search_text_hits_filtered(query, root, limit, context_lines, case_sensitive, &[], &[])
+    }
+
+    /// Ranked retrieval is deliberately separate from the literal reader.
+    /// Only authorized paths reach `visit`; bodies never determine admission.
+    pub(crate) fn visit_ranked_documents(
+        &self,
+        terms: &[String],
+        roots: &[PathBuf],
+        path_globs: &[String],
+        exclude_globs: &[String],
+        deadline: Instant,
+        mut visit: impl FnMut(PathBuf, String),
+    ) -> Result<Option<bool>, String> {
+        let Some(store) = self.persistent.as_ref() else { return Ok(None) };
+        let connection = store.read_connection(deadline)?;
+        let ready = self.ready_roots.read().map_err(|e| e.to_string())?;
+        if !roots.iter().all(|root| ready.iter().any(|r| root.starts_with(r))) {
+            let baseline: Option<String> = connection.query_row(
+                "SELECT value FROM grepmesh_metadata WHERE key='last_full_rebuild_ms'", [],
+                |row| row.get(0)).optional().map_err(|e| e.to_string())?;
+            if baseline.is_none() { return Ok(None) }
+        }
+        drop(ready);
+        let excludes = compile_excludes(exclude_globs).map_err(|e| e.to_string())?;
+        let positive: Vec<String> = path_globs.iter().filter(|g| !g.starts_with('!')).cloned().collect();
+        let negative: Vec<String> = path_globs.iter().filter_map(|g| g.strip_prefix('!').map(str::to_owned)).collect();
+        let includes = compile_excludes(&positive).map_err(|e| e.to_string())?;
+        let rejects = compile_excludes(&negative).map_err(|e| e.to_string())?;
+        let query = terms.iter().map(|term| fts_literal_query(term)).collect::<Vec<_>>().join(" OR ");
+        let mut seen = BTreeSet::new();
+        let mut bytes = 0usize;
+        let mut complete = true;
+        let mut body = connection.prepare("SELECT body FROM grepmesh_documents WHERE rowid=?1 AND length(CAST(body AS BLOB))<=?2").map_err(|e| e.to_string())?;
+        for root in roots {
+            let stem = root.to_string_lossy();
+            let separator = std::path::MAIN_SEPARATOR;
+            let prefix = format!("{}{separator}", stem.trim_end_matches(separator));
+            let upper = format!("{}{}", stem.trim_end_matches(separator), char::from_u32(separator as u32 + 1).unwrap());
+            let path_clauses = terms.iter().enumerate().map(|(i, _)| format!("lower(path) LIKE ?{} ESCAPE '\\'", i + 5)).collect::<Vec<_>>().join(" OR ");
+            let sql = format!("SELECT d.fts_rowid,d.path FROM grepmesh_documents f JOIN grepmesh_document_rows d ON d.fts_rowid=f.rowid WHERE f.body MATCH ?1 AND (d.path=?2 OR (d.path>=?3 AND d.path<?4)) UNION SELECT fts_rowid,path FROM grepmesh_document_rows WHERE (path=?2 OR (path>=?3 AND path<?4)) AND ({path_clauses}) ORDER BY 2");
+            let mut arguments: Vec<rusqlite::types::Value> = vec![query.clone().into(), stem.to_string().into(), prefix.into(), upper.into()];
+            arguments.extend(terms.iter().map(|term| format!("%{}%", term.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")).into()));
+            let mut statement = connection.prepare(&sql)
+                .map_err(|e| e.to_string())?;
+            let mut rows = statement.query(rusqlite::params_from_iter(arguments)).map_err(|e| e.to_string())?;
+            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                if Instant::now() >= deadline { return Err("ranked indexed search deadline".into()) }
+                let id: i64 = row.get(0).map_err(|e| e.to_string())?;
+                let path = PathBuf::from(row.get::<_, String>(1).map_err(|e| e.to_string())?);
+                let relative = path.strip_prefix(root).unwrap_or(&path);
+                let matches = |set: &GlobSet| set.is_match(&path) || set.is_match(relative);
+                if !path.starts_with(root) || !store.source_allows_file(&path) || excluded(&path, root, &excludes)
+                    || (!positive.is_empty() && !matches(&includes)) || matches(&rejects)
+                    || !seen.insert(id) { continue }
+                // A canonical source path must remain inside the admitted root.
+                let Ok(canonical) = fs::canonicalize(&path) else { complete = false; continue };
+                if !canonical.starts_with(root) { complete = false; continue }
+                if seen.len() > 4096 || bytes >= 16 * 1024 * 1024 { return Ok(Some(false)) }
+                let remaining = (16 * 1024 * 1024 - bytes).min(1024 * 1024);
+                let text: Option<String> = body.query_row(params![id, remaining as i64], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
+                let Some(text) = text else { return Ok(Some(false)) };
+                bytes += text.len();
+                visit(path, text);
+            }
+        }
+        Ok(Some(complete))
     }
 
     pub fn search_text_hits_filtered(
@@ -2588,6 +2768,11 @@ fn reconcile_event_paths(
             .map(|relative| root.join(relative))
             .unwrap_or_else(|_| path.clone());
         let path = logical_path.as_path();
+        if !persistent.source_allows_file(path) {
+            let _ = persistent.remove_document(path);
+            if let Some(ocr) = ocr { ocr.forget_deferred(path); }
+            continue;
+        }
         if ocr.is_some_and(|engine| engine.is_in_flight(path)) {
             continue;
         }
@@ -2746,6 +2931,11 @@ fn retry_ocr_path(
     ocr: &OcrEngine,
     persistent: &PersistentIndex,
 ) {
+    if !persistent.source_allows_file(path) {
+        let _ = persistent.remove_document(path);
+        ocr.forget_deferred(path);
+        return;
+    }
     let metadata = match fs::symlink_metadata(path) {
         Ok(value) => value,
         Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -3039,6 +3229,9 @@ fn scan_directory_unit(
     metadata_only: Option<&GlobSet>,
     dispatch_mesh: bool,
 ) -> Result<DirectoryScan, String> {
+    if persistent.is_some_and(|index| !index.source_allows_unit(unit)) {
+        return Ok((0, BTreeMap::new(), Vec::new(), Vec::new()));
+    }
     let root_device = device_id(
         &fs::symlink_metadata(root).map_err(|error| format!("{}: {error}", root.display()))?,
     );
@@ -3179,6 +3372,9 @@ fn walk(
     map: &mut BTreeMap<String, BTreeSet<PathBuf>>,
     documents: &mut Vec<IndexedDocument>,
 ) -> Result<usize, String> {
+    if context.persistent.is_some_and(|index| !index.source_allows_unit(path)) {
+        return Ok(0);
+    }
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error)
@@ -3474,7 +3670,7 @@ fn excluded(path: &Path, root: &Path, excludes: &GlobSet) -> bool {
     let relative = path.strip_prefix(root).unwrap_or(path);
     let matches = |candidate: &Path| {
         excludes.is_match(candidate)
-            || excludes.is_match(candidate.join(".grepmesh-directory-probe"))
+            || excludes.is_match(candidate.join("grepmesh-directory-probe"))
     };
     matches(relative)
         || root
@@ -3486,6 +3682,96 @@ fn excluded(path: &Path, root: &Path, excludes: &GlobSet) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ranked_hidden_glob_does_not_exclude_regular_source_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("source");
+        std::fs::create_dir(&root).unwrap();
+        let file = root.join("main.rs");
+        std::fs::write(&file, "pub fn visible() {}\n").unwrap();
+        let excludes = super::compile_excludes(&["**/.*".into()]).unwrap();
+        assert!(!super::excluded(&file, &root, &excludes));
+        let directory = root.join("src");
+        std::fs::create_dir(&directory).unwrap();
+        assert!(!super::excluded(&directory, &root, &excludes));
+        let hidden = root.join(".env");
+        std::fs::write(&hidden, "hidden").unwrap();
+        assert!(super::excluded(&hidden, &root, &excludes));
+        let git = root.join(".git");
+        std::fs::create_dir(&git).unwrap();
+        assert!(super::excluded(&git, &root, &excludes));
+        let dependencies = root.join("node_modules");
+        std::fs::create_dir(&dependencies).unwrap();
+        let excludes = super::compile_excludes(&["**/node_modules/**".into()]).unwrap();
+        assert!(super::excluded(&dependencies, &root, &excludes));
+        let (count, _) = super::build_root_index(&root, &["**/.*".into(), "**/node_modules/**".into()], 1024).unwrap();
+        assert_eq!(count, 1, "visible source must be indexed; hidden/dependency paths must not");
+    }
+    #[test]
+    fn source_manifest_admits_only_explicit_files_before_extraction_and_persistence() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("source");
+        fs::create_dir(&root).unwrap();
+        let allowed = root.join("main.rs");
+        let denied = root.join("secret.json");
+        fs::write(&allowed, "pub fn allowed_canary() {}\n").unwrap();
+        fs::write(&denied, "private credential canary never store").unwrap();
+        let manifest = temp.path().join("manifest.json");
+        fs::write(&manifest, serde_json::to_vec(&serde_json::json!({"version":1,"files":[allowed]})).unwrap()).unwrap();
+        let roots = BTreeMap::from([("source".into(), vec![root.clone()])]);
+        let policy = SourcePolicy::load(&manifest, &roots).unwrap();
+        let mut index = PersistentIndex::open(temp.path().join("index.sqlite")).unwrap();
+        index.source_policy = Some(Arc::new(policy));
+        let matcher = compile_excludes(&[]).unwrap();
+        for path in [&allowed, &denied] {
+            let (_, _, documents, _) = scan_directory_unit(path, &root, &matcher, 1024, false, None, None, Some(&index), None, false).unwrap();
+            for document in documents { index.replace_indexed_document(&document).unwrap(); }
+        }
+        assert_eq!(index.document_count().unwrap(), 1);
+        assert_eq!(index.candidates("allowed_canary").unwrap(), vec![allowed.clone()]);
+        assert!(index.candidates("credential").unwrap().is_empty());
+        assert!(index.replace_document(&denied, "bypass attempt").is_err());
+        let new_file = root.join("new.rs");
+        fs::write(&new_file, "pub fn unadmitted_canary() {}\n").unwrap();
+        let (_, _, documents, _) = scan_directory_unit(&new_file, &root, &matcher, 1024, false, None, None, Some(&index), None, false).unwrap();
+        assert!(documents.is_empty());
+        // Reconciliation and metadata-only events share the same gate.
+        let config = IndexActivityConfig { metadata_only_globs: vec!["**".into()], ..Default::default() };
+        reconcile_event_paths(&BTreeSet::from([denied.clone(), new_file.clone()]), &BTreeMap::new(), &roots, &[], &config,
+            &mut BTreeMap::new(), &Arc::new(RwLock::new(IndexSnapshot::default())), 1024, None, None, &index, None);
+        assert_eq!(index.document_count().unwrap(), 1);
+        // A refreshed manifest revokes old persisted rows before they can be
+        // served after restart, even when the weekly rebuild is not due.
+        index.prune_except(&BTreeSet::new()).unwrap();
+        assert_eq!(index.document_count().unwrap(), 0);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn source_manifest_symlink_root_and_file_fail_closed() {
+        use super::*;
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("source"); fs::create_dir(&root).unwrap();
+        let file = root.join("main.rs"); fs::write(&file, "allowed").unwrap();
+        let outside = temp.path().join("outside.rs"); fs::write(&outside, "forbidden").unwrap();
+        let manifest = temp.path().join("manifest.json");
+        let roots = BTreeMap::from([("source".into(), vec![root.clone()])]);
+        fs::write(&manifest, serde_json::to_vec(&serde_json::json!({"version":1,"files":[file]})).unwrap()).unwrap();
+        let policy = SourcePolicy::load(&manifest, &roots).unwrap();
+        fs::remove_file(&file).unwrap(); symlink(&outside, &file).unwrap();
+        assert!(!policy.allows_file(&file));
+        assert!(SourcePolicy::load(&manifest, &roots).is_err());
+        let linked_root = temp.path().join("linked"); symlink(&root, &linked_root).unwrap();
+        let linked_roots = BTreeMap::from([("source".into(), vec![linked_root])]);
+        assert!(SourcePolicy::load(&manifest, &linked_roots).is_err());
+        let config = IndexActivityConfig { source_manifest: Some(temp.path().join("missing")), ..Default::default() };
+        let manager = IndexManager::start(roots, vec![], 1024, 1000, config, Some(temp.path().join("never.sqlite")), SttConfig::default(), OcrConfig::default());
+        assert!(!manager.is_enabled());
+        assert_eq!(manager.status().state, IndexState::Degraded);
+        assert!(!temp.path().join("never.sqlite").exists());
+    }
     #[test]
     fn persistent_index_clones_share_one_schema_initialization_guard() {
         use super::*;
@@ -4152,6 +4438,7 @@ mod tests {
         manager.persistent = Some(super::PersistentIndex {
             path,
             schema_initialized: Arc::new(Mutex::new(false)),
+            source_policy: None,
         });
         assert_eq!(manager.database_bytes(), Some(21));
         std::fs::remove_file(dir.path().join("index.sqlite-wal")).unwrap();

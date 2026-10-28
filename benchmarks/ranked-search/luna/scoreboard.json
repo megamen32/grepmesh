@@ -1,0 +1,343 @@
+{
+  "experiment": "retrieved-context-only; not an autonomous agent comparison",
+  "requested_model": "gpt-6-luna",
+  "native_execution": "codex exec --ignore-user-config --ephemeral --sandbox read-only; exact command in README",
+  "blind_passes": 2,
+  "contexts_shared_across_passes": true,
+  "query_repetitions": 1,
+  "tasks": [
+    "a01",
+    "a02",
+    "a05",
+    "b02"
+  ],
+  "summary": {
+    "literal": {
+      "supported_answers": 0,
+      "answerable_observations": 6,
+      "correct_abstentions": 2,
+      "unanswerable_observations": 2
+    },
+    "ranked": {
+      "supported_answers": 2,
+      "answerable_observations": 6,
+      "correct_abstentions": 2,
+      "unanswerable_observations": 2
+    },
+    "xerj": {
+      "supported_answers": 2,
+      "answerable_observations": 6,
+      "correct_abstentions": 2,
+      "unanswerable_observations": 2
+    }
+  },
+  "usage": [
+    {
+      "pass": 1,
+      "input_tokens": 43741,
+      "cached_input_tokens": 0,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 616,
+      "reasoning_output_tokens": 0
+    },
+    {
+      "pass": 2,
+      "input_tokens": 43741,
+      "cached_input_tokens": 0,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 552,
+      "reasoning_output_tokens": 0
+    }
+  ],
+  "format_anomalies": [
+    {
+      "pass": 1,
+      "trailing_characters": "}"
+    }
+  ],
+  "rows": [
+    {
+      "pass": 1,
+      "task": "a01",
+      "engine": "ranked",
+      "alias": "P1-01",
+      "answerable": true,
+      "fact_supported": false,
+      "abstained": true,
+      "citations": []
+    },
+    {
+      "pass": 1,
+      "task": "a02",
+      "engine": "literal",
+      "alias": "P1-02",
+      "answerable": true,
+      "fact_supported": false,
+      "abstained": true,
+      "citations": []
+    },
+    {
+      "pass": 1,
+      "task": "a05",
+      "engine": "ranked",
+      "alias": "P1-03",
+      "answerable": false,
+      "fact_supported": false,
+      "abstained": true,
+      "citations": []
+    },
+    {
+      "pass": 1,
+      "task": "a02",
+      "engine": "xerj",
+      "alias": "P1-04",
+      "answerable": true,
+      "fact_supported": true,
+      "abstained": false,
+      "citations": [
+        {
+          "path": "docs/inventory/devices/android.md",
+          "lines": "1-32"
+        }
+      ]
+    },
+    {
+      "pass": 1,
+      "task": "b02",
+      "engine": "xerj",
+      "alias": "P1-05",
+      "answerable": true,
+      "fact_supported": false,
+      "abstained": true,
+      "citations": []
+    },
+    {
+      "pass": 1,
+      "task": "b02",
+      "engine": "literal",
+      "alias": "P1-06",
+      "answerable": true,
+      "fact_supported": false,
+      "abstained": true,
+      "citations": []
+    },
+    {
+      "pass": 1,
+      "task": "b02",
+      "engine": "ranked",
+      "alias": "P1-07",
+      "answerable": true,
+      "fact_supported": false,
+      "abstained": true,
+      "citations": []
+    },
+    {
+      "pass": 1,
+      "task": "a02",
+      "engine": "ranked",
+      "alias": "P1-08",
+      "answerable": true,
+      "fact_supported": true,
+      "abstained": false,
+      "citations": [
+        {
+          "path": "/home/roomhacker/ServersAdministartion/docs/inventory/devices/android.md",
+          "lines": "32-111"
+        },
+        {
+          "path": "/home/roomhacker/ServersAdministartion/docs/inventory/devices/mac-m1.md",
+          "lines": "58-66"
+        }
+      ]
+    },
+    {
+      "pass": 1,
+      "task": "a05",
+      "engine": "literal",
+      "alias": "P1-09",
+      "answerable": false,
+      "fact_supported": false,
+      "abstained": true,
+      "citations": []
+    },
+    {
+      "pass": 1,
+      "task": "a01",
+      "engine": "literal",
+      "alias": "P1-10",
+      "answerable": true,
+      "fact_supported": false,
+      "abstained": true,
+      "citations": [
+        {
+          "path": "/home/roomhacker/ServersAdministartion/docs/inventory/devices/android.md",
+          "lines": "90-98"
+        }
+      ]
+    },
+    {
+      "pass": 1,
+      "task": "a05",
+      "engine": "xerj",
+      "alias": "P1-11",
+      "answerable": false,
+      "fact_supported": false,
+      "abstained": true,
+      "citations": []
+    },
+    {
+      "pass": 1,
+      "task": "a01",
+      "engine": "xerj",
+      "alias": "P1-12",
+      "answerable": true,
+      "fact_supported": false,
+      "abstained": true,
+      "citations": [
+        {
+          "path": "docs/inventory/devices/android.md",
+          "lines": "164-200"
+        }
+      ]
+    },
+    {
+      "pass": 2,
+      "task": "b02",
+      "engine": "xerj",
+      "alias": "P2-01",
+      "answerable": true,
+      "fact_supported": false,
+      "abstained": true,
+      "citations": [
+        {
+          "path": "docs/inventory/ports.md",
+          "lines": "49\u201360"
+        }
+      ]
+    },
+    {
+      "pass": 2,
+      "task": "b02",
+      "engine": "literal",
+      "alias": "P2-02",
+      "answerable": true,
+      "fact_supported": false,
+      "abstained": true,
+      "citations": []
+    },
+    {
+      "pass": 2,
+      "task": "a05",
+      "engine": "ranked",
+      "alias": "P2-03",
+      "answerable": false,
+      "fact_supported": false,
+      "abstained": true,
+      "citations": []
+    },
+    {
+      "pass": 2,
+      "task": "b02",
+      "engine": "ranked",
+      "alias": "P2-04",
+      "answerable": true,
+      "fact_supported": false,
+      "abstained": true,
+      "citations": []
+    },
+    {
+      "pass": 2,
+      "task": "a01",
+      "engine": "xerj",
+      "alias": "P2-05",
+      "answerable": true,
+      "fact_supported": false,
+      "abstained": true,
+      "citations": []
+    },
+    {
+      "pass": 2,
+      "task": "a02",
+      "engine": "xerj",
+      "alias": "P2-06",
+      "answerable": true,
+      "fact_supported": true,
+      "abstained": false,
+      "citations": [
+        {
+          "path": "docs/inventory/devices/android.md",
+          "lines": "1\u201332"
+        }
+      ]
+    },
+    {
+      "pass": 2,
+      "task": "a05",
+      "engine": "xerj",
+      "alias": "P2-07",
+      "answerable": false,
+      "fact_supported": false,
+      "abstained": true,
+      "citations": []
+    },
+    {
+      "pass": 2,
+      "task": "a05",
+      "engine": "literal",
+      "alias": "P2-08",
+      "answerable": false,
+      "fact_supported": false,
+      "abstained": true,
+      "citations": []
+    },
+    {
+      "pass": 2,
+      "task": "a01",
+      "engine": "literal",
+      "alias": "P2-09",
+      "answerable": true,
+      "fact_supported": false,
+      "abstained": true,
+      "citations": []
+    },
+    {
+      "pass": 2,
+      "task": "a01",
+      "engine": "ranked",
+      "alias": "P2-10",
+      "answerable": true,
+      "fact_supported": false,
+      "abstained": true,
+      "citations": []
+    },
+    {
+      "pass": 2,
+      "task": "a02",
+      "engine": "literal",
+      "alias": "P2-11",
+      "answerable": true,
+      "fact_supported": false,
+      "abstained": true,
+      "citations": []
+    },
+    {
+      "pass": 2,
+      "task": "a02",
+      "engine": "ranked",
+      "alias": "P2-12",
+      "answerable": true,
+      "fact_supported": true,
+      "abstained": false,
+      "citations": [
+        {
+          "path": "docs/inventory/devices/android.md",
+          "lines": "32\u2013111"
+        },
+        {
+          "path": "docs/inventory/devices/mac-m1.md",
+          "lines": "58\u201366"
+        }
+      ]
+    }
+  ]
+}

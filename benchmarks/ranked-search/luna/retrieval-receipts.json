@@ -1,0 +1,98 @@
+[
+  {
+    "task": "a01",
+    "engine": "literal",
+    "elapsed_ms": 102.13,
+    "contexts": 3,
+    "partial": false,
+    "truncated": true
+  },
+  {
+    "task": "a01",
+    "engine": "ranked",
+    "elapsed_ms": 316.47,
+    "contexts": 3,
+    "partial": false,
+    "truncated": true
+  },
+  {
+    "task": "a01",
+    "engine": "xerj",
+    "elapsed_ms": 4.11,
+    "contexts": 3,
+    "partial": null,
+    "truncated": null
+  },
+  {
+    "task": "a02",
+    "engine": "literal",
+    "elapsed_ms": 120.49,
+    "contexts": 0,
+    "partial": false,
+    "truncated": false
+  },
+  {
+    "task": "a02",
+    "engine": "ranked",
+    "elapsed_ms": 586.03,
+    "contexts": 3,
+    "partial": false,
+    "truncated": true
+  },
+  {
+    "task": "a02",
+    "engine": "xerj",
+    "elapsed_ms": 58.51,
+    "contexts": 3,
+    "partial": null,
+    "truncated": null
+  },
+  {
+    "task": "a05",
+    "engine": "literal",
+    "elapsed_ms": 123.65,
+    "contexts": 0,
+    "partial": false,
+    "truncated": false
+  },
+  {
+    "task": "a05",
+    "engine": "ranked",
+    "elapsed_ms": 508.24,
+    "contexts": 3,
+    "partial": false,
+    "truncated": true
+  },
+  {
+    "task": "a05",
+    "engine": "xerj",
+    "elapsed_ms": 48.15,
+    "contexts": 3,
+    "partial": null,
+    "truncated": null
+  },
+  {
+    "task": "b02",
+    "engine": "literal",
+    "elapsed_ms": 112.44,
+    "contexts": 0,
+    "partial": false,
+    "truncated": false
+  },
+  {
+    "task": "b02",
+    "engine": "ranked",
+    "elapsed_ms": 472.49,
+    "contexts": 3,
+    "partial": false,
+    "truncated": true
+  },
+  {
+    "task": "b02",
+    "engine": "xerj",
+    "elapsed_ms": 47.86,
+    "contexts": 3,
+    "partial": null,
+    "truncated": null
+  }
+]

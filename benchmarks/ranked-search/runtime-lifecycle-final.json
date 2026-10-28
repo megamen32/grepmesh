@@ -1,0 +1,81 @@
+{
+  "binary": "/home/roomhacker/.local/share/grepmesh-ranked/releases/a5e22cb67f48ef3f95acbe7eebd0633875f997fe1aa08c423de23091956d1b87/grepmesh-mcp",
+  "binary_sha256": "a5e22cb67f48ef3f95acbe7eebd0633875f997fe1aa08c423de23091956d1b87",
+  "phases": [
+    {
+      "name": "initial_manifest_three_files",
+      "ok": true,
+      "row_counts": {
+        "A.md": 1,
+        "B.md": 1,
+        "admitted-create.md": 1
+      }
+    },
+    {
+      "name": "admitted_delete_recreate",
+      "ok": true,
+      "deleted_row_pruned": true,
+      "recreated_row_count": 1
+    },
+    {
+      "name": "edit_source_verified",
+      "ok": true,
+      "old_marker_match": false,
+      "new_marker_paths": [
+        "/tmp/grepmesh-lifecycle-m3clvfd8/root/A.md"
+      ],
+      "freshness": [
+        "source_verified"
+      ]
+    },
+    {
+      "name": "rename_over_admitted_B",
+      "ok": true,
+      "old_A_rows": 0,
+      "new_B_rows": 1
+    },
+    {
+      "name": "delete_B_row",
+      "ok": true,
+      "B_rows": 0
+    },
+    {
+      "name": "unadmitted_file_denied",
+      "ok": true,
+      "row_count": 0,
+      "ranked_match": false,
+      "result_paths": []
+    },
+    {
+      "name": "allowed_path_symlink_denied",
+      "ok": true,
+      "row_count": 0,
+      "ranked_match": false,
+      "result_paths": []
+    },
+    {
+      "name": "restart_manifest_revocation_prunes",
+      "ok": true,
+      "row_counts": {
+        "A.md": 0,
+        "B.md": 0,
+        "admitted-create.md": 1,
+        "secret.json": 0
+      }
+    },
+    {
+      "name": "invalid_manifest_degraded_partial",
+      "ok": true,
+      "state": "Degraded",
+      "partial": true,
+      "indexed_files": 0
+    }
+  ],
+  "cleanup": "isolated process stopped; temporary directory removed",
+  "initial": {
+    "state": "Ready",
+    "indexed_files": 3
+  },
+  "final_state": "Degraded",
+  "all_phases_pass": true
+}

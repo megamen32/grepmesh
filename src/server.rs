@@ -120,7 +120,8 @@ pub async fn run_server(mut config: AppConfig) -> Result<()> {
     topology.retain_known_peers(&config.peers);
     // OCR discovery follows the same protected live/cache routes as search;
     // never force indexing clients to construct a local CPU session for mesh.
-    config.ocr.mesh_peers = crate::compute_client::merge_compute_peers(topology.clone(), &config.ocr.mesh_peers);
+    config.ocr.mesh_peers =
+        crate::compute_client::merge_compute_peers(topology.clone(), &config.ocr.mesh_peers);
     if config.compute.enabled {
         let local_compute_address = config.local_bind.unwrap_or_else(|| {
             if config.bind.ip().is_unspecified() {
@@ -632,12 +633,13 @@ async fn handle_rpc_inner(state: AppState, payload: Value) -> Result<Value> {
                 "protocolVersion": protocol_version,
                 "serverInfo": {"name": "grepmesh", "version": env!("CARGO_PKG_VERSION")},
                 "capabilities": {"tools": {"listChanged": false}},
-                "instructions": "Use GrepMesh when the location is unknown, the search may span multiple mesh hosts, or its configured cross-host scopes are needed. For a known local checkout or explicitly named local path, prefer bounded shell rg/find; it is faster and avoids unnecessary mesh fan-out. For GrepMesh, start with search, set a small wait_ms for multi-host requests, and use read_text only for an exact result path and host. If a search returns state=running, call search_status with its job_id. Surface partial host_status failures rather than treating partial results as complete.",
+                "instructions": "Use GrepMesh when the location is unknown, the search may span multiple mesh hosts, or its configured cross-host scopes are needed. For a known local checkout or explicitly named local path, prefer bounded shell rg/find; it is faster and avoids unnecessary mesh fan-out. Use search for exact literal or regex matching and ranked_search for bounded relevance-ranked retrieval. For multi-host search, set a small wait_ms and use read_text only for an exact result path and host. If a search returns state=running, call search_status with its job_id. Surface partial host_status failures rather than treating partial results as complete.",
             })
         }
         "tools/list" => json!({
             "tools": [
                 tool_meta("search", "Search file names and indexed content across one or more hosts."),
+                tool_meta("ranked_search", "Retrieve relevance-ranked passages from indexed content across one or more hosts; partial coverage is reported explicitly."),
                 tool_meta("find_paths", "Find file paths across one or more hosts."),
                 tool_meta("find_duplicates", "Hash a bounded sample from configured roots or validated subpaths and report duplicate paths and reclaimable bytes without deleting files."),
                 tool_meta("read_text", "Read a text file from a specific host."),
@@ -700,6 +702,18 @@ fn tool_meta(name: &str, description: &str) -> Value {
                 "filename": {"type": "string", "description": "Optional basename with matching allowed extension; never a path to read."},
                 "execution_provider": {"type": "string", "enum": ["cpu", "cuda", "coreml"], "description": "Only this host's available CPU or configured accelerator; never a remote override."},
                 "task_class": {"type": "string", "maxLength": 80, "description": "Optional shared TaskDescriptor class; verified against actual input before inference."}
+            }
+        }),
+        "ranked_search" => json!({
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": {"type": "string", "minLength": 1, "maxLength": 2048},
+                "hosts": hosts,
+                "roots": {"type": "array", "items": {"type": "string"}},
+                "path_globs": {"type": "array", "items": {"type": "string"}},
+                "limit": {"type": "integer", "minimum": 1},
+                "context_lines": {"type": "integer", "minimum": 0, "maximum": 12}
             }
         }),
         "search" | "search_text" => json!({
@@ -765,11 +779,15 @@ fn tool_meta(name: &str, description: &str) -> Value {
         }),
         _ => json!({"type": "object", "properties": {"hosts": hosts}}),
     };
-    json!({
+    let mut metadata = json!({
         "name": name,
         "description": description,
         "inputSchema": schema
-    })
+    });
+    if matches!(name, "ranked_search" | "search" | "search_text" | "read_text" | "find_paths" | "list_locations" | "list_directory" | "search_status") {
+        metadata["annotations"] = json!({"readOnlyHint": true, "destructiveHint": false});
+    }
+    metadata
 }
 
 async fn call_tool(service: &MeshService, jobs: &SearchJobs, params: Value) -> Result<Value> {
@@ -783,6 +801,11 @@ async fn call_tool(service: &MeshService, jobs: &SearchJobs, params: Value) -> R
         .cloned();
     apply_filesystem_acl_metadata(name, &mut arguments, delegated_acl)?;
     let tool_result = match name {
+        "ranked_search" => {
+            service
+                .call_ranked_search(serde_json::from_value(arguments)?)
+                .await?
+        }
         "search" | "search_text" => {
             let mut arguments = arguments;
             let explicit_wait_ms = arguments.get("wait_ms").and_then(Value::as_u64);
@@ -877,9 +900,14 @@ fn apply_filesystem_acl_metadata(
     arguments: &mut Value,
     delegated_acl: Option<Value>,
 ) -> Result<()> {
-    let supported = matches!(name, "search" | "search_text" | "read_text");
+    let supported = matches!(
+        name,
+        "search" | "search_text" | "ranked_search" | "read_text"
+    );
     if delegated_acl.is_some() && !supported {
-        anyhow::bail!("GPTAdmin filesystem ACL is valid only for GrepMesh search/read_text")
+        anyhow::bail!(
+            "GPTAdmin filesystem ACL is valid only for GrepMesh search/ranked_search/read_text"
+        )
     }
     let Some(object) = arguments.as_object_mut() else {
         if delegated_acl.is_some() {
@@ -1055,6 +1083,15 @@ fn bound_tool_data(mut data: Value, max_bytes: usize) -> anyhow::Result<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retrieval_tools_declare_read_only_annotations() {
+        for name in ["ranked_search", "search", "search_text", "read_text", "find_paths", "list_locations", "list_directory", "search_status"] {
+            let meta = super::tool_meta(name, "test");
+            assert_eq!(meta["annotations"]["readOnlyHint"], true, "{name}");
+            assert_eq!(meta["annotations"]["destructiveHint"], false, "{name}");
+        }
+        assert!(super::tool_meta("ocr_extract", "test")["annotations"].is_null());
+    }
     use super::*;
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1110,7 +1147,9 @@ mod tests {
         let empty_roots = filesystem_acl_fixture("");
         assert!(apply_filesystem_acl_metadata("search", &mut invalid, Some(empty_roots)).is_err());
         let mut non_search = json!({});
-        assert!(apply_filesystem_acl_metadata("find_duplicates", &mut non_search, Some(acl)).is_err());
+        assert!(
+            apply_filesystem_acl_metadata("find_duplicates", &mut non_search, Some(acl)).is_err()
+        );
     }
 
     #[test]

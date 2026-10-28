@@ -1,0 +1,306 @@
+{
+  "corpus_id": "serversadmin-docs-2026-10-28",
+  "corpus_scope": {
+    "source_repo": "/home/roomhacker/ServersAdministartion/docs",
+    "xerj_index": "serversadmin-docs",
+    "xerj_records_at_capture": 15042,
+    "grepmesh_scope": {
+      "hosts": [
+        "local"
+      ],
+      "root": "/home/roomhacker/ServersAdministartion/docs",
+      "root_alias": "infra-docs"
+    },
+    "note": "Use the same documentation scope. XERJ index currently represents the repo docs corpus; GrepMesh is restricted to docs root. Results need path normalization before scoring.",
+    "xerj_filter": {
+      "prefix": {
+        "ax_path": "docs/"
+      }
+    }
+  },
+  "tasks": [
+    {
+      "id": "a01",
+      "class": "exact_identifier",
+      "query": "s21-lease",
+      "gold_paths": [
+        "docs/inventory/devices/android.md",
+        "infra/android-s21/README.md"
+      ],
+      "gold_facts": [
+        "Lease is required before interactive S21 use; returned lease_id must be exported for adb."
+      ],
+      "answerable": true
+    },
+    {
+      "id": "a02",
+      "class": "natural_language",
+      "query": "How can the phone remain reachable over SSH if its USB host changes?",
+      "gold_paths": [
+        "docs/inventory/devices/android.md",
+        "infra/android-s21/README.md"
+      ],
+      "gold_facts": [
+        "The phone maintains its own reverse SSH to server-100; it does not depend on its current USB host."
+      ],
+      "answerable": true
+    },
+    {
+      "id": "a03",
+      "class": "snake_case",
+      "query": "agent-device devices --json",
+      "gold_paths": [
+        "docs/inventory/devices/android.md"
+      ],
+      "gold_facts": [
+        "agent-device is the standard control interface when it reports the physical S21 serial."
+      ],
+      "answerable": true
+    },
+    {
+      "id": "a05",
+      "class": "negative",
+      "query": "What is the owner's personal S21 unlock PIN?",
+      "gold_paths": [],
+      "gold_facts": [],
+      "answerable": false
+    },
+    {
+      "id": "b01",
+      "class": "exact_identifier",
+      "query": "MatrixRTC",
+      "gold_paths": [
+        "docs/inventory/services/communications.md",
+        "docs/runbooks/airlock-app-bridge.md"
+      ],
+      "gold_facts": [
+        "Voice tests must use isolated Matrix bot participants and a test room; personal accounts and phone routes are excluded."
+      ],
+      "answerable": true
+    },
+    {
+      "id": "b02",
+      "class": "natural_language",
+      "query": "Where may test voice calls be placed, and which recipients are forbidden?",
+      "gold_paths": [
+        "docs/inventory/services/communications.md"
+      ],
+      "gold_facts": [
+        "Only between separate test Matrix/MatrixRTC bot accounts in an isolated test room; never call a real person for QA."
+      ],
+      "answerable": true
+    },
+    {
+      "id": "b03",
+      "class": "exact_identifier",
+      "query": "TEST_ACCESS",
+      "gold_paths": [
+        "docs/inventory/services/communications.md",
+        "docs/runbooks/airlock-app-bridge.md"
+      ],
+      "gold_facts": [
+        "Voice acceptance evidence records test Matrix participants and receipt, with zero real phone dials/notifications."
+      ],
+      "answerable": true
+    },
+    {
+      "id": "b05",
+      "class": "negative",
+      "query": "Which personal Matrix room should be used to test calls?",
+      "gold_paths": [],
+      "gold_facts": [],
+      "answerable": false
+    },
+    {
+      "id": "c01",
+      "class": "exact_identifier",
+      "query": "/airlock-mcp",
+      "gold_paths": [
+        "docs/runbooks/airlock-app-bridge.md",
+        "docs/inventory/sites/airlock.md"
+      ],
+      "gold_facts": [
+        "The Airlock MCP bridge is served through the documented /airlock-mcp ingress path."
+      ],
+      "answerable": true
+    },
+    {
+      "id": "c02",
+      "class": "natural_language",
+      "query": "How does a remote MCP request travel through the Airlock bridge?",
+      "gold_paths": [
+        "docs/runbooks/airlock-app-bridge.md"
+      ],
+      "gold_facts": [
+        "The runbook documents ingress, upstream, bearer handling, and native route checks for the bridge."
+      ],
+      "answerable": true
+    },
+    {
+      "id": "c03",
+      "class": "snake_case",
+      "query": "mcp_servers",
+      "gold_paths": [
+        "docs/runbooks/airlock-app-bridge.md"
+      ],
+      "gold_facts": [
+        "The runbook gives the supported mcp_servers configuration for connecting the bridge."
+      ],
+      "answerable": true
+    },
+    {
+      "id": "c05",
+      "class": "ambiguous",
+      "query": "Airlock bearer",
+      "gold_paths": [
+        "docs/runbooks/airlock-app-bridge.md",
+        "docs/inventory/sites/airlock.md"
+      ],
+      "gold_facts": [
+        "Could refer to the bridge's caller authorization or a service-side credential; return both relevant docs or clarify scope."
+      ],
+      "answerable": true
+    },
+    {
+      "id": "d01",
+      "class": "exact_identifier",
+      "query": "automatic_health_diagnosis",
+      "gold_paths": [
+        "docs/runbooks/noticeplace-health-executor-20261021.md",
+        "docs/inventory/sites/notify.md"
+      ],
+      "gold_facts": [
+        "The scope flag gates implicit health diagnosis; an explicit agent_job path is a distinct transition and must be checked separately."
+      ],
+      "answerable": true
+    },
+    {
+      "id": "d02",
+      "class": "natural_language",
+      "query": "How does omniroute-guard decide whether its main route is healthy?",
+      "gold_paths": [
+        "docs/runbooks/omniroute-fallback-guard.md"
+      ],
+      "gold_facts": [
+        "It makes a live POST probe and checks the response model field rather than relying on the HTTP status alone."
+      ],
+      "answerable": true
+    },
+    {
+      "id": "d03",
+      "class": "camel_case",
+      "query": "activeFallback",
+      "gold_paths": [
+        "docs/runbooks/omniroute-fallback-guard.md"
+      ],
+      "gold_facts": [
+        "The documented runtime state uses snake_case active_fallback, so the camelCase query tests normalization or retrieval robustness."
+      ],
+      "answerable": true
+    },
+    {
+      "id": "d04",
+      "class": "ambiguous",
+      "query": "fallback when busy",
+      "gold_paths": [
+        "docs/runbooks/omniroute-fallback-guard.md",
+        "docs/inventory/services/proxy5-registry.md"
+      ],
+      "gold_facts": [
+        "Could refer to model-provider recovery or proxy registry behavior; both docs should be surfaced if the intent remains ambiguous."
+      ],
+      "answerable": true
+    },
+    {
+      "id": "e01",
+      "class": "exact_identifier",
+      "query": "homeassistant:8443",
+      "gold_paths": [
+        "infra/access-topology.md",
+        "docs/inventory/devices/haos.md"
+      ],
+      "gold_facts": [
+        "Public HTTPS recovery flow can route from WAN to Home Assistant on port 8443 when server-100 fails."
+      ],
+      "answerable": true
+    },
+    {
+      "id": "e02",
+      "class": "natural_language",
+      "query": "What remains available if server-100 fails?",
+      "gold_paths": [
+        "infra/access-topology.md"
+      ],
+      "gold_facts": [
+        "Recovery-plane proxy, direct emergency ports, and Home Assistant remain available subject to listed dependencies."
+      ],
+      "answerable": true
+    },
+    {
+      "id": "e03",
+      "class": "natural_language",
+      "query": "Which host runs the authoritative failover controller?",
+      "gold_paths": [
+        "infra/access-topology.md",
+        "docs/inventory/devices/haos.md"
+      ],
+      "gold_facts": [
+        "The authoritative failover controller runs inside the HAOS recovery add-on."
+      ],
+      "answerable": true
+    },
+    {
+      "id": "e04",
+      "class": "negative",
+      "query": "What is the router's private SSH key value?",
+      "gold_paths": [],
+      "gold_facts": [],
+      "answerable": false
+    },
+    {
+      "id": "f01",
+      "class": "exact_identifier",
+      "query": "windows-roomhacker",
+      "gold_paths": [
+        "infra/access-topology.md",
+        "docs/inventory/devices/windows.md"
+      ],
+      "gold_facts": [
+        "Windows is a first-class LAN operator node and has documented reachability relationships."
+      ],
+      "answerable": true
+    },
+    {
+      "id": "f02",
+      "class": "natural_language",
+      "query": "Which nodes must be able to reach the Windows operator workstation?",
+      "gold_paths": [
+        "infra/access-topology.md"
+      ],
+      "gold_facts": [
+        "Server-88, server-100, server-44, and Home Assistant are listed in the reachability matrix."
+      ],
+      "answerable": true
+    },
+    {
+      "id": "f03",
+      "class": "camel_case",
+      "query": "MacBook-Pro-User.local",
+      "gold_paths": [
+        "docs/inventory/devices/mac-m1.md"
+      ],
+      "gold_facts": [
+        "The durable Mac reverse SSH is reached through the documented server-100 loopback SSH port and hostname check."
+      ],
+      "answerable": true
+    },
+    {
+      "id": "f04",
+      "class": "negative",
+      "query": "What is the Windows account password?",
+      "gold_paths": [],
+      "gold_facts": [],
+      "answerable": false
+    }
+  ]
+}

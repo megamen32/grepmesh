@@ -3,6 +3,7 @@ use crate::{
         dedup_hits, DirectoryEntry, DuplicateFileHash, DuplicateScan, LocalBackend, Location,
         PerHostStatus, ReadResponse, SearchHit, SearchMode, SearchResponse, StatusResponse,
     },
+    ranked::{RankedCoverage, RankedHit, RankedOutcome, RankedRequest},
     topology::Topology,
 };
 use anyhow::{anyhow, Result};
@@ -19,9 +20,9 @@ use std::{
 use tokio::time::timeout;
 
 pub use mesh_core::request::{normalize_request, HostsInput, NormalizedRequest};
-use mesh_core::transport::{is_direct_connect_error, PeerTransport};
 #[cfg(test)]
 use mesh_core::transport::validated_loopback_proxy_url;
+use mesh_core::transport::{is_direct_connect_error, PeerTransport};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SearchArgs {
@@ -48,6 +49,61 @@ pub struct SearchArgs {
     pub roots: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) filesystem_acl: Option<FilesystemAcl>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RankedSearchArgs {
+    pub query: String,
+    #[serde(default)]
+    pub hosts: Option<HostsInput>,
+    #[serde(default)]
+    pub roots: Vec<String>,
+    #[serde(default)]
+    pub path_globs: Vec<String>,
+    #[serde(default, alias = "max_matches")]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub context_lines: Option<usize>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub origin_host: Option<String>,
+    #[serde(default)]
+    pub hop_count: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) filesystem_acl: Option<FilesystemAcl>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RankedIndexState {
+    host_id: String,
+    index_generation: u64,
+    index_state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RankedSearchResponse {
+    request_id: String,
+    origin_host: String,
+    hop_count: u8,
+    host_id: String,
+    partial: bool,
+    truncated: bool,
+    coverage: RankedCoverage,
+    results: Vec<RankedHit>,
+    host_status: Vec<PerHostStatus>,
+    index_status: Vec<RankedIndexState>,
+    warnings: Vec<String>,
+}
+
+struct RankedHostResult {
+    hits: Vec<RankedHit>,
+    status: Vec<PerHostStatus>,
+    index_status: Vec<RankedIndexState>,
+    warnings: Vec<String>,
+    partial: bool,
+    truncated: bool,
+    coverage: RankedCoverage,
 }
 
 /// The existing GPTAdmin filesystem ACL is carried only from the authenticated
@@ -79,7 +135,9 @@ impl FilesystemAcl {
             || !valid_sha256_hex(&self.roots_digest)
             || !valid_sha256_hex(&self.args_sha256)
             || roots.is_empty()
-            || roots.iter().any(|root| !std::path::Path::new(root).is_absolute())
+            || roots
+                .iter()
+                .any(|root| !std::path::Path::new(root).is_absolute())
         {
             anyhow::bail!("invalid or empty GPTAdmin filesystem read ACL")
         }
@@ -91,7 +149,9 @@ impl FilesystemAcl {
             return false;
         };
         path.is_absolute()
-            && !path.components().any(|part| matches!(part, std::path::Component::ParentDir))
+            && !path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
             && roots.iter().any(|root| path.starts_with(root))
     }
 }
@@ -598,6 +658,323 @@ impl MeshService {
         ))
     }
 
+    pub async fn call_ranked_search(&self, args: RankedSearchArgs) -> Result<ToolResult> {
+        self.call_ranked_search_with_overall_timeout(
+            args,
+            Duration::from_millis(self.local.limits.overall_timeout_ms),
+        )
+        .await
+    }
+
+    async fn call_ranked_search_with_overall_timeout(
+        &self,
+        args: RankedSearchArgs,
+        overall_timeout: Duration,
+    ) -> Result<ToolResult> {
+        let RankedSearchArgs {
+            query,
+            hosts,
+            roots,
+            path_globs,
+            limit,
+            context_lines,
+            request_id,
+            origin_host,
+            hop_count,
+            filesystem_acl,
+        } = args;
+        let acl_read_roots = filesystem_acl
+            .as_ref()
+            .map(|acl| acl.validate_read().map(|roots| roots.to_vec()))
+            .transpose()?;
+        let normalized = normalize_request(
+            &self.local.host_id,
+            self.known_host_ids(),
+            hosts,
+            request_id,
+            origin_host,
+            hop_count,
+        )?;
+        self.claim_request(&normalized.request_id)?;
+        let limit = limit
+            .unwrap_or(self.local.limits.max_results)
+            .min(self.local.limits.max_results);
+        anyhow::ensure!(limit > 0, "ranked search limit must be at least one");
+        let context_lines = context_lines
+            .unwrap_or(self.local.limits.context_lines)
+            .min(12);
+        let local_read_roots = acl_read_roots.unwrap_or_else(|| {
+            self.local
+                .list_locations()
+                .into_iter()
+                .filter(|location| {
+                    roots.is_empty() || roots.iter().any(|root| root == &location.name)
+                })
+                .map(|location| location.path)
+                .collect()
+        });
+
+        let mut pending = FuturesUnordered::new();
+        let mut pending_hosts = BTreeSet::new();
+        for target in unique_hosts(&normalized.hosts) {
+            pending_hosts.insert(target.clone());
+            let service = self.clone();
+            let query = query.clone();
+            let roots = roots.clone();
+            let path_globs = path_globs.clone();
+            let filesystem_acl = filesystem_acl.clone();
+            let local_read_roots = local_read_roots.clone();
+            let request_id = normalized.request_id.clone();
+            let origin_host = normalized.origin_host.clone();
+            let base_hop_count = normalized.hop_count;
+            pending.push(async move {
+                let result = if target == service.local.host_id {
+                    service
+                        .local
+                        .ranked_search_bounded(RankedRequest {
+                            query,
+                            roots,
+                            read_roots: local_read_roots,
+                            path_globs,
+                            limit,
+                            context_lines,
+                            overall_timeout,
+                        })
+                        .await
+                        .map(|outcome| ranked_local_result(&service.local.host_id, outcome))
+                } else if filesystem_acl.is_none() {
+                    Ok(RankedHostResult {
+                        hits: Vec::new(),
+                        status: vec![PerHostStatus::partial(
+                            target.clone(),
+                            "remote ranked search requires a verified GPTAdmin filesystem ACL",
+                        )],
+                        index_status: Vec::new(),
+                        warnings: vec![
+                            "remote ranked search requires a verified GPTAdmin filesystem ACL"
+                                .into(),
+                        ],
+                        partial: true,
+                        truncated: false,
+                        coverage: RankedCoverage::NoCoverage,
+                    })
+                } else {
+                    async {
+                        let peer = service
+                            .peer_config(&target)
+                            .ok_or_else(|| anyhow!("unknown peer {target}"))?;
+                        let hop_count =
+                            hop_count_for(&service.local.host_id, &target, base_hop_count)?;
+                        let value = service
+                            .call_remote(
+                                &peer,
+                                "ranked_search",
+                                json!({
+                                    "query": query,
+                                    "hosts": ["local"],
+                                    "roots": roots,
+                                    "path_globs": path_globs,
+                                    "limit": limit,
+                                    "context_lines": context_lines,
+                                    "request_id": request_id,
+                                    "origin_host": origin_host,
+                                    "hop_count": hop_count,
+                                    "filesystem_acl": filesystem_acl,
+                                }),
+                            )
+                            .await?;
+                        let mut response = decode_tool_result::<RankedSearchResponse>(value)?;
+                        anyhow::ensure!(
+                            response.host_id == target,
+                            "ranked peer identity mismatch: expected {target}, got {}",
+                            response.host_id
+                        );
+                        normalize_host_statuses(&mut response.host_status, response.partial);
+                        for hit in &response.results {
+                            anyhow::ensure!(
+                                hit.host_id == target,
+                                "ranked peer returned a hit for another host"
+                            );
+                            anyhow::ensure!(
+                                filesystem_acl.as_ref().is_some_and(
+                                    |acl| acl.allows_path(std::path::Path::new(&hit.path))
+                                ),
+                                "ranked peer returned a path outside the verified filesystem ACL"
+                            );
+                            // Ranked scores are query-relative and clamped to
+                            // [0, 100] on every peer.
+                            anyhow::ensure!(
+                                hit.score.is_finite() && (0.0..=100.0).contains(&hit.score),
+                                "ranked peer returned an invalid normalized score"
+                            );
+                        }
+                        anyhow::ensure!(
+                            response
+                                .host_status
+                                .iter()
+                                .all(|status| status.host_id == target),
+                            "ranked peer returned status for another host"
+                        );
+                        anyhow::ensure!(
+                            response
+                                .index_status
+                                .iter()
+                                .all(|status| status.host_id == target),
+                            "ranked peer returned index state for another host"
+                        );
+                        Ok(RankedHostResult {
+                            hits: response.results,
+                            status: response.host_status,
+                            index_status: response.index_status,
+                            warnings: response.warnings,
+                            partial: response.partial,
+                            truncated: response.truncated,
+                            coverage: response.coverage,
+                        })
+                    }
+                    .await
+                };
+                (target, result)
+            });
+        }
+
+        let mut results = Vec::new();
+        let mut host_status = Vec::new();
+        let mut index_status = Vec::new();
+        let mut warnings = Vec::new();
+        let mut partial = false;
+        let mut coverage = RankedCoverage::NoCoverage;
+        let mut truncated = false;
+        let deadline = Instant::now() + overall_timeout;
+        while !pending_hosts.is_empty() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                partial = true;
+                host_status.extend(
+                    pending_hosts
+                        .iter()
+                        .cloned()
+                        .map(|host| PerHostStatus::failed(host, "overall timeout")),
+                );
+                break;
+            }
+            match timeout(remaining, pending.next()).await {
+                Ok(Some((host, Ok(mut outcome)))) => {
+                    pending_hosts.remove(&host);
+                    partial |= outcome.partial || outcome.status.iter().any(|status| !status.ok);
+                    truncated |= outcome.truncated;
+                    coverage = merge_ranked_coverage(coverage, outcome.coverage);
+                    for warning in outcome.warnings.drain(..) {
+                        warnings.push(format!("{host}: {warning}"));
+                    }
+                    results.append(&mut outcome.hits);
+                    index_status.append(&mut outcome.index_status);
+                    if outcome.status.is_empty() {
+                        outcome.status.push(if outcome.partial {
+                            PerHostStatus::partial(host.clone(), "ranked coverage is partial")
+                        } else {
+                            PerHostStatus::complete(host.clone())
+                        });
+                    }
+                    host_status.append(&mut outcome.status);
+                }
+                Ok(Some((host, Err(error)))) => {
+                    pending_hosts.remove(&host);
+                    partial = true;
+                    host_status.push(PerHostStatus::failed(host.clone(), error.to_string()));
+                    warnings.push(format!("{host}: {error}"));
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    partial = true;
+                    host_status.extend(
+                        pending_hosts
+                            .iter()
+                            .cloned()
+                            .map(|host| PerHostStatus::failed(host, "overall timeout")),
+                    );
+                    break;
+                }
+            }
+        }
+
+        results.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.host_id.cmp(&b.host_id))
+                .then_with(|| a.path.cmp(&b.path))
+                .then_with(|| a.line_number.cmp(&b.line_number))
+        });
+        let mut seen = BTreeSet::new();
+        results.retain(|hit| seen.insert((hit.host_id.clone(), hit.path.clone(), hit.line_number)));
+        truncated |= results.len() > limit;
+        results.truncate(limit);
+        partial |= host_status.iter().any(|status| !status.ok);
+        let mut response = RankedSearchResponse {
+            request_id: normalized.request_id.clone(),
+            origin_host: normalized.origin_host.clone(),
+            hop_count: normalized.hop_count,
+            host_id: self.local.host_id.clone(),
+            partial,
+            truncated,
+            coverage,
+            results,
+            host_status: host_status.clone(),
+            index_status,
+            warnings,
+        };
+        let max_response_bytes = self.local.limits.max_response_bytes;
+        if max_response_bytes > 0 {
+            for warning in &mut response.warnings {
+                *warning = truncate_utf8(warning, 512);
+            }
+            for status in &mut response.host_status {
+                if let Some(error) = status.error.as_mut() {
+                    *error = truncate_utf8(error, 512);
+                }
+            }
+            while ranked_tool_wire_size(&response)? > max_response_bytes {
+                if response.results.pop().is_some() {
+                    response.truncated = true;
+                    continue;
+                }
+                if response.warnings.pop().is_some() {
+                    response.truncated = true;
+                    continue;
+                }
+                let mut shortened = false;
+                for status in &mut response.host_status {
+                    if let Some(error) = status.error.as_mut() {
+                        if error.len() > 96 {
+                            *error = truncate_utf8(error, 96);
+                            shortened = true;
+                        }
+                    }
+                }
+                if shortened {
+                    response.truncated = true;
+                    continue;
+                }
+                anyhow::bail!(
+                    "ranked response metadata exceeds configured max_response_bytes ({max_response_bytes})"
+                );
+            }
+        }
+        let partial = response.partial;
+        let truncated = response.truncated;
+        let host_status = response.host_status.clone();
+        let data = serde_json::to_value(response)?;
+        Ok(self.wrap_result(
+            normalized.request_id,
+            normalized.origin_host,
+            normalized.hop_count,
+            partial,
+            truncated,
+            host_status,
+            data,
+        ))
+    }
+
     pub async fn call_find_paths(&self, args: FindPathsArgs) -> Result<ToolResult> {
         let FindPathsArgs {
             query,
@@ -787,11 +1164,9 @@ impl MeshService {
                     continue;
                 };
                 let key = format!("{}:{}", file.host_id, physical_file_id);
-                let entry = physical.entry(key).or_insert((
-                    allocated_bytes,
-                    hard_link_count,
-                    0,
-                ));
+                let entry = physical
+                    .entry(key)
+                    .or_insert((allocated_bytes, hard_link_count, 0));
                 entry.2 += 1;
             }
             let external_link_bytes = physical
@@ -1554,10 +1929,20 @@ impl MeshService {
         }
     }
     async fn call_remote_direct(&self, url: &str, tool: &str, arguments: Value) -> Result<Value> {
-        self.peer_transport().call_remote_direct(url, tool, arguments).await
+        self.peer_transport()
+            .call_remote_direct(url, tool, arguments)
+            .await
     }
-    async fn call_remote_via_gptadmin_proxy(&self, proxy: &str, url: &str, tool: &str, arguments: Value) -> Result<Value> {
-        self.peer_transport().call_remote_via_gptadmin_proxy(proxy, url, tool, arguments).await
+    async fn call_remote_via_gptadmin_proxy(
+        &self,
+        proxy: &str,
+        url: &str,
+        tool: &str,
+        arguments: Value,
+    ) -> Result<Value> {
+        self.peer_transport()
+            .call_remote_via_gptadmin_proxy(proxy, url, tool, arguments)
+            .await
     }
     #[cfg(test)]
     fn redacted_outbound_error(error: &reqwest::Error) -> String {
@@ -1625,13 +2010,75 @@ fn normalize_host_statuses(statuses: &mut [PerHostStatus], response_partial: boo
     }
 }
 
+fn ranked_local_result(host_id: &str, outcome: RankedOutcome) -> RankedHostResult {
+    let status = if outcome.partial {
+        PerHostStatus::partial(
+            host_id,
+            if outcome.warnings.is_empty() {
+                "ranked coverage is partial".to_string()
+            } else {
+                outcome.warnings.join("; ")
+            },
+        )
+    } else {
+        PerHostStatus::complete(host_id)
+    };
+    RankedHostResult {
+        hits: outcome.hits,
+        status: vec![status],
+        index_status: vec![RankedIndexState {
+            host_id: host_id.to_string(),
+            index_generation: outcome.index_generation,
+            index_state: outcome.index_state,
+        }],
+        warnings: outcome.warnings,
+        partial: outcome.partial,
+        truncated: outcome.truncated,
+        coverage: outcome.coverage,
+    }
+}
+
+fn merge_ranked_coverage(a: RankedCoverage, b: RankedCoverage) -> RankedCoverage {
+    match (a, b) {
+        (RankedCoverage::StrongMatch, _) | (_, RankedCoverage::StrongMatch) => {
+            RankedCoverage::StrongMatch
+        }
+        (RankedCoverage::WeakMatch, _) | (_, RankedCoverage::WeakMatch) => {
+            RankedCoverage::WeakMatch
+        }
+        _ => RankedCoverage::NoCoverage,
+    }
+}
+
+fn ranked_tool_wire_size(response: &RankedSearchResponse) -> Result<usize> {
+    let text = serde_json::to_string(response)?;
+    let tool_result = json!({
+        "content": [{"type": "text", "text": text}],
+        "isError": false
+    });
+    // Leave room for the enclosing JSON-RPC result and id fields.
+    Ok(serde_json::to_vec(&tool_result)?.len().saturating_add(128))
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut end = max_bytes.saturating_sub(3).min(value.len());
+    while !value.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    format!("{}...", &value[..end])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::HostSearchState;
 
     #[tokio::test]
-    async fn lossless_body_copy_find_duplicates_returns_hashes_and_measured_reclaimable_bytes_without_deleting() {
+    async fn lossless_body_copy_find_duplicates_returns_hashes_and_measured_reclaimable_bytes_without_deleting(
+    ) {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("docs");
         std::fs::create_dir_all(&root).unwrap();
@@ -1664,8 +2111,7 @@ mod tests {
         assert_eq!(response.data["groups"].as_array().unwrap().len(), 1);
         assert_eq!(response.data["scanned_files"], 2);
         assert_eq!(response.data["groups"][0]["logical_duplicate_bytes"], 12);
-        let physical = response.data["groups"][0]["physical_reclaimable_bytes"]
-            .as_u64();
+        let physical = response.data["groups"][0]["physical_reclaimable_bytes"].as_u64();
         let allocated = response.data["files"]
             .as_array()
             .unwrap()
@@ -1673,8 +2119,7 @@ mod tests {
             .map(|file| file["allocated_bytes"].as_u64())
             .collect::<Option<Vec<_>>>();
         if let (Some(physical), Some(allocated)) = (physical, allocated) {
-            let allocated = allocated.into_iter()
-                .sum::<u64>();
+            let allocated = allocated.into_iter().sum::<u64>();
             assert!(physical <= allocated);
         } else {
             assert!(cfg!(not(unix)));
@@ -1723,11 +2168,17 @@ mod tests {
             remote_index: None,
         };
         let service = MeshService::new(local, Topology::new("test", vec![]));
-        let args = || serde_json::from_value::<SearchArgs>(json!({
-            "query":"deadline needle", "hosts":["test"], "mode":"literal",
-            "max_matches":5, "context_lines":0
-        })).unwrap();
-        let result = service.call_search_with_overall_timeout(args(), Duration::from_secs(5)).await.unwrap();
+        let args = || {
+            serde_json::from_value::<SearchArgs>(json!({
+                "query":"deadline needle", "hosts":["test"], "mode":"literal",
+                "max_matches":5, "context_lines":0
+            }))
+            .unwrap()
+        };
+        let result = service
+            .call_search_with_overall_timeout(args(), Duration::from_secs(5))
+            .await
+            .unwrap();
         assert_eq!(result.data["partial"], false);
         assert_eq!(result.data["results"].as_array().unwrap().len(), 1);
         let interactive = service.call_search(args()).await.unwrap();

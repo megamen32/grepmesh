@@ -1,0 +1,1517 @@
+{
+  "captured_at_utc": "2026-10-28T18:31:51.579570+00:00",
+  "phase": "post-v2-ranked-and-interleaved-exact",
+  "repo_root": "/home/roomhacker/ServersAdministartion",
+  "docs_root": "/home/roomhacker/ServersAdministartion/docs",
+  "git_head": "6299c0efacf81d53ee0f34ca19d16f40641dbc9f",
+  "git_status_scoped_docs": [
+    " M docs/inventory/devices/88.md",
+    " M docs/inventory/generated-nginx/README.md",
+    " M docs/inventory/generated-nginx/kube.md",
+    " D docs/inventory/generated-nginx/simplysmeta.bezrabotnyi.com.md",
+    " M docs/runbooks/airlock-app-bridge.md",
+    "?? docs/inventory/generated-nginx/broker-admin.bezrabotnyi.com.md",
+    "?? docs/inventory/generated-nginx/lhc.bezrabotnyi.com.md",
+    "?? docs/inventory/generated-nginx/qa-board.bezrabotnyi.com.md",
+    "?? docs/inventory/sites/tg.md"
+  ],
+  "regular_file_count": 299,
+  "total_bytes": 2359136,
+  "files": [
+    {
+      "path": "docs/codex-auth-sync.md",
+      "size_bytes": 3128,
+      "sha256": "8aba3eb4e8b2e3600a67729a9f2ff0be817267c02f76dd4366072b36271a7f96"
+    },
+    {
+      "path": "docs/codex-server100-connection-recovery.md",
+      "size_bytes": 2519,
+      "sha256": "952115fdf5b4182ce9a8d1eeb5fbc491a265aa77253b4830d72d02ef1afce445"
+    },
+    {
+      "path": "docs/example-com-antifraud-spec.md",
+      "size_bytes": 29714,
+      "sha256": "3af0a2844b8cae2a25ff1aacc20bf52137eb4e5c471ff70a613e77063ca227cc"
+    },
+    {
+      "path": "docs/fleet-write-profile-20260906.md",
+      "size_bytes": 3769,
+      "sha256": "ec7a4fca437787c14e8ef8c1da1dce44a619cfb398f1883217e8644320de1122"
+    },
+    {
+      "path": "docs/personal-data-policy-ip-rozanov.md",
+      "size_bytes": 10378,
+      "sha256": "49fbd00df90565a94c667ff1f7366e87c0021ec5da253be0eeedf81d6c1292a6"
+    },
+    {
+      "path": "docs/harness/codex-instruction-sync.md",
+      "size_bytes": 5690,
+      "sha256": "ef04119ce9635feb8e6727cfe8a52180b7715826915949cc5ebc5b0865a7ff18"
+    },
+    {
+      "path": "docs/harness/fix-what-you-find.md",
+      "size_bytes": 843,
+      "sha256": "1656942d1e807f0d023c989f4b23b45b07523d43912b7a213b92a363e95dbfc4"
+    },
+    {
+      "path": "docs/harness/infrastructure-source.md",
+      "size_bytes": 1331,
+      "sha256": "af741105ce3b9913ad5a90b874d0ae51c381c89340f8c8b33e290824be978835"
+    },
+    {
+      "path": "docs/inventory/README.md",
+      "size_bytes": 4783,
+      "sha256": "7f497763715c7fb2b896672909cf3b813f831da63c102e16e7b783a49b227c88"
+    },
+    {
+      "path": "docs/inventory/domains.md",
+      "size_bytes": 2897,
+      "sha256": "5e1ed4b83553af691e6579bcf281d213547362d21ab89a0df5ea536d7bf82094"
+    },
+    {
+      "path": "docs/inventory/fleet-2026-09-05.md",
+      "size_bytes": 9506,
+      "sha256": "82c623dcb63d8928691fd7152dbcfc0b8b0b7b52881fa66b5f6f9e2156c7043b"
+    },
+    {
+      "path": "docs/inventory/operational-exceptions.md",
+      "size_bytes": 3120,
+      "sha256": "385fa8aab58426f5d48b04824461becd4321269f840c89f370d2b58b1180855f"
+    },
+    {
+      "path": "docs/inventory/pending-evidence.md",
+      "size_bytes": 3360,
+      "sha256": "f8eaf77d7ed5ada789b9ad45de93332541cecb056ee25379c8ae287e366b82b7"
+    },
+    {
+      "path": "docs/inventory/ports.md",
+      "size_bytes": 7714,
+      "sha256": "524a675866077bafa8b887520a4ebc2a3445560390efb5e70f9a834b58075a9a"
+    },
+    {
+      "path": "docs/inventory/repositories.md",
+      "size_bytes": 9939,
+      "sha256": "23a3f6f2e1f7ff6e3fc53c3b71b1a8032f320cc163ec677935ab3b557b691823"
+    },
+    {
+      "path": "docs/inventory/repository-state.md",
+      "size_bytes": 1147,
+      "sha256": "631643b15d43b99a1526ee20d2294e4cda0f1e712b79816e4c5050dd21e27e42"
+    },
+    {
+      "path": "docs/inventory/route-coverage.md",
+      "size_bytes": 10514,
+      "sha256": "0195ea9a36d33e486b2e985b851e12ff543b811bbb05187324e1076040567f4e"
+    },
+    {
+      "path": "docs/inventory/secret-locations.md",
+      "size_bytes": 6609,
+      "sha256": "0443b136c9b05824bb119ff1cbd8ebfb9b177b0a138890f1a93f1bf004c81fb5"
+    },
+    {
+      "path": "docs/inventory/site-coverage.md",
+      "size_bytes": 2995,
+      "sha256": "3358096a9b878c379870e000dd5a83e89ddc5112b70bbfbc5531ef2d4189489a"
+    },
+    {
+      "path": "docs/inventory/sites.md",
+      "size_bytes": 19732,
+      "sha256": "5c831280ee18f61ae4eef8270643c23fc1ffe8b10f027e63352657afe1f23993"
+    },
+    {
+      "path": "docs/inventory/source-gaps.md",
+      "size_bytes": 1027,
+      "sha256": "cebe240f90fd20573580b4ec2e2d335171ebe96f0e7fcc6affd2cd7832db40d2"
+    },
+    {
+      "path": "docs/inventory/devices/100.md",
+      "size_bytes": 23059,
+      "sha256": "38c04cdf53866561be4472d1135d9023595deb5ea526cc28330cbe4951c25e21"
+    },
+    {
+      "path": "docs/inventory/devices/44.md",
+      "size_bytes": 5469,
+      "sha256": "ab6137d628d25bb27268d772c0fe828e4be870ef8af23d6f8a0c314d6803aded"
+    },
+    {
+      "path": "docs/inventory/devices/88.md",
+      "size_bytes": 25681,
+      "sha256": "9d0846e438fa5f9b495fa7db1c18f5003c7a21c47a803b60178af3d06b907672"
+    },
+    {
+      "path": "docs/inventory/devices/airlock-demo-vm.md",
+      "size_bytes": 2324,
+      "sha256": "fa77c3baeb466fd0793cdce9326c2e6ef113241aa52db12489fc31542336fe50"
+    },
+    {
+      "path": "docs/inventory/devices/android.md",
+      "size_bytes": 20420,
+      "sha256": "ec83ae1ef7064568456d42993246cb2a4afe05d155dcd996d81d7ba18894437c"
+    },
+    {
+      "path": "docs/inventory/devices/finland.md",
+      "size_bytes": 2210,
+      "sha256": "31bc4a874671d1eeec8941cc043b5e2750b804481ab75afc227531756857fbf1"
+    },
+    {
+      "path": "docs/inventory/devices/haos.md",
+      "size_bytes": 21175,
+      "sha256": "413a4c6d25c7931ba24074c5f1d21acea832d3b654c75646f1b42193cccae0dd"
+    },
+    {
+      "path": "docs/inventory/devices/ios.md",
+      "size_bytes": 1008,
+      "sha256": "fc9f4db01bfad1836a9fbe37b3383c86993953e46fadb0e508a185149bcf0463"
+    },
+    {
+      "path": "docs/inventory/devices/mac-m1.md",
+      "size_bytes": 6983,
+      "sha256": "a800494d4076a07c9df402d3551064397de248141861865796ae54272ba81fc2"
+    },
+    {
+      "path": "docs/inventory/devices/mac-mini.md",
+      "size_bytes": 8584,
+      "sha256": "c21ca90a1ad3630fc05ea8054b7fa8f1ec18a8a05397298de80055ea259edb34"
+    },
+    {
+      "path": "docs/inventory/devices/router.md",
+      "size_bytes": 21800,
+      "sha256": "0d2a89accd31e82a0a461c609ff99f64a82067f1135734e368b78b75b8a0ab65"
+    },
+    {
+      "path": "docs/inventory/devices/vpn2.md",
+      "size_bytes": 12459,
+      "sha256": "309e5a8694a1f6232d935abadab59225caadc4b996feb92734ee50024e66478a"
+    },
+    {
+      "path": "docs/inventory/devices/vusa.md",
+      "size_bytes": 36998,
+      "sha256": "af3fa774802e8541822eca0f1471204d0ed0cd36ddf5c69578d1973a7b7d7375"
+    },
+    {
+      "path": "docs/inventory/devices/windows-beyondinfinity.md",
+      "size_bytes": 2120,
+      "sha256": "be9b86af2c9879efbe0e902a3634f0f32da9d5750f0acca1bc3f7aa6bc69b808"
+    },
+    {
+      "path": "docs/inventory/devices/windows.md",
+      "size_bytes": 933,
+      "sha256": "55e76b831302714e14804ec28d54cc5ca7c61e36056feb384a20726d17b1eeaa"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/00-airlock-demo88.conf.md",
+      "size_bytes": 1543,
+      "sha256": "5203c1c16e9026cc00544b005205a44797bbe970272fa6e7d15f5148c2446a0c"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/44.bezrabotnyi.com.md",
+      "size_bytes": 1497,
+      "sha256": "78b090208d8e0661f6c52faef6c814761589b025ed43fc3d7f7c9978b2705891"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/88.bezrabotnyi.com.md",
+      "size_bytes": 1498,
+      "sha256": "366359cb5cbb43ed928654a6d852d29b9d6e8892b411e30128c5fb9af668b14d"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/README.md",
+      "size_bytes": 10049,
+      "sha256": "f961f5ad840fb3c7a78d2ab168c4af35df86f2e77de7752c31cc11321e20c2ff"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/admin.auto-gram.ru.md",
+      "size_bytes": 1475,
+      "sha256": "702818b24d149b3747d0e4a609554932a93a3ef0b1554b091710455f1621894e"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/admin.bezrabotnyi.com.md",
+      "size_bytes": 1489,
+      "sha256": "049ad9de57a254eecb3e5b4c1042ba1313584f68e9720e10621096fdad88d9c4"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/admin.debate.bezrabotnyi.com.md",
+      "size_bytes": 1567,
+      "sha256": "1f34e1346538e78313c1e40bd832c6cdc0ae8b123540ceacee3aef8f09748fcd"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/admin.lllm.bezrabotnyi.com.md",
+      "size_bytes": 1554,
+      "sha256": "656d2d0fb68cb258929813ea49d2b7d54c7f87981e19bc374e74222eb9ad6c30"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/agent-mac-m1.bezrabotnyi.com.md",
+      "size_bytes": 1620,
+      "sha256": "1be5b1fe6f44f016c42589043273e5d35d9185c2f347b458e412c2994a6aa39e"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/agent-mac-mini.bezrabotnyi.com.md",
+      "size_bytes": 1628,
+      "sha256": "fbf9079e37111ff1281af41dd139e5327cee361f0b48ece11614ec93a49290bd"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/agent44.bezrabotnyi.com.md",
+      "size_bytes": 1600,
+      "sha256": "1dc773c4cc9a513e7e103f328bd56e032fe22e0e94c7f25ee6a3572d04112943"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/agentmemory.bezrabotnyi.com.md",
+      "size_bytes": 1564,
+      "sha256": "50927a6e916901e168fc34465a6162036a3f5f747430e1e4f72a7dd05195f51c"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/airlock-max-preview.bezrabotnyi.com.md",
+      "size_bytes": 1676,
+      "sha256": "0600dca205d33d8334bd7a8474d1ac6d41deecdbd194564c25c255f732ee4cfb"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/airlockrun.bezrabotnyi.com.md",
+      "size_bytes": 1610,
+      "sha256": "ec5c495c385eca5b74f1194136d53c66cad28ab61d84cd9262f1413b02a8e330"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/all.bezrabotnyi.com.md",
+      "size_bytes": 1504,
+      "sha256": "87c39e279d10ae9ae9cc7f446d01392c11b07b6be7ac8fee96e1a5b9d107df80"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/android-mcp.bezrabotnyi.com.md",
+      "size_bytes": 1561,
+      "sha256": "44b3f34fc15ea38834b06ae52820e2997bc30469989c6c7845ab59e6e155b833"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/android.bezrabotnyi.com.md",
+      "size_bytes": 1439,
+      "sha256": "059cc5803958e731b62f08eae65fc5798d615163af0e7b95c8c595351adc2cd9"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/antiwhore.auto-gram.ru.md",
+      "size_bytes": 1492,
+      "sha256": "4af860ef5640d8b018bc986ef164e034e70a1c6fa73d1fb73893c1065862b15f"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/artem.bezrabotnyi.com.md",
+      "size_bytes": 1537,
+      "sha256": "a621076674aece11d0c2aae0d7b76c68249a453e9c812f9f751aa6564b839ba6"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/auth.bezrabotnyi.com.md",
+      "size_bytes": 1503,
+      "sha256": "dbfd83c6bfe4c9b7e0cabdc52ab5a180bd5fa4046401d38384909e57713c639b"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/auto-gram.ru.md",
+      "size_bytes": 1586,
+      "sha256": "c2cbeece2c3fe2987443280759cd996291596baa46e79d423307fd4e8c66799b"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/autogramwebhook.auto-gram.ru.md",
+      "size_bytes": 1516,
+      "sha256": "8ff82a032311ccc892fd356336107d690f1829feb88750c988d41c51efd5c7ad"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/autopost.bezrabotnyi.com.md",
+      "size_bytes": 1520,
+      "sha256": "68ec99d1cefa5da8990011e118dffbe8f1fec9cb358f4296058845f69360fd7d"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/babel.bezrabotnyi.com.http.md",
+      "size_bytes": 1484,
+      "sha256": "0a91ce3a8c8324c3458818c61a6d17729ce94bc267d5a729ee43b87ee81f3090"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/babel.bezrabotnyi.com.md",
+      "size_bytes": 1442,
+      "sha256": "c660641ecee7b5c3119ceebae23ab105be7e6419406b46dc123b6dc082e92357"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/became.bezrabotnyi.com.conf.md",
+      "size_bytes": 1698,
+      "sha256": "a3d48d70029aef643a273ce28980d65b0dfca030532d4fe443ce7746c47b9b0f"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/bench.demiurge.space.md",
+      "size_bytes": 1534,
+      "sha256": "cd871bb8fea2b6359e0c6a73de76982aa126e61a25570b16f903c63a4ea9d721"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/bloggers.bezrabotnyi.com.md",
+      "size_bytes": 1549,
+      "sha256": "9e59df0165a4a47319c29e4f420884901f193706a9e408439cd81ed0685a5456"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/book.bezrabotnyi.com.md",
+      "size_bytes": 1536,
+      "sha256": "79c848385427fc2da172d8fa1f25b198274f8d2052f65b24a9e0e9526306403d"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/broker-admin.bezrabotnyi.com.md",
+      "size_bytes": 1565,
+      "sha256": "52057749b76b29d496e037bb8be909a16c608956b628e218c29d2a77f26c6341"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/browser.bezrabotnyi.com.md",
+      "size_bytes": 1495,
+      "sha256": "04f38a8319a5bff89b3255b3c44bc4d3f9ea972e57e8bec6381586f8d78f6a9a"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/captcha.bezrabotnyi.com.md",
+      "size_bytes": 1498,
+      "sha256": "b1f06ddd88267df6d0861ef87e36c9a9e1905ac608bdd13cbdfb44dbc24e4126"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/chat.bezrabotnyi.com.md",
+      "size_bytes": 1564,
+      "sha256": "ed585dfa77680dc8a4a05f662e97c49aea21e7b652e65e71ddc75d1cedf8a12b"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/checker.auto-gram.ru.md",
+      "size_bytes": 1484,
+      "sha256": "9191a4b18f675625965a51895c78c8afccc3e13481a47bf08caee2f93159f0d2"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/cockpit.bezrabotnyi.com.md",
+      "size_bytes": 1496,
+      "sha256": "6374756a5208b3bb41a4d10d08b3bffa52228ed0e410a4ccc0b398e49fa9eb55"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/cockpit88.bezrabotnyi.com.md",
+      "size_bytes": 1507,
+      "sha256": "5ab407632e3acdda009bca50f13730d7a5ceb77020ac1a2eb12f60acf8886117"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/code.bezrabotnyi.com.md",
+      "size_bytes": 1484,
+      "sha256": "8aebbb81e927b2e828fa656e1b719836a414ebc9f20f4569cb015cdcbc88f189"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/code44.bezrabotnyi.com.md",
+      "size_bytes": 1494,
+      "sha256": "911c97c4c02ea26a78d58dda4d9878280c90c20fda2f4426028ada2eb4ac8eb4"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/code88.bezrabotnyi.com.md",
+      "size_bytes": 1495,
+      "sha256": "9bb6f29e2654620c43e77fbd054d85009205d7b58655253f16162ff0d8d54801"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/codeg.bezrabotnyi.com.md",
+      "size_bytes": 1529,
+      "sha256": "d24082c4426409551ce37ad5940d10888e39ed82810727eb80d23add15ddbf2b"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/compareai.bezrabotnyi.com.md",
+      "size_bytes": 1554,
+      "sha256": "bb88ab366e67373820f90e7f29098eb9c3d694cc9469950a66d144ffb9fb9110"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/conveyor.bezrabotnyi.com.md",
+      "size_bytes": 1548,
+      "sha256": "bacec920c6549f3936a6904d12abbe310c4699bddf0b598b27527c3715fc3477"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/default.md",
+      "size_bytes": 1418,
+      "sha256": "ff681abeafa22a7375ec58ffd39e8123b8d57e93bb710a582d4c5ea6bb28b38d"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/dev-a.auto-gram.ru.md",
+      "size_bytes": 1508,
+      "sha256": "f2bca2be0d230456bdf9d982b1e73cd4f65138ef39222d7b178244a79c2e742b"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/dev-b.auto-gram.ru.md",
+      "size_bytes": 1508,
+      "sha256": "1e98c2d03cf509cb04079ebda292993e201ddcf0e66e8ba2ef177bfb576e7e1f"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/dev-webhook.bezrabotnyi.com.md",
+      "size_bytes": 1595,
+      "sha256": "c2efce9de2cd94c6031c776e9741cac6b7b6771f33b30e9820ec6be2f365d7fd"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/dkchv.art.md",
+      "size_bytes": 1503,
+      "sha256": "e476fadbf32461eec389da23b99c7469ff32138a4c5d0c3be1de9dfeb4885224"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/dkchv.bezrabotnyi.com.md",
+      "size_bytes": 1537,
+      "sha256": "d1554e1e4c2cc3a9dca6d2233d74890e5a2f59c4c7de94e5258164edf7acb44c"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/dkchv.demiurge.space.md",
+      "size_bytes": 1503,
+      "sha256": "e5917f1cf06d4d600d2da5096a100566ade6da07832637c3c5853a4384af7254"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/dkchv.ru.md",
+      "size_bytes": 1455,
+      "sha256": "800a55c3f5e4d4854821e1f906acbd9c71a7c05dc00309591ecfafb4827ffd60"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/dns.bezrabotnyi.com.md",
+      "size_bytes": 1646,
+      "sha256": "cea5e203fdb968a054282beece132dc0eb56d6cb1ffd7c52be9d89e2eeaa603a"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/download.bezrabotnyi.com.md",
+      "size_bytes": 1627,
+      "sha256": "04441ca3ae4c715f775a9bda7cde0ed8aed28bda47d50d5c9c6e859be753b219"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/ex.bezrabotnyi.com.md",
+      "size_bytes": 1532,
+      "sha256": "76fbd93e966f66ce00b0ede2495fbc185b3153827944e8f28c9d19850f5c5e22"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/exmanager-dev.bezrabotnyi.com.md",
+      "size_bytes": 1569,
+      "sha256": "445595af6724a85c682b6bd256f1e644e999482087b61b00454aa318431f271d"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/exmanager.bezrabotnyi.com.md",
+      "size_bytes": 1553,
+      "sha256": "779721f5ff2bf04ceea6bd55b7602116f0f5b523a074b3ab9a19251da2e9e5f2"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/for.bezrabotnyi.com.md",
+      "size_bytes": 1557,
+      "sha256": "ecf869bc2cdc6959be98d4f91d292fcceff84d70514e7bff6a81ac5ea56fca24"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/gptadmin-dns-canary.conf.md",
+      "size_bytes": 1503,
+      "sha256": "01f181d3666b4da46cb6aa727a93c5b454a6329f8ed46a1f648eb3116a971c3b"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/gptadmin-public-child-mcp.conf.md",
+      "size_bytes": 1560,
+      "sha256": "a05be0e70fec13a58bc8cd3f738f37339973a8206d201cf97ca6e0dc2d47f62a"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/gptadmin-public-ip-9001.conf.md",
+      "size_bytes": 1479,
+      "sha256": "249e67fc7f423d86456208e0fb604bd0ccbeb4489c84ec2894c250df1f1acb61"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/gptadmin-quorum-peers.md",
+      "size_bytes": 1714,
+      "sha256": "54813bd2f8186c560abec44f7a3de7d96deb9cb3bc32b4b3b9774adceb44fe27"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/gptadmin-router-health.conf.md",
+      "size_bytes": 1430,
+      "sha256": "f1e48c01f071707e8819cbe31a6e136f05ccb65dd91961e364fd8fda51e72405"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/gptadmin.bezrabotnyi.com.conf.md",
+      "size_bytes": 1567,
+      "sha256": "cdfa4755151bef88f822c6c2f340611bd69fc05725566586326dc1b79bf8119d"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/gptadminmcp.bezrabotnyi.com.conf.md",
+      "size_bytes": 1588,
+      "sha256": "64ce3468f2cf66e57357949bc6cbd1f44d486357ecf92bd1b6686f3e46f0203f"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/grep.bezrabotnyi.com.md",
+      "size_bytes": 1579,
+      "sha256": "6e6576762d19319e12d05f30658611f206c68832bcef6691bfb0432fe39974bd"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/headroom.bezrabotnyi.com.md",
+      "size_bytes": 1551,
+      "sha256": "1f5630ffbb71df8fea655254631cc282e5964931fa3498dd086c2fa9b2444836"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/helper.bezrabotnyi.com.md",
+      "size_bytes": 1524,
+      "sha256": "c84cd23f5d8263acb73251331861c55880dae77b8aa1af4c024f7f09985247ca"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/hermes.bezrabotnyi.com.md",
+      "size_bytes": 1510,
+      "sha256": "edd552c17043d4bfa68e2abec93df98a1fb971fb3face83a59707feb19bf8c99"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/home.bezrabotnyi.com.conf.md",
+      "size_bytes": 1521,
+      "sha256": "39afee70b78120da13a4ef0dd7d9035c08c8a13d0140ef64c92c732611bbb7b2"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/http_redirects.md",
+      "size_bytes": 1412,
+      "sha256": "98d0382ecd6b4518a1152c8f6a5a66c8dd9f32eee35b298a6002c864950e5915"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/int.bezrabotnyi.com.md",
+      "size_bytes": 1529,
+      "sha256": "591c25cd4b677e56c4cc45d11396e501042b571ec1fdab27a1dda12f470e8577"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/kube.md",
+      "size_bytes": 1447,
+      "sha256": "120b3143fbb61ba0a00a8f41519567c4d4da23a00ba20ed62e2bdec7fea48a45"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/lhc.bezrabotnyi.com.md",
+      "size_bytes": 1550,
+      "sha256": "a6bafbbd651f004d32233c0ffc073400fd9d28bb33558133020b7649724bc4d6"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/login.bezrabotnyi.com.md",
+      "size_bytes": 1456,
+      "sha256": "ecc553162b60b34fa68cde0dd84a4a15efbab0303ac033e18993e2fb3518bf05"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/login.chat.bezrabotnyi.com.md",
+      "size_bytes": 1514,
+      "sha256": "8a9db99705da8f8d200620d1940f3cd9bc802ab7498337425a8a0fb9684c9abe"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/mail.bezrabotnyi.com.md",
+      "size_bytes": 1534,
+      "sha256": "3d08bdcc058ae1a24446c754044ed1858f62f892b946f7d7ac5bd5db9162e337"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/matrix-auth.bezrabotnyi.com.md",
+      "size_bytes": 1480,
+      "sha256": "114db88c6c3ed4a0b6a3e04266cfed890875962da10deaeb861ca5f9409a0eb7"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/matrix-rtc.bezrabotnyi.com.md",
+      "size_bytes": 1476,
+      "sha256": "a9edf5d65ffc4094cb24c7ec69cf726848049333a8a413d81ac33a4dcc01cce7"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/matrix.bezrabotnyi.com.md",
+      "size_bytes": 1460,
+      "sha256": "fc5aa9989fd76d280af54ed3246e176cc83a62083170b4ecdec230dc695ce978"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/mcp.bezrabotnyi.com.conf.md",
+      "size_bytes": 1541,
+      "sha256": "be0cd314292f0a7208e8dea8df40adbd8e7eb93584cbff4fc33deb5059cdaa7f"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/msg.bezrabotnyi.com.md",
+      "size_bytes": 1536,
+      "sha256": "c6dce74f0d4bdba301077194e617cd0780c5150d195a845bf2ddd247a0b4e605"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/nginx-backup-management-fallback.conf.md",
+      "size_bytes": 1839,
+      "sha256": "4b614e12283fa280e2fa33cbfeafad473934da58d965ccb9dcdefd3597843495"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/notes1.bezrabotnyi.com.conf.md",
+      "size_bytes": 1469,
+      "sha256": "5634556592009e4fc31682b2312853baef953fd880b39eb1ff08a998c4c0240b"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/notes2.bezrabotnyi.com.conf.md",
+      "size_bytes": 1469,
+      "sha256": "ad3e0bde54fe7616ac0ed95cdb128ecd8313732504078c47aed536f57a14b478"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/notes3.bezrabotnyi.com.conf.md",
+      "size_bytes": 1469,
+      "sha256": "91fa12e3fe8822980cae2874ae90eaea4ce51ecc2a0f8fc6f9e415cbec9a0ccf"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/notion.bezrabotnyi.com.md",
+      "size_bytes": 1630,
+      "sha256": "77795cdf90139c7a7468e0298ca89fe73115ab017083d560430d2f1cc6dfa116"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/nyst-gjj9-na6d-3dz9.bezrabotnyi.com.md",
+      "size_bytes": 1593,
+      "sha256": "5c345bcafa5607b0ebaed5b7d304aeb3250a86ff18b7d410e767264cea4eb0b9"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/oc.bezrabotnyi.com.md",
+      "size_bytes": 1517,
+      "sha256": "a70dc3cb390249ca40d4ceb6d4be6277a5ff4be2733fc7b85896c176a2185aa9"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/oc88.bezrabotnyi.com.md",
+      "size_bytes": 1528,
+      "sha256": "2857ea69a6f57fcee29573593e02114b87e1887321dcdf05c4f6b55c9e484e97"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/omniroute.bezrabotnyi.com.md",
+      "size_bytes": 1545,
+      "sha256": "735706ec4c3566ab2d55438b7948516e5a87cdf7dff6ecfdd3f22f4ec0e96255"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/openclaw.bezrabotnyi.com.md",
+      "size_bytes": 1503,
+      "sha256": "43892d36bfa20f4dca662945806e580832c9e5e8210e19ceea63e7ee91af6bb3"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/opencode.bezrabotnyi.com.md",
+      "size_bytes": 1541,
+      "sha256": "b2063df927fc7713db58fef2d3cf468b3c93bda9940f6925910cfa867bb3c563"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/openmemory.bezrabotnyi.com.conf.md",
+      "size_bytes": 1564,
+      "sha256": "ef92404b4fddec4e9afc88cace12390879a89ddfa1c859e1841b783affd2edd6"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/qa-board.bezrabotnyi.com.md",
+      "size_bytes": 1549,
+      "sha256": "90fa14b016df90e04a283c6f518bc8b8a44d195fc1fadf85c6a1a91124d13b94"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/remote100.bezrabotnyi.com.md",
+      "size_bytes": 1523,
+      "sha256": "ae161e8bd66004e857e6c976a2e7de0cc91cfd6d4b609255fbe38b806f75ff8a"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/remote44.bezrabotnyi.com.md",
+      "size_bytes": 1519,
+      "sha256": "ec75793c2174ba84cfe4e04e3dcca9195e0a8788aebee4c6cd9c1814ea724662"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/remote88.bezrabotnyi.com.md",
+      "size_bytes": 1519,
+      "sha256": "85f5176fa6e0abae7dc7b3708ed97cc97efb66793dc9508cee9f1e793e8d0962"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/router.bezrabotnyi.com.md",
+      "size_bytes": 1488,
+      "sha256": "12faf10cc6a92601d08f925f740be35dfdc0942da52590610e9c21496b10f04f"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/rtc.chat.bezrabotnyi.com.md",
+      "size_bytes": 1508,
+      "sha256": "701691b9a04feb9fea83aff3aa776491c30dc3ca4d090738a771a6d652999020"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/runet.bezrabotnyi.com.md",
+      "size_bytes": 1499,
+      "sha256": "e41135187944aba3dde52f678e0de8f7930d62f3d2bdc087a66e90483a2548b2"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/sandbox.hermes.bezrabotnyi.com.md",
+      "size_bytes": 1575,
+      "sha256": "4725020221b96aadda2c588de1b3d57a20ac815927376102bae758e677318b75"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/server-48.md",
+      "size_bytes": 1425,
+      "sha256": "5ed016d266a9275af3ff9d6799ef0deffa1ea8721f1cc13bea245c6ed4758c04"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/spor.bezrabotnyi.com.md",
+      "size_bytes": 1627,
+      "sha256": "4666809ddc7f3d61e6e513a2a9fa3ac99c445f994f92a99255e29076a104cb84"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/sql.bezrabotnyi.com.conf.md",
+      "size_bytes": 1494,
+      "sha256": "1068cf1ea222d254047b13ce572272f802c21caed139eb6fea408b88af9fb733"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/stats-airlock-rybbit.conf.md",
+      "size_bytes": 1558,
+      "sha256": "7ab155a521e8f0ef97a6a683ebf6cf5612a26391f6b9ced8c3e40e23799b758f"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/stealth-probe.bezrabotnyi.com.md",
+      "size_bytes": 1507,
+      "sha256": "717b52e2614871b554041f2f9f6e8223372367ff028a7a81db9c5fb66ed71a92"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/swarm.bezrabotnyi.com.md",
+      "size_bytes": 1433,
+      "sha256": "fc4fa278cf510243a630eb05dad960e115483cd3b325aa8c354fde2499a80e0b"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/syncllm.bezrabotnyi.com.md",
+      "size_bytes": 1538,
+      "sha256": "6f03a3f60720bc639bcb58568afaf7b57fda59ddeff7b37ef63170b98e942b1e"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/t.bezrabotnyi.com.md",
+      "size_bytes": 1576,
+      "sha256": "e506a24ef7f338c736ccef78adae0397e092d11f6af3f46a81726014858e7e94"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/t.gptadmin.bezrabotnyi.com.md",
+      "size_bytes": 1573,
+      "sha256": "d7b81d33e5f1246d1f629f9496f3228cf39bc9ac52b9e3292d6b32c8caba2ffe"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/td.bezrabotnyi.com.md",
+      "size_bytes": 1705,
+      "sha256": "e25a56ce4add65cdc34be3bc2e068577a0a2ad490f69ab6a66cdb05c86be8288"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/test.auto-gram.ru.md",
+      "size_bytes": 1501,
+      "sha256": "58a65c75a77e077787bc76ed166b5db19b86195bd6887af74944f2c3acc4caec"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/tg.bezrabotnyi.com.md",
+      "size_bytes": 1580,
+      "sha256": "2f0f379a1718299a4ad73fa14d7a3fa1f530a633754e84656ac76053acac5aa8"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/tgb.bezrabotnyi.com.md",
+      "size_bytes": 1709,
+      "sha256": "1a589744519cee280a1a7d3bd487c54f859c2e9e6748991a8f45aa584ae45d76"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/todo-board.airlock.bezrabotnyi.com.md",
+      "size_bytes": 1583,
+      "sha256": "a078c8cf707a902775dbe1ea8e2fa2b8aee48120d7c9cd4f55f94558b4951eda"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/tp.bezrabotnyi.com.md",
+      "size_bytes": 1539,
+      "sha256": "faeff87511e7a194e7bb883a5d39a39498495a4fe40295009caa613f45e1a5bf"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/translate.bezrabotnyi.com.md",
+      "size_bytes": 1510,
+      "sha256": "667d0ac2ae7eb0f2c54ed095d038c98f5850b0510704b2f2f68b5a4bc5fbf25f"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/ts_cache_8889.md",
+      "size_bytes": 1378,
+      "sha256": "e5b2c8f3106dfea5d246acf40afe477994f86062edd20290376d7e99b60587fc"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/tts.bezrabotnyi.com.md",
+      "size_bytes": 1482,
+      "sha256": "5c043504b7dbf5ab51f7181ce47a4b06142ec63b336a5df8a04e7f89b1b8cf03"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/tunnel.bezrabotnyi.com.md",
+      "size_bytes": 1423,
+      "sha256": "ace8e3e4230078b0b71cbe08603873b9bb0565c18f1f1662be97729f80b37741"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/uniquecomments.auto-gram.ru.md",
+      "size_bytes": 1512,
+      "sha256": "e8b98f0b4f3703008d3b4b55894ed2c8bbc90c59c9444ae1f0f3c8722b5f8de3"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/vklad.bezrabotnyi.com.md",
+      "size_bytes": 1620,
+      "sha256": "d83b8450be96cb767342ec67d6b10aa4d336eae9ee79563fd4d3f9c8d57cfc95"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/voronka.auto-gram.ru.md",
+      "size_bytes": 1484,
+      "sha256": "ab9a4b44be99c2d083d183cd4512cf595d134c9a65675bf78342c8af0977d65d"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/vpn3.bezrabotnyi.com.md",
+      "size_bytes": 1564,
+      "sha256": "f1ebe3ce6318e6a3737613cdc048ab6b159433b824484f3aee3efa986a02ae71"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/watch.bezrabotnyi.com.md",
+      "size_bytes": 1536,
+      "sha256": "2eb5399aa5abf3038e22fd65813932d50b64abb4416de71ea6c228f4c6d39594"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/web.bezrabotnyi.com.md",
+      "size_bytes": 1498,
+      "sha256": "da92492a71b79c670cfd622f8d970b58eacf92111604d921f5883b2cbbf6f47f"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/webd.bezrabotnyi.com.md",
+      "size_bytes": 1502,
+      "sha256": "42c69291fdfcfc62b7e64c9d03e048913b3da7a50db5512d42cdd2cad80e7856"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/webtop.bezrabotnyi.com.md",
+      "size_bytes": 1512,
+      "sha256": "fc93f157a84bdc879f8e1c0e0d7332768140ee841a380c7d13114eb8dbe876a7"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/widgets-gptadmin.bezrabotnyi.com.conf.md",
+      "size_bytes": 1563,
+      "sha256": "96cd5106f8568dbd510838c9aa34e31b838c18d7ca160d58077de90fb500a51d"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/www.llm.bezrabotnyi.com.md",
+      "size_bytes": 1516,
+      "sha256": "6d839a0bad4b4c59886652bfceb9096707c1dbd994d07bdd2820c1e6c6dad42d"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/xpra.bezrabotnyi.com.md",
+      "size_bytes": 1503,
+      "sha256": "e64dab7caa21fd81af8fe42431ef6c789e67303e2b5f7ad93e97d200da96a5e3"
+    },
+    {
+      "path": "docs/inventory/generated-nginx/zcode.bezrabotnyi.com.conf.md",
+      "size_bytes": 1515,
+      "sha256": "cf39d1f4d28c7162c6b768751e723e6048db0fe6b4b56eb295b31a659e5c15d8"
+    },
+    {
+      "path": "docs/inventory/services/README.md",
+      "size_bytes": 2100,
+      "sha256": "a40e7ff4673cfe5a1ada0a9003f662f4d1d598dc53a597da08ee0974f6f0de72"
+    },
+    {
+      "path": "docs/inventory/services/agentcall-tts-local.md",
+      "size_bytes": 1984,
+      "sha256": "e6a1097785f9c80f146787ef515b14a5354c564b584ca6b7ec4a96996fa89543"
+    },
+    {
+      "path": "docs/inventory/services/agentcall-voice.md",
+      "size_bytes": 12151,
+      "sha256": "9c6d1b217a380d55107e8ce693df482c8b21039982ab3a5d0f0fd99c3eb896dc"
+    },
+    {
+      "path": "docs/inventory/services/agentmemory.md",
+      "size_bytes": 9766,
+      "sha256": "6bdd14e189b3f72e9307a46d713faa057f5855bbd98d67f558c5879259a9a32a"
+    },
+    {
+      "path": "docs/inventory/services/airlock-demo.md",
+      "size_bytes": 4401,
+      "sha256": "ec47341d8076f34c30da05aaa441163ab3a3ed1cede427c6ab1badfb7f23caf4"
+    },
+    {
+      "path": "docs/inventory/services/auth.md",
+      "size_bytes": 2678,
+      "sha256": "9028d5cc79c0d4ca7cab80799c6bcadb0b3baba1c728da349822898fd68167e8"
+    },
+    {
+      "path": "docs/inventory/services/autogram-dev-stages.md",
+      "size_bytes": 4751,
+      "sha256": "6788ae8a996a6eff95d9912952cd9fe000a2d65bcb7567a8ec978228be94a094"
+    },
+    {
+      "path": "docs/inventory/services/autogram.md",
+      "size_bytes": 5517,
+      "sha256": "5b33c18f2b5e1ed8f7d1503c10dcc09b369f558166f239d29824f9ac7bb56c73"
+    },
+    {
+      "path": "docs/inventory/services/autosell-hop.md",
+      "size_bytes": 3739,
+      "sha256": "4365e4e6bf1c8e2722098054f29a872ecc6256c8d5a7c735ffdf342fb2b42a07"
+    },
+    {
+      "path": "docs/inventory/services/autosell-test2git-nightly.md",
+      "size_bytes": 1951,
+      "sha256": "4ed574573b1cb15f4846a9cb467b22244ec56fad46e508a032756edde76abb1b"
+    },
+    {
+      "path": "docs/inventory/services/captcha.md",
+      "size_bytes": 1338,
+      "sha256": "6cdbd0d8bb6a76f6bdda7443ed059391fa85f54e8299755397585bb99a144439"
+    },
+    {
+      "path": "docs/inventory/services/codex-remote-oauth.md",
+      "size_bytes": 2617,
+      "sha256": "5b752e6a49d9164407617e165ba036bbe5c4bad78893f55828ce04cd538f0cff"
+    },
+    {
+      "path": "docs/inventory/services/communications.md",
+      "size_bytes": 7413,
+      "sha256": "fee7a164fec049f290bf9666617683c585d512fef473a1bff778478cb1fcff29"
+    },
+    {
+      "path": "docs/inventory/services/control-plane.md",
+      "size_bytes": 2189,
+      "sha256": "a773c2535ba349ec4f780c05f9bdf73a483203917843ff96e752c93e8022125b"
+    },
+    {
+      "path": "docs/inventory/services/db-video-stats-backup.md",
+      "size_bytes": 3235,
+      "sha256": "6784f112e62e8ffbfc733a02934f1f4ecd0336eedbfa521be20fffc8dc96bf84"
+    },
+    {
+      "path": "docs/inventory/services/dev-webhook.md",
+      "size_bytes": 1792,
+      "sha256": "c286edc07810500cdc0297a5c06b407c9c45323d132d65da2fe77c99cd047748"
+    },
+    {
+      "path": "docs/inventory/services/domain-mail.md",
+      "size_bytes": 4176,
+      "sha256": "aa48114474799805d5e4dc313b23193f387699aedc5ccf9f018ec35cd64a53b5"
+    },
+    {
+      "path": "docs/inventory/services/exmanager.md",
+      "size_bytes": 15105,
+      "sha256": "fad8cc07943d45fe99a13477247674043b39eac04f9570d8540d25974cd9a662"
+    },
+    {
+      "path": "docs/inventory/services/gen.md",
+      "size_bytes": 4024,
+      "sha256": "6adf4334c35aa95fc2ec78448cc7a201386319dc15e8ee6c6ca37c2abed9aa0a"
+    },
+    {
+      "path": "docs/inventory/services/gptadmin.md",
+      "size_bytes": 3724,
+      "sha256": "4ab1301d928f8b0a0c10997193cda67b0601b6870eb175cbf9cc32f0172dc322"
+    },
+    {
+      "path": "docs/inventory/services/grepmesh.md",
+      "size_bytes": 25715,
+      "sha256": "fe7c07050eec94327a41964fdcbefb6020403bafcbd747854db30142940f2b7a"
+    },
+    {
+      "path": "docs/inventory/services/hermes.md",
+      "size_bytes": 3376,
+      "sha256": "136d88399a6a1e605a3c3fe00ea0219a5d1bdd7642b2f84829bfa95f1510a59c"
+    },
+    {
+      "path": "docs/inventory/services/home-assistant.md",
+      "size_bytes": 1650,
+      "sha256": "13736198f1f056a60f7a06baf8420fd1ab9c2537586711539f2217d993b5a6e0"
+    },
+    {
+      "path": "docs/inventory/services/matrix.md",
+      "size_bytes": 3786,
+      "sha256": "d7dcca2dcc97f72dcc54d4750e89a806799305af13e705ea2984e7244a1592e5"
+    },
+    {
+      "path": "docs/inventory/services/memos.md",
+      "size_bytes": 2157,
+      "sha256": "b84d30b7de6181578fb5f6aba02816383cad8c4288fbf029c09e9471afb0fed3"
+    },
+    {
+      "path": "docs/inventory/services/netdata.md",
+      "size_bytes": 1364,
+      "sha256": "4dff80b2793ec903e0125a7eb00ae46acb64f14571493866e64971c1e5dd7550"
+    },
+    {
+      "path": "docs/inventory/services/ollama-proxy44.md",
+      "size_bytes": 1540,
+      "sha256": "0f938378c18757092b03693021240da3632d7dcf9bca8ff9cd9b9fa3f0acd255"
+    },
+    {
+      "path": "docs/inventory/services/omniroute.md",
+      "size_bytes": 13492,
+      "sha256": "5e04b371c44dc6e4c2cfe978acd4bca601eaadca9db6f9b26786e5c53a659751"
+    },
+    {
+      "path": "docs/inventory/services/openclaw.md",
+      "size_bytes": 1762,
+      "sha256": "789d5dce181e6afd5efbb9aa9961a433cca8d0f9f39880b3dd030e42e8794a24"
+    },
+    {
+      "path": "docs/inventory/services/opencode.md",
+      "size_bytes": 3729,
+      "sha256": "d4c9474caac9682eb14c7bb02443bd330cc6bd3a91663aefd3533030794c5fa0"
+    },
+    {
+      "path": "docs/inventory/services/openmemory.md",
+      "size_bytes": 1589,
+      "sha256": "740ed8798428eab801ae02e6015ff5fa41feaaec103dc0ed812dedb0b4f9e1bc"
+    },
+    {
+      "path": "docs/inventory/services/portainer.md",
+      "size_bytes": 1734,
+      "sha256": "c6af7e44d8e02eb9832cf86c1194cd1e848a04895c9114d248ef316682bd6614"
+    },
+    {
+      "path": "docs/inventory/services/proxy5-registry.md",
+      "size_bytes": 8575,
+      "sha256": "b64ec58616dfa5da111775548b8af8acda7c03eb2262f19b858b4f3fe8505483"
+    },
+    {
+      "path": "docs/inventory/services/qwen-tts88.md",
+      "size_bytes": 6351,
+      "sha256": "4c4097d9d4cfe71ad20c50e0ab2e34702a0f38908486be898ef12f2fd0da5e9f"
+    },
+    {
+      "path": "docs/inventory/services/smart-dns.md",
+      "size_bytes": 1851,
+      "sha256": "4acad9801f95b819e2fa5d75c5ba5c93e025bd846a227f348f3ca45be88ef5fb"
+    },
+    {
+      "path": "docs/inventory/services/stats.md",
+      "size_bytes": 1282,
+      "sha256": "4d1b9b57369338c8c81c1887f1eb9395b2628772b947604d6eeff8e309d84f27"
+    },
+    {
+      "path": "docs/inventory/services/userio-voice.md",
+      "size_bytes": 1726,
+      "sha256": "11da89c489c477935b160b6a400b31783dfb30f595ece5c574b0a2edf0cef0f5"
+    },
+    {
+      "path": "docs/inventory/services/xerj.md",
+      "size_bytes": 9621,
+      "sha256": "94b9a1d00c7f68c28f0dc1b08caa0d54ac07dcdd2b3c2646a2a28f61ecf7bb58"
+    },
+    {
+      "path": "docs/inventory/sites/abyss.md",
+      "size_bytes": 1559,
+      "sha256": "773e72f674dfbdf03bb438797e9e52bcbe7f4e01c66b65f5c9b13119df18c0dd"
+    },
+    {
+      "path": "docs/inventory/sites/agent-mac-m1.md",
+      "size_bytes": 33018,
+      "sha256": "5efcf3b142480426cbfd82d80fe538a38e1832054ea5a3463fc8521c42601c2d"
+    },
+    {
+      "path": "docs/inventory/sites/agent-mac-mini.md",
+      "size_bytes": 5047,
+      "sha256": "2298ee0528df4fdde23235eeae623b42a4ee4269cba0a850ef0abe1d613ddd73"
+    },
+    {
+      "path": "docs/inventory/sites/agent.md",
+      "size_bytes": 19250,
+      "sha256": "44a7331c1f320475467e4487ea2c89382f7f4d21cc8d0d484187b44aeabc68ee"
+    },
+    {
+      "path": "docs/inventory/sites/agent44.md",
+      "size_bytes": 912,
+      "sha256": "3b69171fbd7af3c9543afe08a4636c69c638997861c2a1d080f44b1ce53e8de0"
+    },
+    {
+      "path": "docs/inventory/sites/agent88.md",
+      "size_bytes": 1372,
+      "sha256": "69d533de4e1cc4c3e25edebb1f20faf0e06d20f1301e4cda858d38266d226765"
+    },
+    {
+      "path": "docs/inventory/sites/agentherder.md",
+      "size_bytes": 2608,
+      "sha256": "d32785a9faea7e7df741c8b7aff3ec3d9b47537f336ac8e924dede1f7944230d"
+    },
+    {
+      "path": "docs/inventory/sites/airlock.md",
+      "size_bytes": 13443,
+      "sha256": "2a217b856515f70955bcd504f9d35ab66d20a8295c55770a9187908f9bb548a6"
+    },
+    {
+      "path": "docs/inventory/sites/airlockplan.md",
+      "size_bytes": 21495,
+      "sha256": "970e3430cfcbed0d0532d8357df005006ce64e08c85a077af22ff8caf35f8d43"
+    },
+    {
+      "path": "docs/inventory/sites/arena.md",
+      "size_bytes": 1651,
+      "sha256": "037e4473aad437948916fa751daa310e368457e9155765d43c05060b993d60df"
+    },
+    {
+      "path": "docs/inventory/sites/aui.md",
+      "size_bytes": 1427,
+      "sha256": "b62e5e26451494761670316c4b8c53a48e6beed247124e5858ea6f7bb19c8dd5"
+    },
+    {
+      "path": "docs/inventory/sites/autoseller-new.md",
+      "size_bytes": 4207,
+      "sha256": "f51e1d688083de3d16e0ec83ddcf51515c0be9f9649145a7d8f9bd2604bf476c"
+    },
+    {
+      "path": "docs/inventory/sites/autoseller.md",
+      "size_bytes": 2626,
+      "sha256": "9d524c717f56c0868b222e07537d2f231ab3b3d77bc50d30c0537e145cfe4ac0"
+    },
+    {
+      "path": "docs/inventory/sites/books.md",
+      "size_bytes": 1629,
+      "sha256": "d885453a0102228b479cd5c35f0387a124856c04fd7df710a01b93bdbf6343a3"
+    },
+    {
+      "path": "docs/inventory/sites/broker-admin.md",
+      "size_bytes": 2967,
+      "sha256": "8077c57a4bd069e6c04457304aad3b3adaef6d447c9d6333d36709383c2caebf"
+    },
+    {
+      "path": "docs/inventory/sites/chemistry.md",
+      "size_bytes": 1197,
+      "sha256": "d0665b5fb3676367eca9f6147772fac275e986f7a2ad775699bac9062d5a7f66"
+    },
+    {
+      "path": "docs/inventory/sites/crosshub.md",
+      "size_bytes": 7037,
+      "sha256": "5172b102f6fcfa80299fb6350ce745d0ad31949dd98fdf359749377ea939e1b7"
+    },
+    {
+      "path": "docs/inventory/sites/desktop.md",
+      "size_bytes": 2920,
+      "sha256": "e5b29bdd444f52d73321b702bf7e9ffdc53f957874025a1fcfaa77b26b1a9999"
+    },
+    {
+      "path": "docs/inventory/sites/discord.md",
+      "size_bytes": 1461,
+      "sha256": "25802b7d0e76c88b8757cdfc50cc505a5906610028f649d0b04a40e882216a24"
+    },
+    {
+      "path": "docs/inventory/sites/discussion-club.md",
+      "size_bytes": 3966,
+      "sha256": "c6eb3b5a33e9481d6b30fe9aaef99722571f7ae3e525fb0ed722c540eceedfc5"
+    },
+    {
+      "path": "docs/inventory/sites/downloader.md",
+      "size_bytes": 1449,
+      "sha256": "45bc0154ed31832692642f8f445f50118c1e1edb2ea6b172f5aabc6371ff2c10"
+    },
+    {
+      "path": "docs/inventory/sites/dream.md",
+      "size_bytes": 1295,
+      "sha256": "aefa76d890892e3ffbd079b9868c24d416ef56f26bcc5ec60c961847bfb94bda"
+    },
+    {
+      "path": "docs/inventory/sites/excode.md",
+      "size_bytes": 1612,
+      "sha256": "5f11d743d2329ada1d93be894a34832dc3382c73a86545d87fbae6a87fe66d97"
+    },
+    {
+      "path": "docs/inventory/sites/flatnotes.md",
+      "size_bytes": 1291,
+      "sha256": "d4a6b13dc164a6669ea0d84467d05570f5a532a2c72ba605309000ed4538018b"
+    },
+    {
+      "path": "docs/inventory/sites/for-energo-airlock-board.md",
+      "size_bytes": 3907,
+      "sha256": "95471a60b578ad9f9d693b010d8c73d325c60a0513c0bf0a5001211d8cb89c72"
+    },
+    {
+      "path": "docs/inventory/sites/happy.md",
+      "size_bytes": 1360,
+      "sha256": "ce45b9342e5698f5fb75a751f8fe4735f94e09bb0ff4196cf26323c67946c2ce"
+    },
+    {
+      "path": "docs/inventory/sites/iphone-support.md",
+      "size_bytes": 1565,
+      "sha256": "a290afb24543661f69c2184e7d1c3a3543ce85e1279d4ae4922664b3d10bad8b"
+    },
+    {
+      "path": "docs/inventory/sites/iphone.md",
+      "size_bytes": 1865,
+      "sha256": "68f394e76a1401b08797f4cbdd28824f32ca1540549dbcd420a6afe0ddcf315e"
+    },
+    {
+      "path": "docs/inventory/sites/juggler.md",
+      "size_bytes": 1394,
+      "sha256": "985120493fd0c770152dd79c61f481e0f11a27784640baf6655ba2becde645d4"
+    },
+    {
+      "path": "docs/inventory/sites/lhc.md",
+      "size_bytes": 1817,
+      "sha256": "fbc6384bfe6dd562f71522685210b7708b33d75ef95203e767f4d748e5cf8a26"
+    },
+    {
+      "path": "docs/inventory/sites/llm.bezrabotnyi.com.md",
+      "size_bytes": 3329,
+      "sha256": "f60cdce3e4cda34d5fc7d0ee594c541475a385450ee8bc47be0cbb17e6365157"
+    },
+    {
+      "path": "docs/inventory/sites/lol.md",
+      "size_bytes": 1192,
+      "sha256": "4a8733640f67f2a06c024849719f95988e939e474e2c05b9168e2a4fd7722ed3"
+    },
+    {
+      "path": "docs/inventory/sites/m88.md",
+      "size_bytes": 1549,
+      "sha256": "fdf2a96cf438b8fbca49d20ba99b7045dc9b6e769cd4ddc8b71551a950fff68c"
+    },
+    {
+      "path": "docs/inventory/sites/main-site.md",
+      "size_bytes": 1916,
+      "sha256": "a962fe77b1f08e57f2f60b14f5a284314ff202106a399b79eb804a55601550d1"
+    },
+    {
+      "path": "docs/inventory/sites/math.md",
+      "size_bytes": 1324,
+      "sha256": "8a93cf7acde7c5050079b783d32638db257da5bd18b257cec2d328ae828a0283"
+    },
+    {
+      "path": "docs/inventory/sites/mcode.md",
+      "size_bytes": 1875,
+      "sha256": "4105c457fb2b315bd41c914b6498e096a4342dea41fdca8847133f36eca75ff3"
+    },
+    {
+      "path": "docs/inventory/sites/neural.md",
+      "size_bytes": 1691,
+      "sha256": "9b38940b9e4a9dcc8b1c9064e489f7d30125075878e409f74bef999fbab3a668"
+    },
+    {
+      "path": "docs/inventory/sites/notes.md",
+      "size_bytes": 1394,
+      "sha256": "cdb01d1b471db14845fb25b653b4321111f2162a55e99a2329482b15e65bcf16"
+    },
+    {
+      "path": "docs/inventory/sites/notice.bezrabotnyi.com.md",
+      "size_bytes": 7949,
+      "sha256": "16130ef0b6014469a4fbf841233001c9bf4f255cbe8d2946b59709971032b7bf"
+    },
+    {
+      "path": "docs/inventory/sites/noticeplace.bezrabotnyi.com.md",
+      "size_bytes": 4936,
+      "sha256": "36e7aa5904aa8c9bb3e135b5379574e2ffe3429bb29d57d451c5b95b9606ab0e"
+    },
+    {
+      "path": "docs/inventory/sites/notify.md",
+      "size_bytes": 12689,
+      "sha256": "d2abe15f8ced9cedf31bfdbbc85852486aa248de96711957a42ba7f35cd29753"
+    },
+    {
+      "path": "docs/inventory/sites/ody.md",
+      "size_bytes": 1216,
+      "sha256": "b2aa95aa436ceb2ff45d3de1132f9d84fd8ce4d32233228811187efbb4357ce6"
+    },
+    {
+      "path": "docs/inventory/sites/os.md",
+      "size_bytes": 1721,
+      "sha256": "49b7f02bdca25ce2434548da4d83e454b21d3a7bb95c4eb6de5973886d4cb5db"
+    },
+    {
+      "path": "docs/inventory/sites/pswd.bezrabotnyi.com.md",
+      "size_bytes": 1623,
+      "sha256": "97fbeb9252e20481541553174e2f8ecb588fed5086491a322b053e7afcf92dbd"
+    },
+    {
+      "path": "docs/inventory/sites/search.md",
+      "size_bytes": 3501,
+      "sha256": "215d872cd93b7341759bbf9b617d2ab6d6dc1f97022b51ec3712db3944e3fe70"
+    },
+    {
+      "path": "docs/inventory/sites/secure.md",
+      "size_bytes": 1631,
+      "sha256": "75f64cf3e4bbd46f4862412958d70b6e65e2f9371bbe42db652fad4bd1b0532e"
+    },
+    {
+      "path": "docs/inventory/sites/shop.md",
+      "size_bytes": 1267,
+      "sha256": "28251a65a8d56e8d80ac71df34cdb4f5b10f014e2eafcab73e8fa7f82bf81b16"
+    },
+    {
+      "path": "docs/inventory/sites/shtatno.md",
+      "size_bytes": 10356,
+      "sha256": "3cb7b113f54fb4eb3c64fd03976fa413454a873cfd9e67967c891db7a4f647f7"
+    },
+    {
+      "path": "docs/inventory/sites/siyuan.md",
+      "size_bytes": 1108,
+      "sha256": "94eee35d27727d8b285bf8d526126da4efe7fc5c3e50df4ce8730fcef9955d22"
+    },
+    {
+      "path": "docs/inventory/sites/spend.bezrabotnyi.com.md",
+      "size_bytes": 2357,
+      "sha256": "beecd52bc0f2d57e952e4b6e995192c78982173e1755bd906f98117c5698258c"
+    },
+    {
+      "path": "docs/inventory/sites/sport.md",
+      "size_bytes": 1095,
+      "sha256": "d1cb18acdc6295de4629d6f78256d2a54f025622215a1a1d7068bd7d10a09007"
+    },
+    {
+      "path": "docs/inventory/sites/stih.md",
+      "size_bytes": 1273,
+      "sha256": "37d39f15d70f9209ec29fb547d14e85f98209f33289a65034e10232c441b4c20"
+    },
+    {
+      "path": "docs/inventory/sites/telegram.md",
+      "size_bytes": 1056,
+      "sha256": "2f8f904d3dcac24a22d2e0d05d2046126a06b963112f095f66aac8ca95736545"
+    },
+    {
+      "path": "docs/inventory/sites/tg.md",
+      "size_bytes": 2506,
+      "sha256": "571909aa84b0b00f7d3eb1e2ec22be9f7c35fa9faa784d6dc2bee9a7e96188ce"
+    },
+    {
+      "path": "docs/inventory/sites/todo.md",
+      "size_bytes": 21268,
+      "sha256": "ca4472682161c6372938717ea80e2bcb10fdabc2af3fe95790975f5696ccc9a4"
+    },
+    {
+      "path": "docs/inventory/sites/trilium.md",
+      "size_bytes": 1153,
+      "sha256": "30b3082e5773e2d93c03b452c5f9f99a878370e4adbf728e6cf9caca628054c6"
+    },
+    {
+      "path": "docs/inventory/sites/vkhomework.md",
+      "size_bytes": 1222,
+      "sha256": "473bfcd2b9d6555e10b63cf3a0fa3598fe35d3506e67cd16fe58ee3ebf5493d4"
+    },
+    {
+      "path": "docs/inventory/sites/vpn.md",
+      "size_bytes": 1985,
+      "sha256": "ccc3ff911ab064379df8154d5c480616484da921ff2f3f8700593a91e0324b96"
+    },
+    {
+      "path": "docs/inventory/sites/whisper.md",
+      "size_bytes": 25017,
+      "sha256": "995e0ff1d0cb92a9180d23676cef12c4b12beabe1a1c8461616659703588849b"
+    },
+    {
+      "path": "docs/inventory/sites/work.md",
+      "size_bytes": 1332,
+      "sha256": "2dd2c74abf10e3b83357c66a4277173309bd91144edb6c59ab6bfed847bdd855"
+    },
+    {
+      "path": "docs/inventory/sites/write.md",
+      "size_bytes": 1346,
+      "sha256": "769df9999cf1faf48a878ec91238f360b3e80b569f46ecf829b3b60ea070a5b3"
+    },
+    {
+      "path": "docs/inventory/sites/ya.md",
+      "size_bytes": 1074,
+      "sha256": "221bc067d98baf4acbba8370f4ef1f9be22360753a5818dba6aebebfa66995b2"
+    },
+    {
+      "path": "docs/projects/GEN.md",
+      "size_bytes": 1198,
+      "sha256": "e101557245e97c90ce4a9437303dca924f72221cbcaaa2fb8e5966342e0d38d5"
+    },
+    {
+      "path": "docs/projects/MATRIX.md",
+      "size_bytes": 18276,
+      "sha256": "b829c7e51c6cbd3ec16ce59ffbe40cbf754f6b114b8fdcfa8cc866e113a2186c"
+    },
+    {
+      "path": "docs/projects/NOTICE-LOUD-CALL-20261006.md",
+      "size_bytes": 9566,
+      "sha256": "3b357550c5824f8bfce934a524ba317b7898d6e4a2ca8507cf64eb6f37191042"
+    },
+    {
+      "path": "docs/projects/README.md",
+      "size_bytes": 944,
+      "sha256": "20313207ed3ad226a47c75d6aeee17de86de7a09e652f7b078ab2120c9924c1d"
+    },
+    {
+      "path": "docs/projects/USERIO-MATRIX-TRANSPORT.md",
+      "size_bytes": 4991,
+      "sha256": "29f448e087fdfc03872cb0b83e22b1bb8e7d324078240ad48ebf2900e62caf6e"
+    },
+    {
+      "path": "docs/runbooks/agentmemory-service-budget-20261008.md",
+      "size_bytes": 10267,
+      "sha256": "d3e4b9a065b8bf0dead37eedbfcfd5685ae562625577fea2d7e01506f9dad916"
+    },
+    {
+      "path": "docs/runbooks/airlock-app-bridge.md",
+      "size_bytes": 33469,
+      "sha256": "bbb1c98f333569a9b21ffba8d136ab081bc64fcf7393465656d012eb70918c83"
+    },
+    {
+      "path": "docs/runbooks/airlock-demo-vm.md",
+      "size_bytes": 4692,
+      "sha256": "0207b95f6d3613d626937c799feaa8e2c2c31a2a25c3abf98fade42536630c0e"
+    },
+    {
+      "path": "docs/runbooks/airlock-session-broker.md",
+      "size_bytes": 13846,
+      "sha256": "10cab815fbdb1281c81ad1e88b4dfa899a077077fad24212e6e7d539fbe68726"
+    },
+    {
+      "path": "docs/runbooks/domain-mail.md",
+      "size_bytes": 18749,
+      "sha256": "cb89a22ec0db8d58c14cbba91ff8e197afa16a1a0d3428ab6ece233f0ce15f51"
+    },
+    {
+      "path": "docs/runbooks/fleet-codex-watch-20261007.md",
+      "size_bytes": 11952,
+      "sha256": "ce9a32483438c80b9146098748967312c89c31868f6a020a9d2da96dc9301002"
+    },
+    {
+      "path": "docs/runbooks/fleet-resource-policy-20261008.md",
+      "size_bytes": 3762,
+      "sha256": "a0a069577db9f06377ca70f69d490a3db6bfb18f50f6418d0ed25ebe99b4b1fd"
+    },
+    {
+      "path": "docs/runbooks/minimax-code-credential-watchdog.md",
+      "size_bytes": 34719,
+      "sha256": "2a947deb6bc1f5f631fd4ef3c58f5823230a75b59e0df9f27b559c2eabacdb6d"
+    },
+    {
+      "path": "docs/runbooks/minimax-code-server100-global-region.md",
+      "size_bytes": 32177,
+      "sha256": "1abbc06f0ca2c389759fc48e5188cdd0a244bf00b2081b540903e3386a91939b"
+    },
+    {
+      "path": "docs/runbooks/noticeplace-health-executor-20261021.md",
+      "size_bytes": 10177,
+      "sha256": "7dd160186cb1a9421360f57939517fc72f3a48df081690c4f1ec56933aa32ed7"
+    },
+    {
+      "path": "docs/runbooks/noticeplace-review-campaign-20261021.md",
+      "size_bytes": 91746,
+      "sha256": "89ad4aacf20ab1eb6829371edb2efdfdfc93d2ac74b440fb67ed287cfb0f7ef3"
+    },
+    {
+      "path": "docs/runbooks/omniroute-fallback-guard.md",
+      "size_bytes": 21976,
+      "sha256": "06cb47d7186a0d57eb9767a6a9d9b71e5949c046e07b0616dae38e976f921c70"
+    },
+    {
+      "path": "docs/runbooks/omniroute-no-auto-gpt.md",
+      "size_bytes": 8912,
+      "sha256": "77dee54d70c3ea99504a8c5147c207a136ba4a7d723c69939956c17659a238ac"
+    },
+    {
+      "path": "docs/runbooks/phone-vpn-desync-20261024.md",
+      "size_bytes": 9371,
+      "sha256": "2f1ca3ac52bb2f8275ea12ca5eda1d85a9c1e1e45c1a91e536867c3e70e14bcb"
+    },
+    {
+      "path": "docs/runbooks/router-desync-edge-exclusion-20261028.md",
+      "size_bytes": 5934,
+      "sha256": "bb7e47a9c5f4c9336bd9c4d31f02061b4c6714d34b1b1f5877d7d671f4a554d1"
+    },
+    {
+      "path": "docs/runbooks/router-desync-scope-20261025.md",
+      "size_bytes": 7556,
+      "sha256": "0ed60ba6f5b38f39f2ab0fb7cabed235656d64f1d920333e3cdd90d59a21907e"
+    },
+    {
+      "path": "docs/runbooks/userio-credential-surface.md",
+      "size_bytes": 10740,
+      "sha256": "43b103de7d2dbddcf30034a8090a9334fdf7c2efcbc8ed6bea6ee8c11ec9e6ec"
+    },
+    {
+      "path": "docs/runbooks/zapret-dpi-desync-20261022.md",
+      "size_bytes": 25475,
+      "sha256": "01e3a7431fe5ff67bf50ee9f9301a8cc10671d0436ad1d4963126f452bfb992e"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-07-22-autonomous-haos-recovery-edge.md",
+      "size_bytes": 10939,
+      "sha256": "0fa07cf0ee2360a0a37b8857991237b441b0a9b579de87181c3a269c4b3699a3"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-07-22-central-cookie-auth-haos-fallback.md",
+      "size_bytes": 5804,
+      "sha256": "eb5e0b88f0b41faeddcefbad1b97a2cd96010b03d8316385b13a48bab6195407"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-07-26-nanokvm-management-mcp-skill.md",
+      "size_bytes": 5959,
+      "sha256": "5555ead28a0450d53ff4b9c7941c18e430e29c752b2e97371b5164a84f0aaa0c"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-07-26-nanokvm-public-gptadmin-rollout.md",
+      "size_bytes": 7260,
+      "sha256": "4a2836350ad4282ecacf5911ac6fd7eb0c572bdbbe07a36a47cb9386474db650"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-07-27-opencodex-fleet-recovery.md",
+      "size_bytes": 5767,
+      "sha256": "2825758f68c4527d2aec86499574000eefe7650083e2bc8d694ee8cffdc9d6da"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-07-28-codex-cli-auto-update.md",
+      "size_bytes": 3454,
+      "sha256": "16c521cf7da992543dc1c07425a129d326a645ec2308a2802b9343b0177941a8"
+    },
+    {
+      "path": "docs/system/launch-mechanisms.json",
+      "size_bytes": 434673,
+      "sha256": "f7fc77067b957f4742fcc226c31e044bd596525edb16abef525269ab38e860e2"
+    },
+    {
+      "path": "docs/system/launch-mechanisms.md",
+      "size_bytes": 479703,
+      "sha256": "633af57fc72a586352ec9a877f8211e5b2b5e9f6ff9a10d64b52f533e0f37b4b"
+    },
+    {
+      "path": "docs/system/principles-isolation-and-settings.md",
+      "size_bytes": 15626,
+      "sha256": "db5fc925a3902406c93ed40de11837a6edee7eb1d112d893a722be0585adec84"
+    }
+  ]
+}

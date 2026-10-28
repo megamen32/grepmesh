@@ -1,0 +1,98 @@
+{
+  "P1-01": {
+    "task": "a01",
+    "engine": "ranked"
+  },
+  "P1-02": {
+    "task": "a02",
+    "engine": "literal"
+  },
+  "P1-03": {
+    "task": "a05",
+    "engine": "ranked"
+  },
+  "P1-04": {
+    "task": "a02",
+    "engine": "xerj"
+  },
+  "P1-05": {
+    "task": "b02",
+    "engine": "xerj"
+  },
+  "P1-06": {
+    "task": "b02",
+    "engine": "literal"
+  },
+  "P1-07": {
+    "task": "b02",
+    "engine": "ranked"
+  },
+  "P1-08": {
+    "task": "a02",
+    "engine": "ranked"
+  },
+  "P1-09": {
+    "task": "a05",
+    "engine": "literal"
+  },
+  "P1-10": {
+    "task": "a01",
+    "engine": "literal"
+  },
+  "P1-11": {
+    "task": "a05",
+    "engine": "xerj"
+  },
+  "P1-12": {
+    "task": "a01",
+    "engine": "xerj"
+  },
+  "P2-01": {
+    "task": "b02",
+    "engine": "xerj"
+  },
+  "P2-02": {
+    "task": "b02",
+    "engine": "literal"
+  },
+  "P2-03": {
+    "task": "a05",
+    "engine": "ranked"
+  },
+  "P2-04": {
+    "task": "b02",
+    "engine": "ranked"
+  },
+  "P2-05": {
+    "task": "a01",
+    "engine": "xerj"
+  },
+  "P2-06": {
+    "task": "a02",
+    "engine": "xerj"
+  },
+  "P2-07": {
+    "task": "a05",
+    "engine": "xerj"
+  },
+  "P2-08": {
+    "task": "a05",
+    "engine": "literal"
+  },
+  "P2-09": {
+    "task": "a01",
+    "engine": "literal"
+  },
+  "P2-10": {
+    "task": "a01",
+    "engine": "ranked"
+  },
+  "P2-11": {
+    "task": "a02",
+    "engine": "literal"
+  },
+  "P2-12": {
+    "task": "a02",
+    "engine": "ranked"
+  }
+}

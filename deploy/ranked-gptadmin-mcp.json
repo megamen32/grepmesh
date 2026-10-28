@@ -1,0 +1,11 @@
+{
+  "ref": "GrepMeshRanked",
+  "name": "GrepMeshRanked",
+  "command": "/usr/bin/python3",
+  "args": ["/home/roomhacker/.local/share/grepmesh-ranked/current/grepmesh_stdio.py", "--endpoint", "http://127.0.0.1:19431/mcp"],
+  "env": {"HOME": "/home/roomhacker"},
+  "cwd": "/home/roomhacker",
+  "transport": "stdio",
+  "enabled": true,
+  "tool_allowlist": ["ranked_search", "search", "find_paths", "read_text", "list_locations", "list_directory", "search_status"]
+}

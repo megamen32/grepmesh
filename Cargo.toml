@@ -45,7 +45,7 @@ png = { version = "0.18.1", optional = true }
 rayon = { version = "1", optional = true }
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std"], optional = true }
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]

@@ -1,0 +1,19 @@
+{
+  "observed_date_local": "2026-10-29",
+  "target": "mcp:shell:roomhacker-server-100:GrepMeshRanked",
+  "tool": "ranked_search",
+  "query": "HTTPTransport retries",
+  "root": "httpx-reference",
+  "partial": false,
+  "index_state": "ready",
+  "index_generation": 18734,
+  "elapsed_ms_hub": 385,
+  "independent_installed_process_sha256": "c74678c61ffd1b421b2200cde097358e3d0876abde71847349c539b8653f634a",
+  "source_verified_hits": [
+    {"path": "httpx/_transports/default.py", "start_line": 18, "end_line": 21,
+     "body_sha256": "bfb106716ce33f4c29583cc1e43803109a9dba532613ec4f6fe2cd09e7c022e3"},
+    {"path": "docs/advanced/transports.md", "start_line": 7, "end_line": 36,
+     "body_sha256": "55648dd15c551f151f538aa79c8d2934bb581528d85bcc0fe3d810ac4a5ca382"}
+  ],
+  "scope": "owner profile; restricted GPTAdmin profile permissions were not widened"
+}

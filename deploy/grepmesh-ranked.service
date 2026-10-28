@@ -1,0 +1,17 @@
+[Unit]
+Description=GrepMesh ranked source search (isolated local instance)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/roomhacker/agents-projects/grepmesh
+ExecStartPre=/usr/bin/python3 /home/roomhacker/.local/share/grepmesh-ranked/config-tools/a3a8e007974242ec95f40a5431f6dffdb9d103e8a89dc754830822443c3536ef/ranked-local-config.py --projects /home/roomhacker/ServersAdministartion/ops/xerj/projects.json --state-dir /home/roomhacker/.local/state/grepmesh-ranked/projects --bind 127.0.0.1:19431 --host-id server-100-ranked --reference-manifest /home/roomhacker/.local/share/grepmesh-ranked/reference-httpx-b5addb6/corpus-manifest.json
+ExecStart=/home/roomhacker/.local/share/grepmesh-ranked/current/grepmesh-mcp --config /home/roomhacker/.local/state/grepmesh-ranked/projects/config.json
+Environment=RUST_LOG=warn
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

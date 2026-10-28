@@ -1,0 +1,297 @@
+{
+  "time_utc": "2026-10-28T23:10:58.577971+00:00",
+  "codex_approval_policy": "never",
+  "codex_sandbox": "read-only",
+  "receipts": [
+    {
+      "case": "httpx-retries",
+      "exit_code": 0,
+      "calls": [
+        {
+          "server": "grepmesh-ranked",
+          "tool": "ranked_search",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "search",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "ranked_search",
+          "status": "completed",
+          "error": null
+        }
+      ],
+      "trace": "/home/roomhacker/agents-projects/grepmesh/.tmp/ranked-build/httpx-retries.events.jsonl",
+      "answer_sha256": "130da46e018bfc3be9bfab74a04adba322d396414b71d20531adb0c375407ee2",
+      "answer_bytes": 731,
+      "physical_citations": [
+        "/home/roomhacker/.local/share/grepmesh-ranked/reference-httpx-b5addb6/httpx/_transports/default.py:136"
+      ],
+      "requested_model": "gpt-6-luna",
+      "native_usage": {
+        "input_tokens": 186716,
+        "cached_input_tokens": 152576,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 514,
+        "reasoning_output_tokens": 33
+      }
+    },
+    {
+      "case": "airlock-remote-bridge",
+      "exit_code": 0,
+      "calls": [
+        {
+          "server": "grepmesh-ranked",
+          "tool": "list_locations",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "ranked_search",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "ranked_search",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "ranked_search",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "ranked_search",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "ranked_search",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "read_text",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "read_text",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "read_text",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "read_text",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "ranked_search",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "ranked_search",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "ranked_search",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "ranked_search",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "ranked_search",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "read_text",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "read_text",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "ranked_search",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "read_text",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "read_text",
+          "status": "completed",
+          "error": null
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tool": "ranked_search",
+          "status": "completed",
+          "error": null
+        }
+      ],
+      "trace": "/home/roomhacker/agents-projects/grepmesh/.tmp/ranked-build/airlock-remote-bridge.events.jsonl",
+      "answer_sha256": "2df0eefcabe53939b93c4a15329f9979a5ed16718a11202d8ff0d3fba4ffb133",
+      "answer_bytes": 3691,
+      "physical_citations": [
+        "/home/roomhacker/airlock-internal/api/direct_resources.go:84",
+        "/home/roomhacker/airlock-internal/service/integrations/service.go:123",
+        "/home/roomhacker/airlock-internal/service/integrations/service.go:177",
+        "/home/roomhacker/airlock-internal/service/integrations/service.go:197",
+        "/home/roomhacker/airlock-internal/service/integrations/service.go:177",
+        "/home/roomhacker/airlock-internal/service/platform/resources.go:121",
+        "/home/roomhacker/airlock-internal/service/appruntime/mcp.go:79",
+        "/home/roomhacker/airlock-internal/api/direct_resources.go:98",
+        "/home/roomhacker/airlock-internal/service/appruntime/mcp.go:173",
+        "/home/roomhacker/airlock-internal/api/global_mcp.go:50"
+      ],
+      "requested_model": "gpt-6-luna",
+      "native_usage": {
+        "input_tokens": 829194,
+        "cached_input_tokens": 749952,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 2297,
+        "reasoning_output_tokens": 452
+      }
+    },
+    {
+      "case": "opencode-httpx",
+      "exit_code": 0,
+      "trace": "/home/roomhacker/agents-projects/grepmesh/.tmp/ranked-build/opencode-final.events.jsonl",
+      "requested_model": "minimax-coding-plan/MiniMax-M3.1-Flash",
+      "answer_sha256": "8d15361466a86d3b7a05d3669843f71579cfd478680e68f4e4e5281fa2f3d499",
+      "answer_bytes": 3019,
+      "fact_checks": {
+        "135": true,
+        "147": true,
+        "156": true,
+        "165": true,
+        "279": true,
+        "291": true,
+        "300": true,
+        "309": true
+      },
+      "completed_tool_calls": 8,
+      "calls": [
+        {
+          "server": "grepmesh-ranked",
+          "tools": [
+            "ranked_search",
+            "list_locations"
+          ],
+          "status": "completed"
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tools": [
+            "read_text"
+          ],
+          "status": "completed"
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tools": [
+            "search",
+            "search"
+          ],
+          "status": "completed"
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tools": [
+            "read_text",
+            "read_text"
+          ],
+          "status": "completed"
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tools": [
+            "read_text",
+            "read_text"
+          ],
+          "status": "completed"
+        },
+        {
+          "server": "grepmesh-ranked",
+          "tools": [
+            "read_text",
+            "search"
+          ],
+          "status": "completed"
+        }
+      ],
+      "ranked_result": {
+        "status": "fulfilled",
+        "partial": false,
+        "coverage": "strong_match",
+        "hits": [
+          {
+            "path": "/home/roomhacker/.local/share/grepmesh-ranked/reference-httpx-b5addb6/httpx/_transports/default.py",
+            "start_line": 18,
+            "end_line": 21,
+            "freshness": "source_verified",
+            "body_sha256": "bfb106716ce33f4c29583cc1e43803109a9dba532613ec4f6fe2cd09e7c022e3"
+          },
+          {
+            "path": "/home/roomhacker/.local/share/grepmesh-ranked/reference-httpx-b5addb6/docs/advanced/transports.md",
+            "start_line": 5,
+            "end_line": 38,
+            "freshness": "source_verified",
+            "body_sha256": "55648dd15c551f151f538aa79c8d2934bb581528d85bcc0fe3d810ac4a5ca382"
+          }
+        ]
+      }
+    }
+  ],
+  "installed_binary_sha256": "c74678c61ffd1b421b2200cde097358e3d0876abde71847349c539b8653f634a",
+  "configuration_helper_sha256": "a3a8e007974242ec95f40a5431f6dffdb9d103e8a89dc754830822443c3536ef",
+  "rollback_check": {
+    "stopped_only": "grepmesh-ranked.service",
+    "original_grepmesh_health": "http://192.168.2.100:9419/health HTTP200 ok true",
+    "xerj": "http://127.0.0.1:19200/ HTTP200",
+    "restored": true
+  }
+}

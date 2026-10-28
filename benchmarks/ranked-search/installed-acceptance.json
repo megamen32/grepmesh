@@ -1,0 +1,358 @@
+{
+  "time_utc": "2026-10-28T23:17:18.446649+00:00",
+  "endpoint": "http://127.0.0.1:19431/mcp",
+  "pid": 673211,
+  "binary_sha256": "c74678c61ffd1b421b2200cde097358e3d0876abde71847349c539b8653f634a",
+  "index_state": "Ready",
+  "roots": [
+    {
+      "root": "serversadmin",
+      "query": "reverse SSH 22220 22221",
+      "partial": false,
+      "truncated": true,
+      "warnings": [],
+      "coverage": "strong_match",
+      "hits": [
+        {
+          "path": "/home/roomhacker/ServersAdministartion/infra/android-s21/gsm2sip/asterisk/sip-watchdog.sh",
+          "start_line": 24,
+          "end_line": 24,
+          "freshness": "source_verified",
+          "body_sha256": "f21c96d49459679005c2544c7b1e06e99582b5ecff95d4dd8097b3a2e9f70eb5"
+        },
+        {
+          "path": "/home/roomhacker/ServersAdministartion/infra/access-topology.md",
+          "start_line": 26,
+          "end_line": 43,
+          "freshness": "source_verified",
+          "body_sha256": "3240c4ec0d28cbd170756dabf7b34990b84bd5b08ac4dbf09eab96dacdd63f9f"
+        }
+      ]
+    },
+    {
+      "root": "herder",
+      "query": "autopilot",
+      "partial": false,
+      "truncated": true,
+      "warnings": [],
+      "coverage": "strong_match",
+      "hits": [
+        {
+          "path": "/home/roomhacker/agents-projects/agent-herder/integrations/zcode/agent-herder-autopilot/README.md",
+          "start_line": 1,
+          "end_line": 27,
+          "freshness": "source_verified",
+          "body_sha256": "ce9b34b5ee37cbed0146f6b205bc1b93d2eb24f1414cc9bbd370c6aebbfe932f"
+        },
+        {
+          "path": "/home/roomhacker/agents-projects/agent-herder/docs/autopilot.md",
+          "start_line": 1,
+          "end_line": 80,
+          "freshness": "source_verified",
+          "body_sha256": "7801127d73fb5961c745796696fd1395edc13cd67e161d859064e59679750b2e"
+        }
+      ]
+    },
+    {
+      "root": "broker",
+      "query": "account",
+      "partial": false,
+      "truncated": true,
+      "warnings": [],
+      "coverage": "strong_match",
+      "hits": [
+        {
+          "path": "/home/roomhacker/PycharmProjects/account-broker/INTEGRATION.md",
+          "start_line": 1,
+          "end_line": 80,
+          "freshness": "source_verified",
+          "body_sha256": "6a7b5d354cdcdb1f1bc23017dde3ec2ca8ace75a2f33fb6f606f777a729b890c"
+        },
+        {
+          "path": "/home/roomhacker/PycharmProjects/account-broker/README.md",
+          "start_line": 1,
+          "end_line": 49,
+          "freshness": "source_verified",
+          "body_sha256": "c8a8727f549fc3fa67f8aade8621ffb6a3f5bdcf1a44b540a5c6a3238bebda71"
+        }
+      ]
+    },
+    {
+      "root": "telegram",
+      "query": "Telegram",
+      "partial": true,
+      "truncated": true,
+      "warnings": [
+        "server-100-ranked: ranked candidate/body budget reached"
+      ],
+      "coverage": "strong_match",
+      "hits": [
+        {
+          "path": "/home/roomhacker/PycharmProjects/TelegramAuto/AGENTS.md",
+          "start_line": 1,
+          "end_line": 80,
+          "freshness": "source_verified",
+          "body_sha256": "5c414aa060d65a61141af8dfca05d56df295727ae873ec0d070ea051d5dd521c"
+        },
+        {
+          "path": "/home/roomhacker/PycharmProjects/TelegramAuto/EXECUTION.md",
+          "start_line": 1,
+          "end_line": 80,
+          "freshness": "source_verified",
+          "body_sha256": "a48c84004819281c7568ead391aec2b7c143a6066690c7ba08c5452b6bab357e"
+        }
+      ]
+    },
+    {
+      "root": "tgc",
+      "query": "comment",
+      "partial": false,
+      "truncated": true,
+      "warnings": [],
+      "coverage": "strong_match",
+      "hits": [
+        {
+          "path": "/home/roomhacker/PycharmProjects/TelegramAuto/TGC/comment_style.py",
+          "start_line": 359,
+          "end_line": 384,
+          "freshness": "source_verified",
+          "body_sha256": "73b22fa9fcc5d3346422b1bbc0ade1ab1667cf5afc84f70e4b1b2fc8c1b4647f"
+        },
+        {
+          "path": "/home/roomhacker/PycharmProjects/TelegramAuto/TGC/scripts/analyze_comment_errors.py",
+          "start_line": 76,
+          "end_line": 82,
+          "freshness": "source_verified",
+          "body_sha256": "bd6189e42f81c6f8f47d7bbe2f5ddbc9e810e8c88616391b16abb4f5789638b6"
+        }
+      ]
+    },
+    {
+      "root": "atv",
+      "query": "views",
+      "partial": false,
+      "truncated": true,
+      "warnings": [],
+      "coverage": "strong_match",
+      "hits": [
+        {
+          "path": "/home/roomhacker/PycharmProjects/TelegramAuto/ATV/autotests/test_atv_views_watch.py",
+          "start_line": 48,
+          "end_line": 67,
+          "freshness": "source_verified",
+          "body_sha256": "b966742a583d7aa1e5293c98c6e593c5fce67e930f1d16e9eb25226659056d3d"
+        },
+        {
+          "path": "/home/roomhacker/PycharmProjects/TelegramAuto/ATV/autotests/test_audit_compatibility_views.py",
+          "start_line": 6,
+          "end_line": 51,
+          "freshness": "source_verified",
+          "body_sha256": "0447017c56ad11be7e615e46811007359877a5914c5ceca29f4903598dd5550c"
+        }
+      ]
+    },
+    {
+      "root": "commentorch",
+      "query": "generate",
+      "partial": false,
+      "truncated": true,
+      "warnings": [],
+      "coverage": "strong_match",
+      "hits": [
+        {
+          "path": "/home/roomhacker/PycharmProjects/TelegramAuto/comment-orchestrator/prompts/voices.py",
+          "start_line": 210,
+          "end_line": 210,
+          "freshness": "source_verified",
+          "body_sha256": "dcb855012f5190c9abbe435a5dd04774f7d899c71c1f66d3f061c4ea69a7799d"
+        },
+        {
+          "path": "/home/roomhacker/PycharmProjects/TelegramAuto/comment-orchestrator/generation_session.py",
+          "start_line": 157,
+          "end_line": 165,
+          "freshness": "source_verified",
+          "body_sha256": "f28542d125e0da75a3c3cb2e8bca812695d161a9d37e717adbe9c673f9bc4b06"
+        }
+      ]
+    },
+    {
+      "root": "videowatching",
+      "query": "video",
+      "partial": true,
+      "truncated": true,
+      "warnings": [
+        "server-100-ranked: ranked candidate/body budget reached"
+      ],
+      "coverage": "strong_match",
+      "hits": [
+        {
+          "path": "/home/roomhacker/PycharmProjects/video_watching/README.md",
+          "start_line": 1,
+          "end_line": 80,
+          "freshness": "source_verified",
+          "body_sha256": "1cfab133cd770b79d569a334b76d0e1e22a75678fee72a8c18ebe14aca875e08"
+        },
+        {
+          "path": "/home/roomhacker/PycharmProjects/video_watching/ROLL_OUT_TASKS.md",
+          "start_line": 1,
+          "end_line": 62,
+          "freshness": "source_verified",
+          "body_sha256": "1aab56a8e94e865bbc83cde7dadcaee72a49e6401dfc2958709ab104ffd30d01"
+        }
+      ]
+    },
+    {
+      "root": "exmanager",
+      "query": "Todo",
+      "partial": false,
+      "truncated": true,
+      "warnings": [],
+      "coverage": "strong_match",
+      "hits": [
+        {
+          "path": "/home/roomhacker/agents-projects/exmanager/docs/todo-mcp.md",
+          "start_line": 1,
+          "end_line": 80,
+          "freshness": "source_verified",
+          "body_sha256": "e4e6b61ab4df6ee00a8217902ea3846f8c68f6db510cc875f94d7cd6d53546e2"
+        },
+        {
+          "path": "/home/roomhacker/agents-projects/exmanager/deploy/todo/test_configure_mcp.py",
+          "start_line": 13,
+          "end_line": 15,
+          "freshness": "source_verified",
+          "body_sha256": "f3b69b81b5c21080889c4b27d6ce4e9f594bb3a359fdb10f1f3b1c7d0dca780f"
+        }
+      ]
+    },
+    {
+      "root": "airlock",
+      "query": "MCP",
+      "partial": false,
+      "truncated": true,
+      "warnings": [],
+      "coverage": "strong_match",
+      "hits": [
+        {
+          "path": "/home/roomhacker/airlock-internal/docs/mcp.md",
+          "start_line": 1,
+          "end_line": 80,
+          "freshness": "source_verified",
+          "body_sha256": "c1047ee9ea8b20f6a5c7cf72ba2ee80ff8681d942600fc06857f4ee1610ab81a"
+        },
+        {
+          "path": "/home/roomhacker/airlock-internal/api/global_mcp_widget.go",
+          "start_line": 44,
+          "end_line": 46,
+          "freshness": "source_verified",
+          "body_sha256": "f58985b9d25f38b448ec5b4d17e0141966d043b098175dffb8310636c27a1b38"
+        }
+      ]
+    },
+    {
+      "root": "airlockadmin",
+      "query": "tenant",
+      "partial": false,
+      "truncated": true,
+      "warnings": [],
+      "coverage": "strong_match",
+      "hits": [
+        {
+          "path": "/home/roomhacker/airlock-admin/AIRLOCK_ADMIN.md",
+          "start_line": 169,
+          "end_line": 211,
+          "freshness": "source_verified",
+          "body_sha256": "2613287b7f7f8044dc13e30fca6489071874c9979d21b5b5d0ef25388fd60fd7"
+        },
+        {
+          "path": "/home/roomhacker/airlock-admin/PRODUCT_VISION.md",
+          "start_line": 25,
+          "end_line": 38,
+          "freshness": "source_verified",
+          "body_sha256": "b0bf37a661589ebbb04b447c7f87744bc62bf383b945770442e553ef1c461233"
+        }
+      ]
+    },
+    {
+      "root": "userio",
+      "query": "message",
+      "partial": false,
+      "truncated": true,
+      "warnings": [],
+      "coverage": "strong_match",
+      "hits": [
+        {
+          "path": "/home/roomhacker/agents-projects/universal-userio/deploy/whatsapp-bridge/owner_message_gate.js",
+          "start_line": 29,
+          "end_line": 38,
+          "freshness": "source_verified",
+          "body_sha256": "c1388cfa100d662ca04bca72e003e94c5ec56d87288a7a27ccbbaf6bd8b5f8af"
+        },
+        {
+          "path": "/home/roomhacker/agents-projects/universal-userio/tests/test_message_edits.py",
+          "start_line": 18,
+          "end_line": 23,
+          "freshness": "source_verified",
+          "body_sha256": "a6ac8eeeba7e9b451699f5780ab6153bfb3cde1c068fe2b78f0a6252d1d0a6a7"
+        }
+      ]
+    },
+    {
+      "root": "autogram",
+      "query": "client",
+      "partial": false,
+      "truncated": true,
+      "warnings": [],
+      "coverage": "strong_match",
+      "hits": [
+        {
+          "path": "/home/roomhacker/PycharmProjects/AutoFindClient/ORCHESTRATOR.md",
+          "start_line": 1,
+          "end_line": 80,
+          "freshness": "source_verified",
+          "body_sha256": "71d3769a004f1085f8237d74a00ab1cfed9dc0bd288bc5bd0b68359c3c2049a8"
+        },
+        {
+          "path": "/home/roomhacker/PycharmProjects/AutoFindClient/README.md",
+          "start_line": 1,
+          "end_line": 46,
+          "freshness": "source_verified",
+          "body_sha256": "b57d159d1f0e2e9533fa4e3951f128c30c79a25a7691ec3fd656b4ec0f6f2d2b"
+        }
+      ]
+    },
+    {
+      "root": "httpx-reference",
+      "query": "HTTPTransport retries",
+      "partial": false,
+      "truncated": false,
+      "warnings": [],
+      "coverage": "strong_match",
+      "hits": [
+        {
+          "path": "/home/roomhacker/.local/share/grepmesh-ranked/reference-httpx-b5addb6/httpx/_transports/default.py",
+          "start_line": 18,
+          "end_line": 21,
+          "freshness": "source_verified",
+          "body_sha256": "bfb106716ce33f4c29583cc1e43803109a9dba532613ec4f6fe2cd09e7c022e3"
+        },
+        {
+          "path": "/home/roomhacker/.local/share/grepmesh-ranked/reference-httpx-b5addb6/docs/advanced/transports.md",
+          "start_line": 7,
+          "end_line": 36,
+          "freshness": "source_verified",
+          "body_sha256": "55648dd15c551f151f538aa79c8d2934bb581528d85bcc0fe3d810ac4a5ca382"
+        }
+      ]
+    }
+  ],
+  "manifest_admitted": 11332,
+  "persisted_unique_paths": 11332,
+  "outside_manifest": 0,
+  "admitted_missing": 0,
+  "missing_zero_bytes": 0,
+  "missing_nonempty_or_gone": 0,
+  "missing_extensions": {},
+  "missing_paths": [],
+  "scope": "reachability and source verification; not a ranking-quality test"
+}

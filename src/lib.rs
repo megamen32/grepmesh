@@ -18,6 +18,7 @@ mod ocr_png;
 #[path = "ocr_disabled.rs"]
 pub mod ocr;
 pub mod remote_index;
+pub mod ranked;
 pub mod server;
 pub mod stt;
 pub mod topology;

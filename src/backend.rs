@@ -530,6 +530,24 @@ impl LocalBackend {
         Ok(entries)
     }
 
+    pub(crate) fn selected_ranked_roots(&self, names: &[String]) -> Result<Vec<PathBuf>> {
+        if names.is_empty() { return Ok(self.default_search_roots()) }
+        let mut roots = Vec::new();
+        for name in names {
+            if let Some(paths) = self.root_paths.get(name) {
+                roots.extend(paths.iter().cloned());
+            } else {
+                let requested = fs::canonicalize(name)
+                    .map_err(|_| anyhow::anyhow!("unknown ranked search root"))?;
+                anyhow::ensure!(self.root_paths.values().flatten().any(|root| requested.starts_with(root)),
+                    "ranked search root is outside configured roots");
+                roots.push(requested);
+            }
+        }
+        roots.sort(); roots.dedup();
+        Ok(roots)
+    }
+
     fn selected_roots(&self, names: &[String]) -> Result<Vec<PathBuf>> {
         let mut roots = self.default_search_roots();
         if !names.is_empty() {
