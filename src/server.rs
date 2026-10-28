@@ -872,7 +872,11 @@ async fn call_tool(service: &MeshService, jobs: &SearchJobs, params: Value) -> R
     Ok(tool_content(tool_result.data, service)?)
 }
 
-fn apply_filesystem_acl_metadata(name: &str, arguments: &mut Value, delegated_acl: Option<Value>) -> Result<()> {
+fn apply_filesystem_acl_metadata(
+    name: &str,
+    arguments: &mut Value,
+    delegated_acl: Option<Value>,
+) -> Result<()> {
     let supported = matches!(name, "search" | "search_text" | "read_text");
     if delegated_acl.is_some() && !supported {
         anyhow::bail!("GPTAdmin filesystem ACL is valid only for GrepMesh search/read_text")
@@ -883,16 +887,19 @@ fn apply_filesystem_acl_metadata(name: &str, arguments: &mut Value, delegated_ac
         }
         return Ok(());
     };
-    let peer_acl = if delegated_acl.is_none() && supported {
-        let peer_hop = object
-            .get("hop_count")
-            .and_then(Value::as_u64)
-            .is_some_and(|hop| hop > 0)
-            && object
-                .get("origin_host")
-                .and_then(Value::as_str)
-                .is_some_and(|host| !host.trim().is_empty());
-        peer_hop.then(|| object.get("filesystem_acl").cloned()).flatten()
+    let peer_hop = object
+        .get("hop_count")
+        .and_then(Value::as_u64)
+        .is_some_and(|hop| hop > 0)
+        && object
+            .get("origin_host")
+            .and_then(Value::as_str)
+            .is_some_and(|host| !host.trim().is_empty());
+    let peer_acl = if delegated_acl.is_none() && supported && peer_hop {
+        match object.get("filesystem_acl") {
+            Some(acl) if !acl.is_null() => Some(acl.clone()),
+            _ => anyhow::bail!("peer read requires a verified GPTAdmin filesystem ACL"),
+        }
     } else {
         None
     };
@@ -1085,6 +1092,19 @@ mod tests {
         });
         apply_filesystem_acl_metadata("search", &mut peer_args, None).unwrap();
         assert_eq!(peer_args["filesystem_acl"]["profile_id"], "qa-profile");
+
+        for missing_acl in [
+            json!({"query":"allowed marker", "origin_host":"server-100", "hop_count":1}),
+            json!({"query":"allowed marker", "origin_host":"server-100", "hop_count":1, "filesystem_acl":null}),
+        ] {
+            let mut missing_acl = missing_acl;
+            assert!(
+                apply_filesystem_acl_metadata("search", &mut missing_acl, None)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("peer read requires a verified GPTAdmin filesystem ACL")
+            );
+        }
 
         let mut invalid = json!({"query":"allowed marker"});
         let empty_roots = filesystem_acl_fixture("");

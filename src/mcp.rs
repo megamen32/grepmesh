@@ -880,6 +880,9 @@ impl MeshService {
             .first()
             .cloned()
             .unwrap_or_else(|| self.local.host_id.clone());
+        if target != self.local.host_id && filesystem_acl.is_none() {
+            anyhow::bail!("remote read requires a verified GPTAdmin filesystem ACL")
+        }
         let response = if target == self.local.host_id {
             let chunks = self.local.read_text(&path, start_line, end_line)?;
             ReadResponse {
@@ -1223,6 +1226,17 @@ impl MeshService {
                         truncated,
                     ))
                 } else {
+                    if filesystem_acl.is_none() {
+                        return Ok((
+                            Vec::new(),
+                            vec![PerHostStatus::partial(
+                                target.clone(),
+                                "remote search requires a verified GPTAdmin filesystem ACL",
+                            )],
+                            true,
+                            false,
+                        ));
+                    }
                     let peer = service
                         .peer_config(&target)
                         .ok_or_else(|| anyhow!("unknown peer {}", target))?;
