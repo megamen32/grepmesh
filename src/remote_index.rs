@@ -2,11 +2,10 @@
 //! metadata cross the existing mesh API; original files stay at their source.
 
 use crate::{
-    backend::{MatchLine, SearchHit, SearchMode},
+    backend::{SearchHit, SearchMode},
     config::{RemoteIndexSourceConfig, RemoteIndexStoreConfig},
 };
 use anyhow::{anyhow, Context, Result};
-use globset::{Glob, GlobSet, GlobSetBuilder};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -266,117 +265,27 @@ impl RemoteIndexStore {
 
     pub fn search_filtered(
         &self,
-        query: &str,
-        limit: usize,
-        mode: &SearchMode,
-        path_globs: &[String],
+        _query: &str,
+        _limit: usize,
+        _mode: &SearchMode,
+        _path_globs: &[String],
     ) -> Result<Vec<SearchHit>> {
-        if query.chars().count() < 3 || limit == 0 || matches!(mode, SearchMode::Regex) {
-            return Ok(Vec::new());
-        }
-        let positive = path_globs
-            .iter()
-            .filter(|glob| !glob.starts_with('!'))
-            .cloned()
-            .collect::<Vec<_>>();
-        let negative = path_globs
-            .iter()
-            .filter_map(|glob| glob.strip_prefix('!').map(str::to_owned))
-            .collect::<Vec<_>>();
-        let includes = compile_path_globs(&positive)?;
-        let rejects = compile_path_globs(&negative)?;
-        let db = self.connection()?;
-        let fts_query = format!("\"{}\"", query.replace('"', "\"\""));
-        // Keep large extracted bodies out of the FTS candidate scan. A path
-        // filter can reject most candidates, so fetch the body only after the
-        // source root and requested globs have both been authorized.
-        let mut stmt = db.prepare("SELECT d.rowid,d.source_host,d.root_name,d.path,r.size,r.mtime_ns FROM grepmesh_remote_documents d JOIN grepmesh_remote_rows r ON r.fts_rowid=d.rowid WHERE grepmesh_remote_documents MATCH ?1 AND r.source_read_authorized=1 ORDER BY d.source_host,d.path")?;
-        let mut rows = stmt.query(params![fts_query])?;
-        let mut body_stmt =
-            db.prepare("SELECT body FROM grepmesh_remote_documents WHERE rowid=?1")?;
-        let needle = if matches!(mode, SearchMode::CaseInsensitiveLiteral) {
-            query.to_lowercase()
-        } else {
-            query.to_owned()
-        };
-        let mut hits = Vec::new();
-        while let Some(row) = rows.next()? {
-            let rowid: i64 = row.get(0)?;
-            let host: String = row.get(1)?;
-            let root_name: String = row.get(2)?;
-            let path: String = row.get(3)?;
-            let size: u64 = row.get(4)?;
-            let modified_ns: String = row.get(5)?;
-            let source_root = self
-                .config
-                .allowed_roots
-                .get(&host)
-                .and_then(|roots| roots.get(&root_name))
-                .ok_or_else(|| anyhow!("remote index row has no authorized root"))?;
-            let source_path = Path::new(&path);
-            if !source_path.starts_with(source_root) {
-                continue;
-            }
-            let relative = source_path.strip_prefix(source_root).unwrap_or(source_path);
-            let matches = |set: &GlobSet| set.is_match(source_path) || set.is_match(relative);
-            if (!positive.is_empty() && !matches(&includes)) || matches(&rejects) {
-                continue;
-            }
-            let body: String = body_stmt.query_row(params![rowid], |row| row.get(0))?;
-            let modified_ms = (modified_ns.parse::<u128>().unwrap_or_default() / 1_000_000)
-                .min(u64::MAX as u128) as u64;
-            let mut lines = Vec::new();
-            for (index, line) in body.lines().enumerate() {
-                let haystack = if matches!(mode, SearchMode::CaseInsensitiveLiteral) {
-                    line.to_lowercase()
-                } else {
-                    line.to_owned()
-                };
-                if let Some(column) = haystack.find(&needle) {
-                    lines.push(MatchLine {
-                        line_number: index + 1,
-                        text: line.chars().take(1200).collect(),
-                    });
-                    hits.push(SearchHit {
-                        host_id: host.clone(),
-                        path: path.clone(),
-                        line_number: index + 1,
-                        text: line.chars().take(1200).collect(),
-                        column: column + 1,
-                        size: Some(size),
-                        modified_ms: Some(modified_ms),
-                        context: Vec::new(),
-                        ..Default::default()
-                    });
-                    if hits.len() >= limit {
-                        return Ok(hits);
-                    }
-                }
-            }
-            if let Some(last) = hits
-                .last_mut()
-                .filter(|hit| hit.host_id == host && hit.path == path)
-            {
-                last.context = lines;
-            }
-        }
-        Ok(hits)
+        // `source_read_authorized` only proves that the GrepMesh service
+        // account could open the source path during synchronization. MCP
+        // currently authenticates a shared peer bearer and does not carry a
+        // verified end-user principal or per-document ACL to this receiver.
+        // Returning indexed bodies here would therefore widen the source
+        // account's access to every peer caller. Fail closed until that
+        // principal and its source ACL are propagated and checked end-to-end.
+        Err(anyhow!(
+            "remote indexed search denied: caller identity and per-document ACL are unavailable"
+        ))
     }
 
     pub fn path_metadata(&self, source_host: &str, path: &Path) -> Result<Option<(u64, u64)>> {
         let db = self.connection()?;
         db.query_row("SELECT size,updated_ms FROM grepmesh_remote_rows WHERE source_host=?1 AND path=?2 LIMIT 1", params![source_host, path.to_string_lossy()], |row| Ok((row.get(0)?,row.get(1)?))).optional().map_err(Into::into)
     }
-}
-
-fn compile_path_globs(patterns: &[String]) -> Result<GlobSet> {
-    let mut builder = GlobSetBuilder::new();
-    for pattern in patterns {
-        builder.add(Glob::new(pattern).map_err(|error| anyhow!("invalid path glob: {error}"))?);
-    }
-    builder
-        .build()
-        .map_err(|error| anyhow!("invalid path glob set: {error}"))
 }
 
 fn unix_time_ms() -> u64 {
@@ -680,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_store_searches_original_path_and_delete_is_idempotent() {
+    fn remote_store_does_not_treat_service_read_grant_as_caller_acl() {
         let tmp = tempdir().unwrap();
         let root = tmp.path().join("docs");
         fs::create_dir(&root).unwrap();
@@ -698,12 +607,15 @@ mod tests {
         };
         store.upsert(doc.clone()).unwrap();
         store.upsert(doc).unwrap();
-        let hits = store
+        assert_eq!(
+            store.path_metadata("server-100", &path).unwrap().unwrap().0,
+            12
+        );
+        let denied = store
             .search("remote needle", 8, &SearchMode::Literal)
-            .unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].host_id, "server-100");
-        assert_eq!(hits[0].path, path.display().to_string());
+            .unwrap_err();
+        assert!(denied.to_string().contains("caller identity"));
+        assert!(!denied.to_string().contains("find remote needle"));
         store
             .delete(RemoteDelete {
                 source_host: "server-100".into(),
@@ -715,13 +627,10 @@ mod tests {
             .delete(RemoteDelete {
                 source_host: "server-100".into(),
                 root_name: "docs".into(),
-                path,
+                path: path.clone(),
             })
             .unwrap();
-        assert!(store
-            .search("remote needle", 8, &SearchMode::Literal)
-            .unwrap()
-            .is_empty());
+        assert_eq!(store.path_metadata("server-100", &path).unwrap(), None);
     }
 
     #[test]
@@ -791,10 +700,10 @@ mod tests {
         assert!(!denied.source_read_authorized);
         let denied = store.upsert(denied);
         assert!(denied.is_err());
-        let hits = store
+        let denied = store
             .search("expose this", 8, &SearchMode::Literal)
-            .unwrap();
-        assert!(hits.is_empty());
+            .unwrap_err();
+        assert!(denied.to_string().contains("caller identity"));
     }
 
     #[test]
@@ -833,8 +742,9 @@ mod tests {
         assert_ne!(migrated.status().unwrap().epoch, "legacy-epoch");
         assert!(migrated
             .search("authorization fixture", 8, &SearchMode::Literal)
-            .unwrap()
-            .is_empty());
+            .unwrap_err()
+            .to_string()
+            .contains("caller identity"));
         migrated
             .upsert(RemoteDocument {
                 source_host: "server-100".into(),
@@ -846,13 +756,11 @@ mod tests {
                 body: "reauthorized fixture text".into(),
             })
             .unwrap();
-        assert_eq!(
-            migrated
-                .search("reauthorized fixture", 8, &SearchMode::Literal)
-                .unwrap()
-                .len(),
-            1
-        );
+        assert!(migrated
+            .search("reauthorized fixture", 8, &SearchMode::Literal)
+            .unwrap_err()
+            .to_string()
+            .contains("caller identity"));
     }
 
     #[test]
@@ -981,17 +889,16 @@ mod tests {
         server.await.unwrap();
 
         assert_eq!(remote.status().unwrap().document_count, 1);
-        assert_eq!(
-            remote
-                .search("authorized fixture marker", 8, &SearchMode::Literal)
-                .unwrap()
-                .len(),
-            1
-        );
+        assert!(remote
+            .search("authorized fixture marker", 8, &SearchMode::Literal)
+            .unwrap_err()
+            .to_string()
+            .contains("caller identity"));
         assert!(remote
             .search("secret denied fixture marker", 8, &SearchMode::Literal)
-            .unwrap()
-            .is_empty());
+            .unwrap_err()
+            .to_string()
+            .contains("caller identity"));
     }
 
     #[test]

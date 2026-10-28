@@ -1910,7 +1910,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lossless_body_copy_remote_root_alias_search_does_not_scan_unrelated_local_roots() {
+    async fn remote_root_alias_search_fails_closed_without_caller_acl() {
         let temp = tempfile::tempdir().unwrap();
         let local_root = temp.path().join("local");
         std::fs::create_dir(&local_root).unwrap();
@@ -1961,9 +1961,13 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(result.hits.len(), 1);
-        assert_eq!(result.hits[0].host_id, "server-100");
-        assert_eq!(result.hits[0].path, source_path.display().to_string());
+        assert!(result.hits.is_empty());
+        assert!(result.partial);
+        assert!(result
+            .partial_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("caller identity"));
 
         let excluded = backend
             .search_text_bounded(
@@ -1977,6 +1981,7 @@ mod tests {
             .await
             .unwrap();
         assert!(excluded.hits.is_empty());
+        assert!(excluded.partial);
         assert!(local_match.is_file());
     }
 
