@@ -80,6 +80,7 @@ jobs:
             export RUSTFLAGS='-C link-arg=-Wl,-rpath,@executable_path/lib'
             cargo build --release --locked --target "${{ matrix.rust_target }}" --no-default-features --features ocr
           elif [[ "${{ matrix.target }}" == "macos-aarch64" ]]; then
+            export CC="$(xcrun --find clang)"
             cargo build --release --locked --target "${{ matrix.rust_target }}" --features ocr-coreml
           elif [[ "${{ matrix.target }}" == "linux-x86_64" ]]; then
             cargo build --release --locked --target "${{ matrix.rust_target }}" --features ocr-cuda
