@@ -171,6 +171,7 @@ fn device_id(_: &fs::Metadata) -> Option<u64> {
 #[derive(Clone, Debug)]
 pub struct PersistentIndex {
     path: PathBuf,
+    schema_initialized: Arc<Mutex<bool>>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -188,7 +189,10 @@ impl PersistentIndex {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
         }
-        let store = Self { path };
+        let store = Self {
+            path,
+            schema_initialized: Arc::new(Mutex::new(false)),
+        };
         store.connection()?;
         store.migrate_cache_update_trigger()?;
         store.migrate_document_rows()?;
@@ -202,7 +206,10 @@ impl PersistentIndex {
         if !path.is_file() {
             return Err("body compaction requires an existing SQLite index file".into());
         }
-        let store = Self { path };
+        let store = Self {
+            path,
+            schema_initialized: Arc::new(Mutex::new(false)),
+        };
         // Maintenance must coexist with the live index writer. The normal
         // connection helper re-runs schema DDL and PRAGMA journal_mode=WAL,
         // which can contend for a schema lock even though this command only
@@ -246,16 +253,21 @@ impl PersistentIndex {
 
     fn connection(&self) -> Result<Connection, String> {
         let connection = Connection::open(&self.path).map_err(|error| error.to_string())?;
-        connection
-            .execute_batch(
+        let mut schema_initialized = self
+            .schema_initialized
+            .lock()
+            .map_err(|_| "SQLite schema initialization lock poisoned".to_string())?;
+        if !*schema_initialized {
+            connection
+                .execute_batch(
                 "PRAGMA journal_mode=WAL;\
                  CREATE VIRTUAL TABLE IF NOT EXISTS grepmesh_documents \
                  USING fts5(path UNINDEXED, body, tokenize='trigram');                 CREATE TABLE IF NOT EXISTS grepmesh_extraction_cache (                   path TEXT PRIMARY KEY,                   size INTEGER NOT NULL,                   mtime_ns TEXT NOT NULL,                   body TEXT NOT NULL                 );                 CREATE TABLE IF NOT EXISTS grepmesh_metadata (                   key TEXT PRIMARY KEY,                   value TEXT NOT NULL                 );",
-            )
-            .map_err(|error| error.to_string())?;
-        connection
-            .execute_batch(
-                "CREATE TABLE IF NOT EXISTS grepmesh_pending_ocr (path TEXT PRIMARY KEY);\
+                )
+                .map_err(|error| error.to_string())?;
+            connection
+                .execute_batch(
+                    "CREATE TABLE IF NOT EXISTS grepmesh_pending_ocr (path TEXT PRIMARY KEY);\
                  CREATE TABLE IF NOT EXISTS grepmesh_ocr_attempts (\
                    path TEXT PRIMARY KEY, size INTEGER NOT NULL, mtime_ns TEXT NOT NULL,\
                    failures INTEGER NOT NULL CHECK(failures BETWEEN 0 AND 4)\
@@ -283,8 +295,10 @@ impl PersistentIndex {
                  AFTER DELETE ON grepmesh_extraction_cache BEGIN \
                    DELETE FROM grepmesh_metadata WHERE key='document_rows_v1'; \
                  END;",
-            )
-            .map_err(|error| error.to_string())?;
+                )
+                .map_err(|error| error.to_string())?;
+            *schema_initialized = true;
+        }
         Ok(connection)
     }
 
@@ -3400,6 +3414,32 @@ fn excluded(path: &Path, root: &Path, excludes: &GlobSet) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn persistent_index_clones_share_one_schema_initialization_guard() {
+        use super::*;
+
+        let temp = tempfile::tempdir().unwrap();
+        let index = PersistentIndex::open(temp.path().join("index.sqlite")).unwrap();
+        let clone = index.clone();
+
+        assert!(Arc::ptr_eq(
+            &index.schema_initialized,
+            &clone.schema_initialized
+        ));
+        index.connection().unwrap();
+        clone.connection().unwrap();
+        assert!(*index.schema_initialized.lock().unwrap());
+        assert!(clone
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='grepmesh_extraction_cache'",
+                [],
+                |_| Ok(()),
+            )
+            .is_ok());
+    }
+
+    #[test]
     fn activity_root_recent_metadata_fails_closed() {
         use super::*;
 
@@ -4035,7 +4075,10 @@ mod tests {
         std::fs::write(dir.path().join("index.sqlite-wal"), [0u8; 7]).unwrap();
         std::fs::write(dir.path().join("index.sqlite-shm"), [0u8; 3]).unwrap();
         let mut manager = super::IndexManager::disabled();
-        manager.persistent = Some(super::PersistentIndex { path });
+        manager.persistent = Some(super::PersistentIndex {
+            path,
+            schema_initialized: Arc::new(Mutex::new(false)),
+        });
         assert_eq!(manager.database_bytes(), Some(21));
         std::fs::remove_file(dir.path().join("index.sqlite-wal")).unwrap();
         assert_eq!(manager.database_bytes(), Some(14));
