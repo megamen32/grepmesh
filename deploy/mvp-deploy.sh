@@ -205,16 +205,26 @@ for key in ("host_id", "bind", "peers"):
     if key not in cfg:
         raise SystemExit(f"missing key: {key}")
 if cfg.get("remote_index_source") or cfg.get("remote_index_store"):
-    token_env = cfg.get("remote_index_auth_token_env")
-    if not isinstance(token_env, str) or not token_env.strip():
-        raise SystemExit("remote index requires remote_index_auth_token_env")
+    bind = cfg.get("bind", "")
+    if not str(bind).startswith(("127.", "[::1]")):
+        peer_env = cfg.get("peer_auth_token_env")
+        if not isinstance(peer_env, str) or not peer_env.strip():
+            raise SystemExit("network-bound remote index requires peer_auth_token_env")
     import pathlib
     env_file = pathlib.Path("/etc/grepmesh-mcp/peer.env")
     if not env_file.is_file():
         raise SystemExit("remote index peer env file is missing")
-    prefix = token_env + "="
-    if not any(line.startswith(prefix) and line[len(prefix):].strip() for line in env_file.read_text().splitlines()):
-        raise SystemExit("remote index bearer token is absent from peer env file")
+    lines = env_file.read_text().splitlines()
+    keys = ["remote_index_auth_token_env"]
+    if cfg.get("peer_auth_token_env"):
+        keys.append("peer_auth_token_env")
+    for key in keys:
+        token_env = cfg.get(key)
+        if not isinstance(token_env, str) or not token_env.strip():
+            raise SystemExit(f"remote index requires {key}")
+        prefix = token_env + "="
+        if not any(line.startswith(prefix) and line[len(prefix):].strip() for line in lines):
+            raise SystemExit(f"configured {key} is absent from peer env file")
 PY
 
 RECEIPT_DIR=$RECEIPT_ROOT/$TS

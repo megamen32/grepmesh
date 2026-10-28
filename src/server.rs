@@ -35,6 +35,30 @@ struct AppState {
 }
 
 pub async fn run_server(mut config: AppConfig) -> Result<()> {
+    let peer_auth_token = config
+        .peer_auth_token_env
+        .as_deref()
+        .map(env::var)
+        .transpose()?
+        .filter(|token| !token.trim().is_empty());
+    let remote_index_auth_token = config
+        .remote_index_auth_token_env
+        .as_deref()
+        .map(env::var)
+        .transpose()?
+        .filter(|token| !token.trim().is_empty());
+    let remote_index_configured =
+        config.remote_index_source.is_some() || config.remote_index_store.is_some();
+    if remote_index_configured && remote_index_auth_token.is_none() {
+        return Err(anyhow!(
+            "remote index is configured but its bearer token is unavailable"
+        ));
+    }
+    if remote_index_configured && !config.bind.ip().is_loopback() && peer_auth_token.is_none() {
+        return Err(anyhow!(
+            "network-bound remote index MCP requires a configured peer bearer token"
+        ));
+    }
     let cached_snapshot =
         config
             .topology_cache_path
@@ -167,34 +191,15 @@ pub async fn run_server(mut config: AppConfig) -> Result<()> {
     if let Some(store) = remote_index_store.clone() {
         local = local.with_remote_index_store(store);
     }
-    let peer_auth_token = config
-        .peer_auth_token_env
-        .as_deref()
-        .map(env::var)
-        .transpose()?
-        .filter(|token| !token.trim().is_empty());
-    let remote_index_auth_token = config
-        .remote_index_auth_token_env
-        .as_deref()
-        .map(env::var)
-        .transpose()?
-        .filter(|token| !token.trim().is_empty());
-    if (config.remote_index_source.is_some() || config.remote_index_store.is_some())
-        && remote_index_auth_token.is_none()
-    {
-        return Err(anyhow!(
-            "remote index is configured but its bearer token is unavailable"
-        ));
-    }
     let remote_bind = config.bind;
     let local_bind = config.local_bind;
     if local_bind.is_some_and(|bind| !bind.ip().is_loopback()) {
         return Err(anyhow!("local_bind must be a loopback address"));
     }
     let backup_catalog = config.backup_catalog.clone();
-    // Transport security is opt-in. The default listener is loopback-only, and
-    // deployments already protected by a GPTAdmin tunnel do not need a second
-    // bearer-auth layer. Setting peer_auth_token_env explicitly enables it.
+    // A network-bound remote-index source/store requires peer auth above so
+    // MCP search cannot bypass the separately authenticated source-sync API.
+    // Other deployments retain the existing opt-in peer-auth behavior.
     let require_peer_auth = peer_auth_token.is_some();
     if let (Some(sync), Some(index_path)) = (
         config.remote_index_source.clone(),
@@ -441,9 +446,11 @@ async fn guard_request_intake(
     request: Request,
     next: Next,
 ) -> Response {
-    // Authenticate using precisely the existing peer policy before any body
-    // buffering. Keep origin and protocol validation in their existing handlers.
+    // Authenticate remote MCP search before buffering its body. Remote-index
+    // write routes use their separate token; compute routes validate in-handler;
+    // /health intentionally remains public for deployment liveness probes.
     if state.require_peer_auth
+        && matches!(request.uri().path(), "/" | "/mcp")
         && validate_peer_auth(request.headers(), state.peer_auth_token.as_deref()).is_err()
     {
         return (
@@ -511,16 +518,7 @@ async fn compute_extract(
     }
 }
 
-async fn health(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if state.require_peer_auth
-        && validate_peer_auth(&headers, state.peer_auth_token.as_deref()).is_err()
-    {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"ok": false, "error": "peer authentication failed"})),
-        )
-            .into_response();
-    }
+async fn health() -> Response {
     (StatusCode::OK, Json(json!({"ok": true}))).into_response()
 }
 
@@ -1015,6 +1013,7 @@ fn bound_tool_data(mut data: Value, max_bytes: usize) -> anyhow::Result<Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     #[test]
     fn body_intake_covers_unknown_and_large_rpc_without_blocking_small_search() {
@@ -1027,6 +1026,81 @@ mod tests {
         headers.insert(header::CONTENT_LENGTH, "2097153".parse().unwrap());
         assert!(requires_bounded_intake("/", &headers));
         assert!(requires_bounded_intake("/mcp", &headers));
+    }
+
+    #[tokio::test]
+    async fn mcp_search_authorization_denies_missing_bearer_and_allows_authorized_search() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = "acl-authorized-fixture-marker";
+        fs::write(root.path().join("authorized.md"), marker).unwrap();
+        let local = LocalBackend::from_config_with_ingestion(
+            "local",
+            root.path(),
+            Default::default(),
+            BTreeMap::from([("local".to_string(), vec![root.path().to_path_buf()])]),
+            Vec::new(),
+            None,
+            Default::default(),
+            Default::default(),
+        );
+        let state = AppState {
+            service: Arc::new(MeshService::new(local, Topology::new("local", vec![]))),
+            compute: Arc::new(ComputeWorker::new(
+                "local".into(),
+                Default::default(),
+                Default::default(),
+                128 * 1024,
+            )),
+            jobs: SearchJobs::default(),
+            peer_auth_token: Some("fixture-peer-token".into()),
+            remote_index_auth_token: None,
+            require_peer_auth: true,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = build_app(state);
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = stop_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        let payload = json!({
+            "jsonrpc":"2.0", "id":1, "method":"tools/call",
+            "params":{"name":"search","arguments":{
+                "query":marker,"hosts":["local"],"roots":["local"],
+                "max_matches":2,"wait_ms":5000
+            }}
+        });
+        let client = reqwest::Client::new();
+        let denied = client
+            .post(format!("http://{address}/mcp"))
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        let denied_body = denied.text().await.unwrap();
+        assert!(!denied_body.contains(marker));
+
+        let allowed = client
+            .post(format!("http://{address}/mcp"))
+            .bearer_auth("fixture-peer-token")
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+        let allowed_body = allowed.text().await.unwrap();
+        assert!(
+            allowed_body.contains(marker),
+            "authorized MCP search did not return its fixture hit"
+        );
+        let _ = stop_tx.send(());
+        server.await.unwrap();
     }
 
     #[test]

@@ -2,6 +2,7 @@
   "host_id": "server-100",
   "bind": "192.168.2.100:9419",
   "local_bind": "127.0.0.1:9419",
+  "peer_auth_token_env": "GREPMESH_PEER_TOKEN",
   "root": "/home/roomhacker",
   "roots": {
     "home": [

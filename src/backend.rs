@@ -1934,6 +1934,7 @@ mod tests {
                 path: source_path.clone(),
                 size: 40,
                 mtime_ns: 1,
+                source_read_authorized: true,
                 body: "remote scoped pilot marker".into(),
             })
             .unwrap();

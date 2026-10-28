@@ -67,6 +67,9 @@ import json, sys
 c100, c44 = (json.load(open(path, encoding="utf-8")) for path in sys.argv[1:])
 assert c100["host_id"] == "server-100", "config 100 host_id mismatch"
 assert c44["host_id"] == "server-44", "config 44 host_id mismatch"
+peer_auth_100 = c100.get("peer_auth_token_env")
+peer_auth_44 = c44.get("peer_auth_token_env")
+assert peer_auth_100 and peer_auth_100 == peer_auth_44, "both MCP peers must require the same bearer environment key"
 peer44 = [p for p in c100.get("peers", []) if p.get("host_id") == "server-44"]
 peer100 = [p for p in c44.get("peers", []) if p.get("host_id") == "server-100"]
 assert len(peer44) == len(peer100) == 1, "both reciprocal peer routes are required"

@@ -19,12 +19,17 @@ use std::{
 };
 
 pub const MAX_REMOTE_DOCUMENT_BYTES: usize = 1024 * 1024;
-const SOURCE_DOCUMENTS_QUERY: &str = "SELECT cache.path,cache.size,cache.mtime_ns,\
-     CASE WHEN cache.body='' THEN documents.body ELSE cache.body END \
+const SOURCE_DOCUMENTS_QUERY: &str = "SELECT cache.path,cache.size,cache.mtime_ns \
      FROM grepmesh_extraction_cache AS cache \
      JOIN grepmesh_document_rows AS rows ON rows.path=cache.path \
      JOIN grepmesh_documents AS documents ON documents.rowid=rows.fts_rowid \
      WHERE cache.path>=?1 AND cache.path<?2 ORDER BY cache.path";
+const SOURCE_DOCUMENT_BODY_QUERY: &str =
+    "SELECT CASE WHEN cache.body='' THEN documents.body ELSE cache.body END \
+     FROM grepmesh_extraction_cache AS cache \
+     JOIN grepmesh_document_rows AS rows ON rows.path=cache.path \
+     JOIN grepmesh_documents AS documents ON documents.rowid=rows.fts_rowid \
+     WHERE cache.path=?1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteDocument {
@@ -33,6 +38,10 @@ pub struct RemoteDocument {
     pub path: PathBuf,
     pub size: u64,
     pub mtime_ns: u128,
+    /// The source currently confirms that its service identity can read this
+    /// exact regular file. Missing claims are denied for wire compatibility.
+    #[serde(default)]
+    pub source_read_authorized: bool,
     pub body: String,
 }
 
@@ -72,7 +81,7 @@ impl RemoteIndexStore {
         let store = Self {
             config: Arc::new(config),
         };
-        let db = store.connection()?;
+        let mut db = store.connection()?;
         db.execute_batch(
             "PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS grepmesh_remote_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -80,12 +89,37 @@ impl RemoteIndexStore {
                source_host TEXT NOT NULL,root_name TEXT NOT NULL,path TEXT NOT NULL,
                size INTEGER NOT NULL,mtime_ns TEXT NOT NULL,body_sha256 TEXT NOT NULL,
                fts_rowid INTEGER NOT NULL,updated_ms INTEGER NOT NULL,
+               source_read_authorized INTEGER NOT NULL DEFAULT 0,
                PRIMARY KEY(source_host,root_name,path));
              CREATE INDEX IF NOT EXISTS grepmesh_remote_size ON grepmesh_remote_rows(size);
              CREATE VIRTUAL TABLE IF NOT EXISTS grepmesh_remote_documents USING fts5(
                source_host UNINDEXED,root_name UNINDEXED,path UNINDEXED,body,tokenize='trigram');
              INSERT OR IGNORE INTO grepmesh_remote_meta(key,value) VALUES('epoch',lower(hex(randomblob(16))));",
         )?;
+        let has_source_read_auth = {
+            let mut stmt = db.prepare("PRAGMA table_info(grepmesh_remote_rows)")?;
+            let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            columns
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .iter()
+                .any(|name| name == "source_read_authorized")
+        };
+        if !has_source_read_auth {
+            db.execute_batch("ALTER TABLE grepmesh_remote_rows ADD COLUMN source_read_authorized INTEGER NOT NULL DEFAULT 0;")?;
+        }
+        let auth_schema: Option<String> = db
+            .query_row(
+                "SELECT value FROM grepmesh_remote_meta WHERE key='source_read_authorization_v1'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if auth_schema.as_deref() != Some("1") {
+            let tx = db.transaction()?;
+            tx.execute("UPDATE grepmesh_remote_meta SET value=lower(hex(randomblob(16))) WHERE key='epoch'", [])?;
+            tx.execute("INSERT INTO grepmesh_remote_meta(key,value) VALUES('source_read_authorization_v1','1') ON CONFLICT(key) DO UPDATE SET value=excluded.value", [])?;
+            tx.commit()?;
+        }
         Ok(store)
     }
 
@@ -152,6 +186,11 @@ impl RemoteIndexStore {
     }
 
     pub fn upsert(&self, document: RemoteDocument) -> Result<()> {
+        if !document.source_read_authorized {
+            return Err(anyhow!(
+                "source denied read authorization for this document"
+            ));
+        }
         let path =
             self.validate_source_path(&document.source_host, &document.root_name, &document.path)?;
         if document.body.len() > MAX_REMOTE_DOCUMENT_BYTES {
@@ -167,7 +206,7 @@ impl RemoteIndexStore {
             params![document.source_host, document.root_name, path], |row| row.get(0),
         ).optional()?;
         let same: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM grepmesh_remote_rows WHERE source_host=?1 AND root_name=?2 AND path=?3 AND size=?4 AND mtime_ns=?5 AND body_sha256=?6)",
+            "SELECT EXISTS(SELECT 1 FROM grepmesh_remote_rows WHERE source_host=?1 AND root_name=?2 AND path=?3 AND size=?4 AND mtime_ns=?5 AND body_sha256=?6 AND source_read_authorized=1)",
             params![document.source_host, document.root_name, path, document.size as i64, document.mtime_ns.to_string(), digest], |row| row.get(0),
         )?;
         if same {
@@ -180,7 +219,7 @@ impl RemoteIndexStore {
             )?;
         }
         tx.execute("INSERT INTO grepmesh_remote_documents(source_host,root_name,path,body) VALUES(?1,?2,?3,?4)", params![document.source_host, document.root_name, path, document.body])?;
-        tx.execute("INSERT INTO grepmesh_remote_rows(source_host,root_name,path,size,mtime_ns,body_sha256,fts_rowid,updated_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(source_host,root_name,path) DO UPDATE SET size=excluded.size,mtime_ns=excluded.mtime_ns,body_sha256=excluded.body_sha256,fts_rowid=excluded.fts_rowid,updated_ms=excluded.updated_ms", params![document.source_host, document.root_name, path, document.size as i64, document.mtime_ns.to_string(), digest, tx.last_insert_rowid(), unix_time_ms() as i64])?;
+        tx.execute("INSERT INTO grepmesh_remote_rows(source_host,root_name,path,size,mtime_ns,body_sha256,fts_rowid,updated_ms,source_read_authorized) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,1) ON CONFLICT(source_host,root_name,path) DO UPDATE SET size=excluded.size,mtime_ns=excluded.mtime_ns,body_sha256=excluded.body_sha256,fts_rowid=excluded.fts_rowid,updated_ms=excluded.updated_ms,source_read_authorized=1", params![document.source_host, document.root_name, path, document.size as i64, document.mtime_ns.to_string(), digest, tx.last_insert_rowid(), unix_time_ms() as i64])?;
         tx.commit()?;
         Ok(())
     }
@@ -251,7 +290,7 @@ impl RemoteIndexStore {
         // Keep large extracted bodies out of the FTS candidate scan. A path
         // filter can reject most candidates, so fetch the body only after the
         // source root and requested globs have both been authorized.
-        let mut stmt = db.prepare("SELECT d.rowid,d.source_host,d.root_name,d.path,r.size,r.mtime_ns FROM grepmesh_remote_documents d JOIN grepmesh_remote_rows r ON r.fts_rowid=d.rowid WHERE grepmesh_remote_documents MATCH ?1 ORDER BY d.source_host,d.path")?;
+        let mut stmt = db.prepare("SELECT d.rowid,d.source_host,d.root_name,d.path,r.size,r.mtime_ns FROM grepmesh_remote_documents d JOIN grepmesh_remote_rows r ON r.fts_rowid=d.rowid WHERE grepmesh_remote_documents MATCH ?1 AND r.source_read_authorized=1 ORDER BY d.source_host,d.path")?;
         let mut rows = stmt.query(params![fts_query])?;
         let mut body_stmt =
             db.prepare("SELECT body FROM grepmesh_remote_documents WHERE rowid=?1")?;
@@ -443,7 +482,26 @@ fn sync_once(
                 let path_text: String = row.get(0)?;
                 let size: u64 = row.get(1)?;
                 let mtime_ns: String = row.get(2)?;
-                let body: String = row.get(3)?;
+                if !source_file_read_authorized(&root, Path::new(&path_text))? {
+                    let deletion = RemoteDelete {
+                        source_host: config.source_host.clone(),
+                        root_name: root_name.clone(),
+                        path: PathBuf::from(&path_text),
+                    };
+                    let url = format!("{}/index/v1/delete", config.endpoint.trim_end_matches('/'));
+                    let mut request = client.post(url).json(&deletion);
+                    if let Some(token) = token {
+                        request = request.bearer_auth(token);
+                    }
+                    request.send()?.error_for_status()?;
+                    state.execute(
+                        "DELETE FROM sync_rows WHERE root_name=?1 AND path=?2",
+                        params![root_name, path_text],
+                    )?;
+                    continue;
+                }
+                let body: String =
+                    source.query_row(SOURCE_DOCUMENT_BODY_QUERY, [&path_text], |row| row.get(0))?;
                 if body.len() > MAX_REMOTE_DOCUMENT_BYTES {
                     continue;
                 }
@@ -459,6 +517,7 @@ fn sync_once(
                     path: PathBuf::from(&path_text),
                     size,
                     mtime_ns: mtime_ns.parse().unwrap_or(0),
+                    source_read_authorized: true,
                     body,
                 };
                 let url = format!("{}/index/v1/upsert", config.endpoint.trim_end_matches('/'));
@@ -496,11 +555,117 @@ fn sync_once(
     Ok(())
 }
 
+/// Verify source-side authorization without reading or logging document text.
+/// A document is eligible only while the service can open its regular-file
+/// target and the resolved target remains inside the configured source root.
+fn source_file_read_authorized(root: &Path, path: &Path) -> Result<bool> {
+    let canonical = match fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            return Ok(false);
+        }
+        Err(_) => return Err(anyhow!("cannot validate source document authorization")),
+    };
+    if !canonical.starts_with(root) {
+        return Ok(false);
+    }
+    let metadata = match fs::metadata(&canonical) {
+        Ok(metadata) => metadata,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            return Ok(false);
+        }
+        Err(_) => return Err(anyhow!("cannot validate source document authorization")),
+    };
+    if !metadata.is_file() {
+        return Ok(false);
+    }
+    match fs::File::open(canonical) {
+        Ok(_) => Ok(true),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(_) => Err(anyhow!("cannot validate source document authorization")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        response::{IntoResponse, Response},
+        routing::{get, post},
+        Json, Router,
+    };
     use std::collections::BTreeMap;
     use tempfile::tempdir;
+
+    #[derive(Clone)]
+    struct TestPeerState {
+        store: RemoteIndexStore,
+        token: String,
+    }
+
+    fn peer_request_is_authorized(headers: &HeaderMap, token: &str) -> bool {
+        headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            == Some(format!("Bearer {token}").as_str())
+    }
+
+    async fn test_peer_status(State(state): State<TestPeerState>, headers: HeaderMap) -> Response {
+        if !peer_request_is_authorized(&headers, &state.token) {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        match state.store.status() {
+            Ok(status) => Json(status).into_response(),
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
+    }
+
+    async fn test_peer_upsert(
+        State(state): State<TestPeerState>,
+        headers: HeaderMap,
+        Json(document): Json<RemoteDocument>,
+    ) -> Response {
+        if !peer_request_is_authorized(&headers, &state.token) {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        match state.store.upsert(document) {
+            Ok(()) => StatusCode::OK.into_response(),
+            Err(_) => StatusCode::BAD_REQUEST.into_response(),
+        }
+    }
+
+    async fn test_peer_delete(
+        State(state): State<TestPeerState>,
+        headers: HeaderMap,
+        Json(deletion): Json<RemoteDelete>,
+    ) -> Response {
+        if !peer_request_is_authorized(&headers, &state.token) {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        match state.store.delete(deletion) {
+            Ok(()) => StatusCode::OK.into_response(),
+            Err(_) => StatusCode::BAD_REQUEST.into_response(),
+        }
+    }
 
     fn config(root: &Path, db: &Path) -> RemoteIndexStoreConfig {
         RemoteIndexStoreConfig {
@@ -528,6 +693,7 @@ mod tests {
             path: path.clone(),
             size: 12,
             mtime_ns: 1,
+            source_read_authorized: true,
             body: "find remote needle in this document".into(),
         };
         store.upsert(doc.clone()).unwrap();
@@ -601,10 +767,231 @@ mod tests {
                 path,
                 size: 1,
                 mtime_ns: 1,
+                source_read_authorized: true,
                 body: "candidate text".into(),
             });
             assert!(result.is_err());
         }
+    }
+
+    #[test]
+    fn remote_store_denies_documents_without_source_read_authorization() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("docs");
+        fs::create_dir(&root).unwrap();
+        let store =
+            RemoteIndexStore::open(config(&root, &tmp.path().join("remote.sqlite3"))).unwrap();
+        let path = root.join("private.md");
+        let payload = serde_json::json!({
+            "source_host":"server-100", "root_name":"docs",
+            "path":path, "size":20, "mtime_ns":1,
+            "body":"never expose this fixture"
+        });
+        let denied: RemoteDocument = serde_json::from_value(payload).unwrap();
+        assert!(!denied.source_read_authorized);
+        let denied = store.upsert(denied);
+        assert!(denied.is_err());
+        let hits = store
+            .search("expose this", 8, &SearchMode::Literal)
+            .unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn legacy_remote_rows_migrate_to_deny_until_the_source_reauthorizes_them() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("docs");
+        fs::create_dir(&root).unwrap();
+        let db_path = tmp.path().join("remote.sqlite3");
+        let path = root.join("old.md");
+        let db = Connection::open(&db_path).unwrap();
+        db.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE grepmesh_remote_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+             INSERT INTO grepmesh_remote_meta(key,value) VALUES('epoch','legacy-epoch');
+             CREATE TABLE grepmesh_remote_rows(
+               source_host TEXT NOT NULL,root_name TEXT NOT NULL,path TEXT NOT NULL,
+               size INTEGER NOT NULL,mtime_ns TEXT NOT NULL,body_sha256 TEXT NOT NULL,
+               fts_rowid INTEGER NOT NULL,updated_ms INTEGER NOT NULL,
+               PRIMARY KEY(source_host,root_name,path));
+             CREATE VIRTUAL TABLE grepmesh_remote_documents USING fts5(
+               source_host UNINDEXED,root_name UNINDEXED,path UNINDEXED,body,tokenize='trigram');",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO grepmesh_remote_documents(source_host,root_name,path,body) VALUES('server-100','docs',?1,'legacy authorization fixture')",
+            params![path.to_string_lossy()],
+        ).unwrap();
+        let rowid = db.last_insert_rowid();
+        db.execute(
+            "INSERT INTO grepmesh_remote_rows(source_host,root_name,path,size,mtime_ns,body_sha256,fts_rowid,updated_ms) VALUES('server-100','docs',?1,20,'1','legacy',?2,1)",
+            params![path.to_string_lossy(), rowid],
+        ).unwrap();
+        drop(db);
+
+        let migrated = RemoteIndexStore::open(config(&root, &db_path)).unwrap();
+        assert_ne!(migrated.status().unwrap().epoch, "legacy-epoch");
+        assert!(migrated
+            .search("authorization fixture", 8, &SearchMode::Literal)
+            .unwrap()
+            .is_empty());
+        migrated
+            .upsert(RemoteDocument {
+                source_host: "server-100".into(),
+                root_name: "docs".into(),
+                path: path.clone(),
+                size: 20,
+                mtime_ns: 1,
+                source_read_authorized: true,
+                body: "reauthorized fixture text".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            migrated
+                .search("reauthorized fixture", 8, &SearchMode::Literal)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn source_read_authorization_requires_a_regular_target_inside_the_root() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("docs");
+        fs::create_dir(&root).unwrap();
+        let allowed = root.join("allowed.md");
+        fs::write(&allowed, "fixture body is never read here").unwrap();
+        let outside = tmp.path().join("outside.md");
+        fs::write(&outside, "fixture body is never read here").unwrap();
+
+        assert!(source_file_read_authorized(&root, &allowed).unwrap());
+        assert!(!source_file_read_authorized(&root, &outside).unwrap());
+        assert!(!source_file_read_authorized(&root, &root.join("missing.md")).unwrap());
+    }
+
+    #[tokio::test]
+    async fn source_authorization_sync_sends_only_readable_documents_and_revokes_missing_source_paths(
+    ) {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("docs");
+        fs::create_dir(&root).unwrap();
+        let allowed_path = root.join("allowed.md");
+        fs::write(&allowed_path, "fixture source bytes").unwrap();
+        let denied_path = root.join("missing.md");
+        let source_db_path = tmp.path().join("source.sqlite3");
+        let state_path = tmp.path().join("sync.sqlite3");
+        let remote_db_path = tmp.path().join("remote.sqlite3");
+        let remote = RemoteIndexStore::open(config(&root, &remote_db_path)).unwrap();
+
+        let source = Connection::open(&source_db_path).unwrap();
+        source
+            .execute_batch(
+                "CREATE VIRTUAL TABLE grepmesh_documents USING fts5(path UNINDEXED,body,tokenize='trigram');
+                 CREATE TABLE grepmesh_extraction_cache(path TEXT PRIMARY KEY,size INTEGER,mtime_ns TEXT,body TEXT NOT NULL);
+                 CREATE TABLE grepmesh_document_rows(path TEXT PRIMARY KEY,fts_rowid INTEGER UNIQUE);",
+            )
+            .unwrap();
+        for (path, body) in [
+            (&allowed_path, "authorized fixture marker"),
+            (&denied_path, "secret denied fixture marker"),
+        ] {
+            source
+                .execute(
+                    "INSERT INTO grepmesh_documents(path,body) VALUES(?1,?2)",
+                    params![path.to_string_lossy(), body],
+                )
+                .unwrap();
+            let rowid = source.last_insert_rowid();
+            source
+                .execute(
+                    "INSERT INTO grepmesh_document_rows(path,fts_rowid) VALUES(?1,?2)",
+                    params![path.to_string_lossy(), rowid],
+                )
+                .unwrap();
+            source
+                .execute(
+                    "INSERT INTO grepmesh_extraction_cache(path,size,mtime_ns,body) VALUES(?1,20,'7','')",
+                    params![path.to_string_lossy()],
+                )
+                .unwrap();
+        }
+        drop(source);
+
+        // Seed an already-synchronized document whose source has disappeared.
+        remote
+            .upsert(RemoteDocument {
+                source_host: "server-100".into(),
+                root_name: "docs".into(),
+                path: denied_path.clone(),
+                size: 20,
+                mtime_ns: 7,
+                source_read_authorized: true,
+                body: "secret denied fixture marker".into(),
+            })
+            .unwrap();
+
+        let state = TestPeerState {
+            store: remote.clone(),
+            token: "fixture-sync-token".into(),
+        };
+        let app = Router::new()
+            .route("/index/v1/status", get(test_peer_status))
+            .route("/index/v1/upsert", post(test_peer_upsert))
+            .route("/index/v1/delete", post(test_peer_delete))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = stop_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        let sync_config = RemoteIndexSourceConfig {
+            source_host: "server-100".into(),
+            index_host: "server-44".into(),
+            endpoint,
+            roots: BTreeMap::from([("docs".into(), vec![root])]),
+            state_path: Some(state_path.clone()),
+            sync_interval_ms: 30_000,
+        };
+        let index_path = source_db_path.clone();
+        let token = "fixture-sync-token".to_string();
+        tokio::task::spawn_blocking(move || {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap();
+            sync_once(
+                &sync_config,
+                &index_path,
+                &state_path,
+                &client,
+                Some(&token),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let _ = stop_tx.send(());
+        server.await.unwrap();
+
+        assert_eq!(remote.status().unwrap().document_count, 1);
+        assert_eq!(
+            remote
+                .search("authorized fixture marker", 8, &SearchMode::Literal)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(remote
+            .search("secret denied fixture marker", 8, &SearchMode::Literal)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -659,16 +1046,21 @@ mod tests {
                 params![path],
             )
             .unwrap();
-        let read_body = || {
-            source
-                .query_row(
-                    SOURCE_DOCUMENTS_QUERY,
-                    params!["/source/docs/", "/source/docs/\u{10ffff}"],
-                    |row| row.get::<_, String>(3),
-                )
-                .unwrap()
-        };
-        assert_eq!(read_body(), "durable searchable memory");
+        let (path, size, mtime_ns): (String, u64, String) = source
+            .query_row(
+                SOURCE_DOCUMENTS_QUERY,
+                params!["/source/docs/", "/source/docs/\u{10ffff}"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (path.as_str(), size, mtime_ns.as_str()),
+            ("/source/docs/memory.md", 24, "7")
+        );
+        let read_body: String = source
+            .query_row(SOURCE_DOCUMENT_BODY_QUERY, [&path], |row| row.get(0))
+            .unwrap();
+        assert_eq!(read_body, "durable searchable memory");
 
         source
             .execute(
@@ -676,6 +1068,9 @@ mod tests {
                 params![path],
             )
             .unwrap();
-        assert_eq!(read_body(), "legacy cached text");
+        let read_cached_body: String = source
+            .query_row(SOURCE_DOCUMENT_BODY_QUERY, [&path], |row| row.get(0))
+            .unwrap();
+        assert_eq!(read_cached_body, "legacy cached text");
     }
 }
