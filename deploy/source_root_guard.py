@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import sys
@@ -42,6 +43,62 @@ def quiet_by_metadata(root: str | Path, cooldown_ms: int, *, now_ns: int | None 
         except OSError:
             return False
     return True
+
+
+def has_metadata_only_match(root: str | Path, patterns: list[str]) -> bool | None:
+    """Check current paths against configured metadata-only globs, bounded and body-free."""
+    root = Path(root)
+    pending = [root]
+    visited = 0
+    try:
+        root_name = root.name
+        while pending:
+            directory = pending.pop()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    visited += 1
+                    if visited > MAX_ENTRIES:
+                        return None
+                    path = Path(entry.path)
+                    relative = path.relative_to(root).as_posix()
+                    candidates = [relative, f"{root_name}/{relative}"]
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                    if is_dir:
+                        candidates.extend(
+                            (
+                                f"{relative}/.grepmesh-directory-probe",
+                                f"{root_name}/{relative}/.grepmesh-directory-probe",
+                            )
+                        )
+                    if any(
+                        fnmatch.fnmatchcase(candidate, pattern)
+                        for candidate in candidates
+                        for pattern in patterns
+                    ):
+                        return True
+                    if is_dir:
+                        pending.append(path)
+    except OSError:
+        return None
+    return False
+
+
+def expired_metadata_only_is_stale(
+    root: str | Path,
+    exact_scope: list[dict[str, Any]],
+    config: dict[str, Any],
+    now_ms: int,
+    cooldown_ms: int,
+) -> bool:
+    """Accept an expired sticky metadata-only flag only with fresh path evidence."""
+    if not exact_scope or any(row.get("hot") is not False for row in exact_scope):
+        return False
+    last_events = [row.get("last_event_ms") for row in exact_scope]
+    if any(not isinstance(value, int) or value <= 0 or now_ms - value < cooldown_ms for value in last_events):
+        return False
+    index_activity = (config.get("limits") or {}).get("index_activity") or {}
+    patterns = index_activity.get("metadata_only_globs") or []
+    return has_metadata_only_match(root, patterns) is False
 
 
 def validate_source_guard(
@@ -112,6 +169,8 @@ def validate_source_guard(
                 for row in exact_scope
             )
             if scoped_record:
+                if expired_metadata_only_is_stale(root, exact_scope, config, now_ms, cooldown_ms):
+                    continue
                 raise ValueError(f"source-root activity bucket is hot or metadata-only: {root}")
             # A hot ancestor may cover unrelated siblings. The ctime walk above
             # independently proves this exact subroot is quiet.

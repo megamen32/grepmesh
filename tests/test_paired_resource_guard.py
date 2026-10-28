@@ -147,9 +147,33 @@ class SourceRootGuardTests(unittest.TestCase):
         activity = [{"path": str(parent), "hot": True, "metadata_only": True}]
         validate_source_guard("mcp", self.config, self.evidence(now, activity), now_ms=now)
 
-    def test_exact_root_metadata_only_bucket_still_blocks_after_ctime_cooldown(self):
+    def test_expired_metadata_only_flag_clears_after_ctime_and_event_cooldown(self):
         now = int(time.time() * 1000) + self.cooldown_ms + 5_000
-        activity = [{"path": str(self.root), "hot": False, "metadata_only": True}]
+        activity = [{
+            "path": str(self.root), "hot": False, "metadata_only": True,
+            "last_event_ms": now - self.cooldown_ms - 1,
+        }]
+        validate_source_guard("mcp", self.config, self.evidence(now, activity), now_ms=now)
+
+    def test_expired_metadata_only_flag_still_blocks_if_config_glob_matches(self):
+        private = self.root / "private"
+        private.mkdir()
+        (private / "note.md").write_text("fixture", encoding="utf-8")
+        self.config["limits"]["index_activity"]["metadata_only_globs"] = ["**/private/**"]
+        now = int(time.time() * 1000) + self.cooldown_ms + 5_000
+        activity = [{
+            "path": str(self.root), "hot": False, "metadata_only": True,
+            "last_event_ms": now - self.cooldown_ms - 1,
+        }]
+        with self.assertRaisesRegex(ValueError, "activity bucket"):
+            validate_source_guard("mcp", self.config, self.evidence(now, activity), now_ms=now)
+
+    def test_metadata_only_flag_without_expired_event_timestamp_still_blocks(self):
+        now = int(time.time() * 1000) + self.cooldown_ms + 5_000
+        activity = [{
+            "path": str(self.root), "hot": False, "metadata_only": True,
+            "last_event_ms": now - 1,
+        }]
         with self.assertRaisesRegex(ValueError, "activity bucket"):
             validate_source_guard("mcp", self.config, self.evidence(now, activity), now_ms=now)
 
