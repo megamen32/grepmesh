@@ -34,6 +34,14 @@ fn register_watch_root(
     register_watch_subtree(root, root, excludes, watch)
 }
 
+fn watch_path_not_found(error: &notify::Error) -> bool {
+    match &error.kind {
+        notify::ErrorKind::PathNotFound => true,
+        notify::ErrorKind::Io(error) => error.kind() == ErrorKind::NotFound,
+        _ => false,
+    }
+}
+
 fn register_watch_subtree(
     start: &Path,
     root: &Path,
@@ -66,6 +74,12 @@ fn register_watch_subtree(
             break;
         }
         if let Err(error) = watch(&unit) {
+            if watch_path_not_found(&error) {
+                // The directory may disappear after metadata inspection and
+                // before watch registration. It cannot contain indexed files
+                // now, so retrying/logging this stale subtree only adds noise.
+                continue;
+            }
             // Register individual directories on the same watcher: recursive
             // notify6 traversal cannot apply our excludes and can exhaust the
             // user's watches inside node_modules or build output.
@@ -3935,6 +3949,35 @@ mod tests {
         assert!(registered.contains(&root.join("healthy-b")));
         assert!(!registered.contains(&root.join(".git")));
         assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn disappeared_subtree_watch_race_is_ignored_without_hiding_other_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let disappeared = root.join("ephemeral");
+        let healthy = root.join("stable");
+        std::fs::create_dir(&disappeared).unwrap();
+        std::fs::create_dir(&healthy).unwrap();
+        let mut watched = BTreeSet::new();
+        let errors = super::register_watch_root(
+            root,
+            &super::compile_excludes(&[]).unwrap(),
+            &mut |path| {
+                if path == disappeared {
+                    std::fs::remove_dir(path).unwrap();
+                    return Err(notify::Error::io(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "directory disappeared before watch registration",
+                    ))
+                    .add_path(path.to_path_buf()));
+                }
+                watched.insert(path.to_path_buf());
+                Ok(())
+            },
+        );
+        assert!(watched.contains(&healthy));
+        assert!(errors.is_empty(), "transient NotFound should not be reported");
     }
 
     #[test]
