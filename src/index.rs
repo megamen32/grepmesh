@@ -653,6 +653,18 @@ impl PersistentIndex {
     }
 
     fn replace_indexed_document(&self, document: &IndexedDocument) -> Result<(), String> {
+        self.replace_indexed_document_with_mode(document, false)
+    }
+
+    fn replace_metadata_only_document(&self, document: &IndexedDocument) -> Result<(), String> {
+        self.replace_indexed_document_with_mode(document, true)
+    }
+
+    fn replace_indexed_document_with_mode(
+        &self,
+        document: &IndexedDocument,
+        preserve_existing_body: bool,
+    ) -> Result<(), String> {
         let mut connection = self.connection()?;
         let transaction = connection
             .transaction()
@@ -689,6 +701,32 @@ impl PersistentIndex {
                 .map_err(|error| error.to_string())?,
             None => false,
         };
+        if preserve_existing_body {
+            if let Some(rowid) = fts_rowid {
+                let fts_exists = transaction
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM grepmesh_documents WHERE rowid=?1 AND path=?2)",
+                        params![rowid, path],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                if fts_exists {
+                    // A hot-path metadata refresh must not replace searchable
+                    // text with a path/size placeholder. Keep FTS authoritative
+                    // until a full extraction can run and drop duplicate cache text.
+                    transaction
+                        .execute(
+                            "INSERT INTO grepmesh_extraction_cache(path,size,mtime_ns,body) \
+                             VALUES (?1,?2,?3,'') ON CONFLICT(path) DO UPDATE SET \
+                             size=excluded.size,mtime_ns=excluded.mtime_ns,body=''",
+                            params![path, document.size as i64, document.mtime_ns.to_string()],
+                        )
+                        .map_err(|error| error.to_string())?;
+                    transaction.commit().map_err(|error| error.to_string())?;
+                    return Ok(());
+                }
+            }
+        }
         if cache_matches && fts_matches {
             let acknowledged = transaction
                 .execute(
@@ -2587,7 +2625,7 @@ fn reconcile_event_paths(
                     size: metadata.len(),
                     mtime_ns: metadata_mtime_ns(&metadata),
                 };
-                let _ = persistent.replace_indexed_document(&document);
+                let _ = persistent.replace_metadata_only_document(&document);
                 stats.last_indexed_ms = now;
             }
             continue;
@@ -4585,6 +4623,61 @@ mod tests {
             index.cached_body(&first, 14, 202).unwrap().as_deref(),
             Some("stable searchable text")
         );
+    }
+
+    #[test]
+    fn metadata_only_activity_refresh_preserves_existing_full_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = PersistentIndex::open(dir.path().join("index.sqlite")).unwrap();
+        let path = dir.path().join("transcript.md");
+        index
+            .replace_indexed_document(&IndexedDocument {
+                path: path.clone(),
+                body: "complete searchable transcript text".into(),
+                size: 20,
+                mtime_ns: 100,
+            })
+            .unwrap();
+        {
+            let connection = index.connection().unwrap();
+            connection
+                .execute(
+                    "UPDATE grepmesh_extraction_cache SET body=?2 WHERE path=?1",
+                    params![
+                        path.display().to_string(),
+                        "complete searchable transcript text"
+                    ],
+                )
+                .unwrap();
+        }
+
+        index
+            .replace_metadata_only_document(&IndexedDocument {
+                path: path.clone(),
+                body: "transcript.md\\npath: placeholder\\nsize: 27\\nmodified_ns: 200".into(),
+                size: 27,
+                mtime_ns: 200,
+            })
+            .unwrap();
+
+        assert_eq!(
+            index.cached_body(&path, 27, 200).unwrap().as_deref(),
+            Some("complete searchable transcript text")
+        );
+        let connection = index.connection().unwrap();
+        let (fts_body, cache_body): (String, String) = connection
+            .query_row(
+                "SELECT documents.body, cache.body \
+                 FROM grepmesh_document_rows AS rows \
+                 JOIN grepmesh_documents AS documents ON documents.rowid=rows.fts_rowid \
+                 JOIN grepmesh_extraction_cache AS cache ON cache.path=rows.path \
+                 WHERE rows.path=?1",
+                params![path.display().to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(fts_body, "complete searchable transcript text");
+        assert!(cache_body.is_empty());
     }
 
     #[test]
