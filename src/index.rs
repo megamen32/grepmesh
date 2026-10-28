@@ -660,6 +660,22 @@ impl PersistentIndex {
         self.replace_indexed_document_with_mode(document, true)
     }
 
+    fn replace_scanned_document(
+        &self,
+        document: &IndexedDocument,
+        root: &Path,
+        metadata_only: Option<&GlobSet>,
+    ) -> Result<bool, String> {
+        let metadata_only =
+            metadata_only.is_some_and(|matcher| excluded(&document.path, root, matcher));
+        if metadata_only {
+            self.replace_metadata_only_document(document)?;
+        } else {
+            self.replace_indexed_document(document)?;
+        }
+        Ok(metadata_only)
+    }
+
     fn replace_indexed_document_with_mode(
         &self,
         document: &IndexedDocument,
@@ -2423,10 +2439,16 @@ fn reconcile_new_subtrees(
                 Ok((_, _, documents, children)) => {
                     units.extend(children);
                     for document in documents {
-                        match persistent.replace_indexed_document(&document) {
-                            Ok(()) => {
-                                if let Some(ocr) = ocr {
-                                    ocr.forget_deferred(&document.path);
+                        match persistent.replace_scanned_document(
+                            &document,
+                            root,
+                            metadata_only.as_ref(),
+                        ) {
+                            Ok(metadata_only) => {
+                                if !metadata_only {
+                                    if let Some(ocr) = ocr {
+                                        ocr.forget_deferred(&document.path);
+                                    }
                                 }
                             }
                             Err(error) => {
@@ -2504,7 +2526,7 @@ fn reconcile_event_paths(
         let changed_bytes = fs::metadata(&path)
             .map(|metadata| metadata.len())
             .unwrap_or(0);
-        let stats = activity.entry(bucket).or_default();
+        let stats = activity.entry(bucket.clone()).or_default();
         if stats.window_started_ms == 0
             || now.saturating_sub(stats.window_started_ms) >= activity_config.window_ms
         {
@@ -2526,10 +2548,9 @@ fn reconcile_event_paths(
         stats.excluded = activity_excludes
             .as_ref()
             .is_some_and(|matcher| excluded(&path, root, matcher));
-        stats.metadata_only = is_hot
-            || metadata_only
-                .as_ref()
-                .is_some_and(|matcher| excluded(&path, root, matcher));
+        stats.metadata_only = metadata_only
+            .as_ref()
+            .is_some_and(|matcher| excluded(&path, root, matcher));
         stats.debounce_ms = if is_hot {
             activity_config.hot_debounce_ms
         } else {
@@ -2582,10 +2603,9 @@ fn reconcile_event_paths(
         let is_activity_excluded = activity_excludes
             .as_ref()
             .is_some_and(|matcher| excluded(path, root, matcher));
-        let is_metadata_only = is_hot
-            || metadata_only
-                .as_ref()
-                .is_some_and(|matcher| excluded(path, root, matcher));
+        let is_metadata_only = metadata_only
+            .as_ref()
+            .is_some_and(|matcher| excluded(path, root, matcher));
         stats.metadata_only = is_metadata_only;
         stats.excluded = is_activity_excluded;
         stats.debounce_ms = if is_hot {
@@ -2598,9 +2618,6 @@ fn reconcile_event_paths(
             continue;
         }
         if excluded(path, root, &matcher) {
-            continue;
-        }
-        if is_hot && now.saturating_sub(stats.last_indexed_ms) < activity_config.hot_debounce_ms {
             continue;
         }
         if !path.is_file() {
@@ -2649,10 +2666,16 @@ fn reconcile_event_paths(
             }
             Ok((_, _, documents, _)) => {
                 for document in documents {
-                    match persistent.replace_indexed_document(&document) {
-                        Ok(()) => {
-                            if let Some(ocr) = ocr {
-                                ocr.forget_deferred(&document.path);
+                    match persistent.replace_scanned_document(
+                        &document,
+                        root,
+                        metadata_only.as_ref(),
+                    ) {
+                        Ok(metadata_only) => {
+                            if !metadata_only {
+                                if let Some(ocr) = ocr {
+                                    ocr.forget_deferred(&document.path);
+                                }
                             }
                         }
                         Err(error) => {
@@ -2791,10 +2814,12 @@ fn retry_ocr_path(
                     let _ = ocr.defer_path(&document.path);
                     continue;
                 }
-                match persistent.replace_indexed_document(&document) {
-                    Ok(()) => {
-                        ocr.forget_deferred(&document.path);
-                        tracing::info!(input = %document.path.display(), "mesh OCR index committed");
+                match persistent.replace_scanned_document(&document, root, metadata_only.as_ref()) {
+                    Ok(metadata_only) => {
+                        if !metadata_only {
+                            ocr.forget_deferred(&document.path);
+                            tracing::info!(input = %document.path.display(), "mesh OCR index committed");
+                        }
                     }
                     Err(error) => {
                         let _ = ocr.defer_path(&document.path);
@@ -2910,20 +2935,30 @@ fn rebuild_index(
             if let Some(persistent) = rebuild.persistent {
                 for document in documents {
                     seen_paths.insert(document.path.clone());
-                    if let Err(error) = persistent.replace_indexed_document(&document) {
-                        if let Some(ocr) = ocr {
-                            let _ = ocr.defer_path(&document.path);
+                    match persistent.replace_scanned_document(
+                        &document,
+                        &root,
+                        metadata_only.as_ref(),
+                    ) {
+                        Ok(metadata_only) => {
+                            if !metadata_only {
+                                if let Some(ocr) = ocr {
+                                    ocr.forget_deferred(&document.path);
+                                }
+                            }
                         }
-                        if let Ok(mut current) = rebuild.snapshot.write() {
-                            current.state = IndexState::Degraded;
-                            current.last_error =
-                                Some(format!("{}: {error}", document.path.display()));
-                            current.generation = generation.saturating_add(1);
+                        Err(error) => {
+                            if let Some(ocr) = ocr {
+                                let _ = ocr.defer_path(&document.path);
+                            }
+                            if let Ok(mut current) = rebuild.snapshot.write() {
+                                current.state = IndexState::Degraded;
+                                current.last_error =
+                                    Some(format!("{}: {error}", document.path.display()));
+                                current.generation = generation.saturating_add(1);
+                            }
+                            return false;
                         }
-                        return false;
-                    }
-                    if let Some(ocr) = ocr {
-                        ocr.forget_deferred(&document.path);
                     }
                 }
             }
@@ -3652,10 +3687,11 @@ mod tests {
             .unwrap();
         assert!(first_body.contains("GUARDED_SOURCE_BODY"));
 
+        fs::write(&guarded_file, "UPDATED_GUARDED_SOURCE_BODY").unwrap();
         reconcile_one(&guarded_file, &mut activity);
         let guarded_until = activity[&source].hot_until_ms;
         assert!(guarded_until > unix_time_ms());
-        assert!(activity[&source].metadata_only);
+        assert!(!activity[&source].metadata_only);
         let guarded_metadata = fs::metadata(&guarded_file).unwrap();
         let guarded_body = index
             .cached_body(
@@ -3665,7 +3701,7 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        assert!(guarded_body.contains("GUARDED_SOURCE_BODY"));
+        assert!(guarded_body.contains("UPDATED_GUARDED_SOURCE_BODY"));
 
         fs::write(&sibling, "SIBLING_ACTIVITY").unwrap();
         reconcile_one(&sibling, &mut activity);
@@ -4651,14 +4687,19 @@ mod tests {
                 .unwrap();
         }
 
-        index
-            .replace_metadata_only_document(&IndexedDocument {
-                path: path.clone(),
-                body: "transcript.md\\npath: placeholder\\nsize: 27\\nmodified_ns: 200".into(),
-                size: 27,
-                mtime_ns: 200,
-            })
-            .unwrap();
+        let metadata_only = compile_excludes(&["**".into()]).unwrap();
+        assert!(index
+            .replace_scanned_document(
+                &IndexedDocument {
+                    path: path.clone(),
+                    body: "transcript.md\\npath: placeholder\\nsize: 27\\nmodified_ns: 200".into(),
+                    size: 27,
+                    mtime_ns: 200,
+                },
+                dir.path(),
+                Some(&metadata_only),
+            )
+            .unwrap());
 
         assert_eq!(
             index.cached_body(&path, 27, 200).unwrap().as_deref(),
