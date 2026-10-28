@@ -611,6 +611,7 @@ impl LocalBackend {
             path_globs,
             root_names,
             Duration::from_millis(self.limits.overall_timeout_ms),
+            None,
         )
         .await
     }
@@ -627,6 +628,7 @@ impl LocalBackend {
         path_globs: Vec<String>,
         root_names: Vec<String>,
         overall_timeout: Duration,
+        read_roots: Option<Vec<String>>,
     ) -> Result<SearchOutcome> {
         let host_id = self.host_id.clone();
         // A source root authorized by this host's remote index lives on the
@@ -641,11 +643,31 @@ impl LocalBackend {
                 .remote_index
                 .as_ref()
                 .is_some_and(|index| index.owns_requested_roots(&root_names));
-        let roots = if remote_index_only {
+        let mut roots = if remote_index_only {
             Vec::new()
         } else {
             self.selected_roots(&root_names)?
         };
+        if let Some(allowed) = read_roots.as_ref() {
+            let allowed = allowed.iter().map(PathBuf::from).collect::<Vec<_>>();
+            roots = roots
+                .into_iter()
+                .flat_map(|root| {
+                    let narrower = allowed
+                        .iter()
+                        .filter(|candidate| candidate.starts_with(&root))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if !narrower.is_empty() {
+                        narrower
+                    } else if allowed.iter().any(|candidate| root.starts_with(candidate)) {
+                        vec![root]
+                    } else {
+                        Vec::new()
+                    }
+                })
+                .collect();
+        }
         let query = query.to_string();
         let exclude_globs = self.exclude_globs.clone();
         let max_file_bytes = self.limits.max_file_bytes;
@@ -824,14 +846,24 @@ impl LocalBackend {
                 let remote_query = query.clone();
                 let remote_mode = mode.clone();
                 let remote_limit = limit.saturating_sub(hits.len());
+                let remote_read_roots = read_roots.clone();
                 if remote_limit > 0 {
                     match tokio::task::spawn_blocking(move || {
-                        remote_index.search_filtered(
-                            &remote_query,
-                            remote_limit,
-                            &remote_mode,
-                            &path_globs,
-                        )
+                        match remote_read_roots.as_deref() {
+                            Some(roots) => remote_index.search_filtered_authorized(
+                                &remote_query,
+                                remote_limit,
+                                &remote_mode,
+                                &path_globs,
+                                roots,
+                            ),
+                            None => remote_index.search_filtered(
+                                &remote_query,
+                                remote_limit,
+                                &remote_mode,
+                                &path_globs,
+                            ),
+                        }
                     })
                     .await
                     {

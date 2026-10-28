@@ -440,6 +440,7 @@ async fn preview(State(state): State<ConsoleState>, Json(request): Json<Value>) 
             request_id: None,
             origin_host: None,
             hop_count: None,
+            filesystem_acl: None,
         })
         .await
     {

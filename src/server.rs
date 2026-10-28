@@ -777,7 +777,11 @@ async fn call_tool(service: &MeshService, jobs: &SearchJobs, params: Value) -> R
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("missing tool name"))?;
-    let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+    let mut arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+    let delegated_acl = params
+        .pointer("/_meta/io.gptadmin~1filesystem-acl")
+        .cloned();
+    apply_filesystem_acl_metadata(name, &mut arguments, delegated_acl)?;
     let tool_result = match name {
         "search" | "search_text" => {
             let mut arguments = arguments;
@@ -866,6 +870,39 @@ async fn call_tool(service: &MeshService, jobs: &SearchJobs, params: Value) -> R
         other => return Err(anyhow::anyhow!("unknown tool {}", other)),
     };
     Ok(tool_content(tool_result.data, service)?)
+}
+
+fn apply_filesystem_acl_metadata(name: &str, arguments: &mut Value, delegated_acl: Option<Value>) -> Result<()> {
+    let supported = matches!(name, "search" | "search_text" | "read_text");
+    if delegated_acl.is_some() && !supported {
+        anyhow::bail!("GPTAdmin filesystem ACL is valid only for GrepMesh search/read_text")
+    }
+    let Some(object) = arguments.as_object_mut() else {
+        if delegated_acl.is_some() {
+            anyhow::bail!("GPTAdmin filesystem ACL requires object arguments")
+        }
+        return Ok(());
+    };
+    let peer_acl = if delegated_acl.is_none() && supported {
+        let peer_hop = object
+            .get("hop_count")
+            .and_then(Value::as_u64)
+            .is_some_and(|hop| hop > 0)
+            && object
+                .get("origin_host")
+                .and_then(Value::as_str)
+                .is_some_and(|host| !host.trim().is_empty());
+        peer_hop.then(|| object.get("filesystem_acl").cloned()).flatten()
+    } else {
+        None
+    };
+    let acl = delegated_acl.or(peer_acl);
+    object.remove("filesystem_acl");
+    if let Some(acl) = acl {
+        crate::mcp::validate_filesystem_acl_value(&acl)?;
+        object.insert("filesystem_acl".into(), acl);
+    }
+    Ok(())
 }
 
 fn compact_job_search_data(data: Value) -> Result<Value> {
@@ -1014,6 +1051,47 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::BTreeMap;
+
+    fn filesystem_acl_fixture(root: &str) -> Value {
+        json!({
+            "version": 1,
+            "profile_id": "qa-profile",
+            "profile_version": 7,
+            "roots_digest": "a".repeat(64),
+            "job_id": "qa-job",
+            "target": "shell:server-100",
+            "tool": "mcp_call",
+            "args_sha256": "b".repeat(64),
+            "read_roots": [root],
+            "write_roots": null
+        })
+    }
+
+    #[test]
+    fn filesystem_acl_comes_from_verified_shell_metadata_and_untrusted_tool_args_are_stripped() {
+        let root = tempfile::tempdir().unwrap();
+        let acl = filesystem_acl_fixture(&root.path().display().to_string());
+        let mut arguments = json!({"query":"allowed marker", "filesystem_acl":acl});
+        apply_filesystem_acl_metadata("search", &mut arguments, None).unwrap();
+        assert!(arguments.get("filesystem_acl").is_none());
+
+        let mut arguments = json!({"query":"allowed marker"});
+        apply_filesystem_acl_metadata("search", &mut arguments, Some(acl.clone())).unwrap();
+        assert_eq!(arguments["filesystem_acl"]["profile_id"], "qa-profile");
+
+        let mut peer_args = json!({
+            "query":"allowed marker", "origin_host":"server-100", "hop_count":1,
+            "filesystem_acl":acl
+        });
+        apply_filesystem_acl_metadata("search", &mut peer_args, None).unwrap();
+        assert_eq!(peer_args["filesystem_acl"]["profile_id"], "qa-profile");
+
+        let mut invalid = json!({"query":"allowed marker"});
+        let empty_roots = filesystem_acl_fixture("");
+        assert!(apply_filesystem_acl_metadata("search", &mut invalid, Some(empty_roots)).is_err());
+        let mut non_search = json!({});
+        assert!(apply_filesystem_acl_metadata("find_duplicates", &mut non_search, Some(acl)).is_err());
+    }
 
     #[test]
     fn body_intake_covers_unknown_and_large_rpc_without_blocking_small_search() {

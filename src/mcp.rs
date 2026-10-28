@@ -46,6 +46,63 @@ pub struct SearchArgs {
     pub path_globs: Vec<String>,
     #[serde(default)]
     pub roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) filesystem_acl: Option<FilesystemAcl>,
+}
+
+/// The existing GPTAdmin filesystem ACL is carried only from the authenticated
+/// shell queue. It is not a user tool argument or a service identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct FilesystemAcl {
+    version: u8,
+    profile_id: String,
+    profile_version: i64,
+    roots_digest: String,
+    job_id: String,
+    target: String,
+    tool: String,
+    args_sha256: String,
+    read_roots: Option<Vec<String>>,
+    #[serde(default)]
+    write_roots: Option<Vec<String>>,
+}
+
+impl FilesystemAcl {
+    fn validate_read(&self) -> Result<&[String]> {
+        let roots = self.read_roots.as_deref().unwrap_or_default();
+        if self.version != 1
+            || self.profile_id.trim().is_empty()
+            || self.profile_version < 1
+            || self.job_id.trim().is_empty()
+            || self.target.trim().is_empty()
+            || self.tool != "mcp_call"
+            || !valid_sha256_hex(&self.roots_digest)
+            || !valid_sha256_hex(&self.args_sha256)
+            || roots.is_empty()
+            || roots.iter().any(|root| !std::path::Path::new(root).is_absolute())
+        {
+            anyhow::bail!("invalid or empty GPTAdmin filesystem read ACL")
+        }
+        Ok(roots)
+    }
+
+    fn allows_path(&self, path: &std::path::Path) -> bool {
+        let Ok(roots) = self.validate_read() else {
+            return false;
+        };
+        path.is_absolute()
+            && !path.components().any(|part| matches!(part, std::path::Component::ParentDir))
+            && roots.iter().any(|root| path.starts_with(root))
+    }
+}
+
+pub(crate) fn validate_filesystem_acl_value(value: &Value) -> Result<()> {
+    serde_json::from_value::<FilesystemAcl>(value.clone())?.validate_read()?;
+    Ok(())
+}
+
+fn valid_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -119,6 +176,8 @@ pub struct ReadTextArgs {
     pub origin_host: Option<String>,
     #[serde(default)]
     pub hop_count: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) filesystem_acl: Option<FilesystemAcl>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -468,7 +527,12 @@ impl MeshService {
             mode,
             path_globs,
             roots,
+            filesystem_acl,
         } = args;
+        let read_roots = filesystem_acl
+            .as_ref()
+            .map(|acl| acl.validate_read().map(|roots| roots.to_vec()))
+            .transpose()?;
         let normalized = normalize_request(
             &self.local.host_id,
             self.known_host_ids(),
@@ -491,6 +555,8 @@ impl MeshService {
                 mode,
                 path_globs,
                 roots,
+                filesystem_acl,
+                read_roots,
                 overall_timeout,
             )
             .await?;
@@ -792,7 +858,14 @@ impl MeshService {
             request_id,
             origin_host,
             hop_count,
+            filesystem_acl,
         } = args;
+        if let Some(acl) = filesystem_acl.as_ref() {
+            acl.validate_read()?;
+            if !acl.allows_path(&path) {
+                anyhow::bail!("filesystem ACL denies this document path")
+            }
+        }
         let normalized = normalize_request(
             &self.local.host_id,
             self.known_host_ids(),
@@ -839,6 +912,7 @@ impl MeshService {
                         "request_id": normalized.request_id.clone(),
                         "origin_host": normalized.origin_host.clone(),
                         "hop_count": 1u8,
+                        "filesystem_acl": filesystem_acl,
                     }),
                 )
                 .await?;
@@ -1097,6 +1171,8 @@ impl MeshService {
         mode: SearchMode,
         path_globs: Vec<String>,
         roots: Vec<String>,
+        filesystem_acl: Option<FilesystemAcl>,
+        read_roots: Option<Vec<String>>,
         overall_timeout: Duration,
     ) -> Result<(Vec<SearchHit>, Vec<PerHostStatus>, bool, bool)> {
         let mut futures = Vec::new();
@@ -1109,6 +1185,8 @@ impl MeshService {
             let mode = mode.clone();
             let path_globs = path_globs.clone();
             let roots = roots.clone();
+            let filesystem_acl = filesystem_acl.clone();
+            let read_roots = read_roots.clone();
             let hop_count = hop_count_for(&service.local.host_id, &target, normalized.hop_count)?;
             futures.push((target.clone(), async move {
                 let result: Result<(Vec<SearchHit>, Vec<PerHostStatus>, bool, bool)> = if target
@@ -1124,6 +1202,7 @@ impl MeshService {
                             path_globs.clone(),
                             roots.clone(),
                             overall_timeout,
+                            read_roots.clone(),
                         )
                         .await?;
                     let truncated = outcome.truncated;
@@ -1163,6 +1242,7 @@ impl MeshService {
                                 "mode": mode,
                                 "path_globs": path_globs,
                                 "roots": roots,
+                                "filesystem_acl": filesystem_acl,
                                 // Peer requests already run inside the
                                 // caller's bounded search job. Starting a
                                 // second default-500ms job on the peer returns
