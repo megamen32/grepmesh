@@ -1,7 +1,7 @@
 use grepmesh::{
-    backend::{LocalBackend, SearchMode},
+    backend::LocalBackend,
     config::LimitsConfig,
-    mcp::{HostsInput, MeshService, SearchArgs},
+    mcp::{MeshService, SearchArgs},
     topology::{PeerConfig, Topology},
 };
 use std::{
@@ -12,6 +12,23 @@ use std::{
     thread,
     time::Duration,
 };
+
+// call_search is the trusted boundary after authenticated shell metadata has
+// been checked. Model that metadata here; raw MCP arguments cannot grant it.
+fn verified_peer_test_acl() -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "profile_id": "qa-peer-profile",
+        "profile_version": 7,
+        "roots_digest": "a".repeat(64),
+        "job_id": "qa-peer-job",
+        "target": "shell:server-100",
+        "tool": "mcp_call",
+        "args_sha256": "b".repeat(64),
+        "read_roots": ["/peer-canary.txt"],
+        "write_roots": null
+    })
+}
 
 struct ProxyEnvironmentGuard {
     previous: Vec<(&'static str, Option<OsString>)>,
@@ -131,19 +148,20 @@ async fn peer_dispatch_bypasses_a_poisoned_proxy_and_keeps_bearer_auth() {
     .with_peer_auth_token(Some("peer-test-token".into()));
 
     let result = service
-        .call_search(SearchArgs {
-            query: "peer proxy canary".into(),
-            verbose: true,
-            hosts: Some(HostsInput::One("B".into())),
-            request_id: Some("peer-proxy-request".into()),
-            origin_host: None,
-            hop_count: None,
-            limit: Some(10),
-            context_lines: Some(0),
-            mode: SearchMode::Literal,
-            path_globs: vec![],
-            roots: vec![],
-        })
+        .call_search(serde_json::from_value::<SearchArgs>(serde_json::json!({
+            "query": "peer proxy canary",
+            "verbose": true,
+            "hosts": "B",
+            "request_id": "peer-proxy-request",
+            "filesystem_acl": verified_peer_test_acl(),
+            "origin_host": null,
+            "hop_count": null,
+            "limit": 10,
+            "context_lines": 0,
+            "mode": "literal",
+            "path_globs": [],
+            "roots": []
+        })).unwrap())
         .await
         .unwrap();
 
@@ -241,19 +259,20 @@ async fn peer_dispatch_uses_gptadmin_connect_fallback_only_after_direct_connect_
     .with_peer_auth_token(Some("peer-test-token".into()));
 
     let result = service
-        .call_search(SearchArgs {
-            query: "fallback".into(),
-            verbose: false,
-            hosts: Some(HostsInput::One("B".into())),
-            request_id: Some("gptadmin-fallback".into()),
-            origin_host: None,
-            hop_count: None,
-            limit: Some(10),
-            context_lines: Some(0),
-            mode: SearchMode::Literal,
-            path_globs: vec![],
-            roots: vec![],
-        })
+        .call_search(serde_json::from_value::<SearchArgs>(serde_json::json!({
+            "query": "fallback",
+            "verbose": false,
+            "hosts": "B",
+            "request_id": "gptadmin-fallback",
+            "filesystem_acl": verified_peer_test_acl(),
+            "origin_host": null,
+            "hop_count": null,
+            "limit": 10,
+            "context_lines": 0,
+            "mode": "literal",
+            "path_globs": [],
+            "roots": []
+        })).unwrap())
         .await
         .unwrap();
 
@@ -324,19 +343,20 @@ async fn gptadmin_fallback_rejects_an_oversized_response_while_streaming() {
     );
 
     let result = service
-        .call_search(SearchArgs {
-            query: "oversized fallback".into(),
-            verbose: false,
-            hosts: Some(HostsInput::One("B".into())),
-            request_id: Some("gptadmin-fallback-oversized".into()),
-            origin_host: None,
-            hop_count: None,
-            limit: Some(10),
-            context_lines: Some(0),
-            mode: SearchMode::Literal,
-            path_globs: vec![],
-            roots: vec![],
-        })
+        .call_search(serde_json::from_value::<SearchArgs>(serde_json::json!({
+            "query": "oversized fallback",
+            "verbose": false,
+            "hosts": "B",
+            "request_id": "gptadmin-fallback-oversized",
+            "filesystem_acl": verified_peer_test_acl(),
+            "origin_host": null,
+            "hop_count": null,
+            "limit": 10,
+            "context_lines": 0,
+            "mode": "literal",
+            "path_globs": [],
+            "roots": []
+        })).unwrap())
         .await
         .unwrap();
 
@@ -378,19 +398,20 @@ async fn unreachable_peer_reports_missing_gptadmin_fallback_per_host() {
     );
 
     let result = service
-        .call_search(SearchArgs {
-            query: "unreachable".into(),
-            verbose: false,
-            hosts: Some(HostsInput::One("B".into())),
-            request_id: Some("missing-gptadmin-fallback".into()),
-            origin_host: None,
-            hop_count: None,
-            limit: Some(10),
-            context_lines: Some(0),
-            mode: SearchMode::Literal,
-            path_globs: vec![],
-            roots: vec![],
-        })
+        .call_search(serde_json::from_value::<SearchArgs>(serde_json::json!({
+            "query": "unreachable",
+            "verbose": false,
+            "hosts": "B",
+            "request_id": "missing-gptadmin-fallback",
+            "filesystem_acl": verified_peer_test_acl(),
+            "origin_host": null,
+            "hop_count": null,
+            "limit": 10,
+            "context_lines": 0,
+            "mode": "literal",
+            "path_globs": [],
+            "roots": []
+        })).unwrap())
         .await
         .unwrap();
 

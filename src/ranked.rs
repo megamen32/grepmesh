@@ -38,6 +38,9 @@ pub struct RankedHit {
     pub end_line: usize,
     pub line_number: usize,
     pub text: String,
+    /// Copy this physical source range verbatim when citing this passage.
+    #[serde(default)]
+    pub citation: String,
     pub score: f64,
     pub matched_terms: Vec<String>,
     pub match_quality: RankedCoverage,
@@ -430,7 +433,7 @@ fn score_document(
     }
     let line_masks = lines
         .iter()
-        .map(|line| term_mask(line, terms))
+        .map(|line| if line.len() <= MAX_RANKED_PASSAGE_BYTES { term_mask(line, terms) } else { 0 })
         .collect::<Vec<_>>();
     let body_mask = line_masks.iter().fold(0, |all, line| all | line);
     let path_name = path
@@ -505,6 +508,7 @@ fn score_document(
         end_line: end,
         line_number: anchor + 1,
         text,
+        citation: format!("{}:{}-{}", path.display(), start + 1, end),
         score,
         matched_terms: matched,
         match_quality,
@@ -524,7 +528,7 @@ fn minimum_required_terms(term_count: usize) -> usize {
 
 const MAX_RANKED_WINDOW_LINES: usize = 9;
 const MAX_STRUCTURAL_PASSAGE_LINES: usize = 80;
-const MAX_RANKED_PASSAGE_BYTES: usize = 16 * 1024;
+const MAX_RANKED_PASSAGE_BYTES: usize = 2 * 1024;
 
 #[derive(Clone, Copy)]
 struct PassageWindow {
@@ -636,7 +640,11 @@ fn best_passage_window(lines: &[&str], line_masks: &[u32]) -> Option<PassageWind
     for start in 0..line_masks.len() {
         let last = (start + MAX_RANKED_WINDOW_LINES).min(line_masks.len());
         let mut mask = 0u32;
+        let mut passage_bytes = 0usize;
         for end_exclusive in start + 1..=last {
+            passage_bytes = passage_bytes.saturating_add(lines[end_exclusive - 1].len())
+                .saturating_add(usize::from(end_exclusive > start + 1));
+            if passage_bytes > MAX_RANKED_PASSAGE_BYTES { break; }
             mask |= line_masks[end_exclusive - 1];
             let coverage = mask.count_ones();
             if coverage == 0 {
@@ -798,8 +806,15 @@ fn bounded_passage_bounds(
             .sum::<usize>()
             .saturating_add(to.saturating_sub(from).saturating_sub(1))
     };
+    // Keep the structural heading/definition when its complete prefix through
+    // the anchor fits. Shrinking both ends symmetrically otherwise discards a
+    // useful heading even when only trailing context exceeds the byte budget.
+    let preserve_scope_prefix = start == scope_start
+        && text_bytes(start, anchor + 1) <= MAX_RANKED_PASSAGE_BYTES;
     while end.saturating_sub(start) > 1 && text_bytes(start, end) > MAX_RANKED_PASSAGE_BYTES {
-        if anchor.saturating_sub(start) >= end.saturating_sub(anchor + 1) && start < anchor {
+        if preserve_scope_prefix && end > anchor + 1 {
+            end -= 1;
+        } else if anchor.saturating_sub(start) >= end.saturating_sub(anchor + 1) && start < anchor {
             start += 1;
         } else if end > anchor + 1 {
             end -= 1;
@@ -839,6 +854,37 @@ mod tests {
         assert!(!tokens.contains("part0_part1_part2_part3_part4_part5_part6_part7_part8"));
     }
     use super::*;
+    #[test]
+    fn ranked_compact_passage_preserves_physical_lines_under_two_kib() {
+        let mut body = String::from("# Runtime health\n\n");
+        for n in 0..45 {
+            body.push_str(&format!("background{n} {}\n", "context ".repeat(30)));
+        }
+        body.push_str("health route dispatcher\n");
+        let terms = query_terms("health route dispatcher").unwrap();
+        let hit = score_document("local", std::path::Path::new("/repo/guide.md"), &body, &terms, 3, 1).unwrap();
+        assert!(hit.text.len() <= 2048, "one result exhausted source context: {}", hit.text.len());
+        let lines: Vec<_> = body.lines().collect();
+        assert_eq!(hit.text, lines[hit.start_line - 1..hit.end_line].join("\n"));
+        assert!(hit.text.contains("health route dispatcher"));
+        assert_eq!(hit.citation, format!("/repo/guide.md:{}-{}", hit.start_line, hit.end_line));
+        let encoded = serde_json::to_value(&hit).unwrap();
+        assert_eq!(encoded["citation"], hit.citation);
+        assert_eq!(hit.body_sha256, format!("{:x}", Sha256::digest(body.as_bytes())));
+    }
+
+    #[test]
+    fn ranked_compact_passage_avoids_uncitable_huge_line_winner() {
+        let body = format!("# History\nunrelated health route dispatcher check {}\n\n## Dispatcher\nhealth route\n", "noise".repeat(1200));
+        let terms = query_terms("health route dispatcher check").unwrap();
+        let hit = score_document("local", std::path::Path::new("/repo/guide.md"), &body, &terms, 1, 1).unwrap();
+        assert!(hit.text.contains("## Dispatcher"), "a huge historical line must not hide a compact defining passage");
+        assert!(hit.text.len() <= 2048);
+        assert!(!hit.text.contains("noisenoise"));
+    }
+
+    // Unshipped request-local DF/concept weighting and its feature-specific tests
+    // were retired after measured retrieval regression against the baseline.
     #[test]
     fn ranked_terms_preserve_identifier_and_split_components() {
         let terms = query_terms("RemoteIndexStore remote_index_search AND \"escape\"").unwrap();
@@ -1119,8 +1165,10 @@ mod tests {
         let allowed = temp.path().join("allowed");
         fs::create_dir(&allowed).unwrap();
         let good = allowed.join("index.rs");
+        let partial = allowed.join("partial.rs");
         let denied = temp.path().join("denied.rs");
         fs::write(&good, "pub fn index_repair() {}\n").unwrap();
+        fs::write(&partial, "pub fn index() {}\n").unwrap();
         fs::write(
             &denied,
             "pub fn index_repair_index_repair_index_repair() {}\n",
@@ -1130,6 +1178,7 @@ mod tests {
             temp.path(),
             &[
                 (&good, "pub fn index_repair() {}\n"),
+                (&partial, "pub fn index() {}\n"),
                 (
                     &denied,
                     "pub fn index_repair_index_repair_index_repair() {}\n",
@@ -1141,12 +1190,24 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.partial, "{:?}", result.warnings);
-        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits.len(), 2);
         assert_eq!(result.hits[0].path, good.display().to_string());
         assert_eq!(result.hits[0].freshness, "source_verified");
         assert!(!serde_json::to_string(&result)
             .unwrap()
             .contains("denied.rs"));
+        // Outside-ACL candidates must not influence even relevance scores:
+        // otherwise document frequencies become a cross-root side channel.
+        let allowed_only = fixture_backend(&allowed, &[
+            (&good, "pub fn index_repair() {}\n"),
+            (&partial, "pub fn index() {}\n"),
+        ]);
+        let isolated = allowed_only
+            .ranked_search_bounded(request(&allowed, "index repair"))
+            .await.unwrap();
+        assert_eq!(result.hits[0].score, isolated.hits[0].score);
+        assert_eq!(result.hits[1].path, partial.display().to_string());
+        assert_eq!(result.hits[1].score, isolated.hits[1].score);
     }
 
     #[tokio::test]
