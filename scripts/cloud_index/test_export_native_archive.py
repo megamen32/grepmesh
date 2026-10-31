@@ -73,6 +73,8 @@ def run():
         try:
             selected,skips=reindex.prepare_sources(store,result,root/'synthetic-scope', 'server-100')
             assert sum(n for _,n in selected)==3
+            resumed, same_skips=reindex.load_staged(root/'synthetic-scope','server-100','20261101T000000Z-01234567')
+            assert resumed==selected and same_skips==skips
             assert sum(skips.values())==0
             for path,n in selected:
                 records=[json.loads(line) for line in path.read_text().splitlines()]
@@ -117,6 +119,6 @@ def run():
         else:
             raise AssertionError('incomplete source archived')
         assert not any(x.endswith('complete.json') for x in other.objects)
-        print(json.dumps({'passed':True,'tests':16,'archive_tables':list(result['tables']),'objects':len(store.objects)}))
+        print(json.dumps({'passed':True,'tests':17,'archive_tables':list(result['tables']),'objects':len(store.objects)}))
 
 if __name__=='__main__':run()

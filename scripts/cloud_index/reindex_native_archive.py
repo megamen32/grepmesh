@@ -122,6 +122,33 @@ def prepare_sources(store,manifest,root,host,num=BUCKETS):
         raise
 
 
+def load_staged(root,host,snapshot):
+    """Resume after a stopped publish without re-downloading original archive."""
+    ensure_tmpfs(root)
+    paths=[]
+    skipped=None
+    for i in range(BUCKETS):
+        path=root/f'legacy-{host}-{i}-{snapshot}.jsonl'
+        if not path.is_file() or path.stat().st_size < 64:
+            raise FileNotFoundError('Missing unmodified tmpfs staging segment')
+        with path.open('rb') as f:
+            f.seek(max(0,path.stat().st_size-4096))
+            records=f.read().splitlines()
+        if not records:
+            raise ValueError('Missing source footer')
+        footer=json.loads(records[-1])
+        if footer.get('kind')!='end' or not footer.get('complete_for_policy'):
+            raise ValueError('Incomplete staged source')
+        if not isinstance(footer.get('count'),int) or footer['count']<=0:
+            raise ValueError('Invalid staged document count')
+        if skipped is None:
+            skipped=footer.get('skipped',{})
+        elif skipped!=footer.get('skipped',{}):
+            raise ValueError('Staged source policies differ')
+        paths.append((path,footer['count']))
+    return paths,skipped
+
+
 def publish(store,paths,host,snapshot,root):
     ensure_tmpfs(root)
     out=[]
@@ -143,11 +170,19 @@ def main():
     ap.add_argument('--host',default='server-44',choices=['server-44'])
     ap.add_argument('--snapshot',required=True)
     ap.add_argument('--root',type=Path,required=True)
+    ap.add_argument('--reuse-staged',action='store_true')
     args=ap.parse_args()
     ensure_tmpfs(args.root)
     store=CloudStore()
     manifest=get_manifest(store,args.host,args.snapshot)
-    paths,skipped=prepare_sources(store,manifest,args.root,args.host)
+    if args.reuse_staged:
+        paths,skipped=load_staged(args.root,args.host,args.snapshot)
+        print(json.dumps({'event':'reused_verified_tmpfs_staging',
+                          'documents':sum(n for _,n in paths),'skipped':skipped}),flush=True)
+    else:
+        paths,skipped=prepare_sources(store,manifest,args.root,args.host)
+    if sum(n for _,n in paths)+sum(skipped.values())!=manifest['tables']['grepmesh_documents_content']['rows']:
+        raise RuntimeError('Staged source count differs from the immutable archive')
     result=publish(store,paths,args.host,args.snapshot,args.root)
     print(json.dumps({'event':'cloud_reindex_complete','host':args.host,
         'indexed_documents':sum(r['documents'] for r in result),
