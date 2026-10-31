@@ -66,7 +66,7 @@ class CloudStore:
     def get(self,key,limit=MAX_RAW_SHARD):
         key=valid_key(key)
         # --head bounds even a corrupted/hostile object response before it reaches RAM.
-        r=subprocess.run(self.command(['cat',self.prefix+'/'+key,'--head',str(limit+1)]),capture_output=True,timeout=90)
+        r=subprocess.run(self.command(['cat',self.prefix+'/'+key,'--head',str(limit+1)]),stdin=subprocess.DEVNULL,capture_output=True,timeout=90)
         if r.returncode:raise RuntimeError('Cloud read failed: '+key)
         if len(r.stdout)>limit:raise ValueError('Cloud object exceeds declared bound')
         self.gets+=1;self.bytes_in+=len(r.stdout);return r.stdout
@@ -74,7 +74,7 @@ class CloudStore:
         key=valid_key(key)
         r=subprocess.run(self.command(['rcat',self.prefix+'/'+key,'--size',str(len(data))]),input=data,capture_output=True,timeout=120)
         if r.returncode:raise RuntimeError('Cloud upload failed: '+key)
-        r=subprocess.run(self.command(['lsjson',self.prefix+'/'+key,'--stat','--hash']),capture_output=True,timeout=45)
+        r=subprocess.run(self.command(['lsjson',self.prefix+'/'+key,'--stat','--hash']),stdin=subprocess.DEVNULL,capture_output=True,timeout=45)
         if r.returncode:raise RuntimeError('Cloud upload verification unavailable')
         info=json.loads(r.stdout)
         if info.get('Size')!=len(data) or info.get('Hashes',{}).get('md5')!=hashlib.md5(data).hexdigest():

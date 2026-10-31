@@ -1,8 +1,8 @@
 # Cloud-backed GrepMesh text index
 
-Status: implemented and tested with a synthetic transport. NOT a completed fleet migration.
-The attempted live-corpus publication was blocked by the execution tool before it ran.
-No native index was deleted, switched, or disabled. No cloud latency numbers are claimed.
+Status: synthetic tests and real Yandex.Disk pilot verified on 2026-10-31 for 13 tracked docs and 155 tracked repository files. NOT a completed fleet migration.
+Measured cold/warm real-cloud retrieval and source-to-cloud path-set parity: [pilot report](../../benchmarks/cloud-index/2026-10-31-real-yadisk.md).
+No native fleet index was deleted, switched off, or replaced. The cloud-backed pilot is limited to its declared text policy; full-text queries via the main GrepMesh still require authorized filesystem ACL propagation.
 
 ## Storage contract
 

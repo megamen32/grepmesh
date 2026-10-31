@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Deterministic cloud-index correctness tests. Synthetic text only; tmpfs required."""
 import hashlib, importlib.util, io, json, os, pathlib, sqlite3, subprocess, tempfile, time
-from cloud_index import Publisher, Reader, MemoryStore, document, json_bytes, ensure_tmpfs, scan_git
+from unittest.mock import patch
+from cloud_index import Publisher, Reader, MemoryStore, CloudStore, document, json_bytes, ensure_tmpfs, scan_git
 
 BASE=pathlib.Path('/run/user/1000/grepmesh-cloud-index-tests')
 
@@ -72,6 +73,19 @@ def run():
         ok('secret and symlink exclusion',emitted[-1]['skipped'].get('secret_name')==1 and emitted[-1]['skipped'].get('symlink')==1)
         ok('no source-side database',not list(source.glob('*.sqlite')))
         ok('no persistent temporary index',all(str(p).startswith('/run/') for p in root.rglob('*.sqlite')))
+        # Regression: SSH metadata reads must never steal JSON lines from the publisher's stdin.
+        payload=b'cloud-stream-regression'
+        result=[subprocess.CompletedProcess([],0,stdout=payload,stderr=b''),
+                subprocess.CompletedProcess([],0,stdout=b'',stderr=b''),
+                subprocess.CompletedProcess([],0,stdout=json.dumps({'Size':len(payload),'Hashes':{'md5':hashlib.md5(payload).hexdigest()}}).encode(),stderr=b'')]
+        with patch('cloud_index.subprocess.run',side_effect=result) as mocked:
+            with patch.object(CloudStore,'command',return_value=['fake-rclone']):
+                cloud=CloudStore()
+                assert cloud.get('objects/regression')==payload
+                cloud.put('objects/regression',payload)
+        ok('cloud reads disconnect source stdin',mocked.call_args_list[0].kwargs.get('stdin') == subprocess.DEVNULL)
+        ok('uploads preserve their explicit byte stream',mocked.call_args_list[1].kwargs.get('input') == payload)
+        ok('upload verification disconnects source stdin',mocked.call_args_list[2].kwargs.get('stdin') == subprocess.DEVNULL)
     report={'all_passed':True,'tests':len(cases),'cases':cases,'duration_seconds':round(time.monotonic()-start,3),'production_unchanged':True,'test_store':'synthetic in-memory cloud transport','real_cloud_test_separate':True}
     (BASE/'result.json').write_text(json.dumps(report,indent=2));print(json.dumps(report))
 
