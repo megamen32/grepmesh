@@ -1,0 +1,385 @@
+{
+  "date": "2026-10-31",
+  "benchmark": {
+    "dataset": {
+      "source_records": 622692,
+      "sample_records": 50000,
+      "seed": 4410031,
+      "queries": 35,
+      "unicode_paths": 883,
+      "sample_sha256": "8db37f6ef713a1cb66d58b9ce757bfac6100aa801925b5f73200e65b99dbca25",
+      "source_files_bytes": 121178262215,
+      "sampling": "uniform deterministic reservoir over every catalog row, not first N files"
+    },
+    "builds": {
+      "sqlite-current": {
+        "build_seconds": 2.6564404939999804,
+        "index_bytes": 60416000,
+        "snapshot_gzip_bytes": 17313783,
+        "compression_seconds": 1.2907624770014081,
+        "builder_max_rss_bytes": 219873280,
+        "sqlite_version": "3.37.2"
+      },
+      "sqlite-lean": {
+        "build_seconds": 2.49268555798335,
+        "index_bytes": 32542720,
+        "snapshot_gzip_bytes": 9224821,
+        "compression_seconds": 0.5734213920077309,
+        "builder_max_rss_bytes": 219873280,
+        "sqlite_version": "3.37.2"
+      },
+      "xerj": {
+        "build_seconds": 18.955165894003585,
+        "index_directory_bytes": 16760691,
+        "records": 50000,
+        "binary_version": "xerj v1.0.0-rc.100"
+      }
+    },
+    "queries": {
+      "engines": {
+        "sqlite-current": {
+          "correct_queries": 35,
+          "total_queries": 35,
+          "p50_ms": 26.6020139970351,
+          "p95_ms": 68.21763099287637,
+          "first_pass_median_ms": 36.90826898673549,
+          "queries_measured": 175,
+          "by_type": {
+            "exact": {
+              "p50_ms": 2.5338580016978085,
+              "p95_ms": 2.8169570141471922,
+              "runs": 25
+            },
+            "prefix": {
+              "p50_ms": 2.979668992338702,
+              "p95_ms": 3.722474997630343,
+              "runs": 25
+            },
+            "contains": {
+              "p50_ms": 37.80236601596698,
+              "p95_ms": 69.71665701712482,
+              "runs": 125
+            }
+          },
+          "serving_process_memory": {
+            "VmHWM": 41574400,
+            "VmRSS": 41574400
+          }
+        },
+        "sqlite-lean": {
+          "correct_queries": 35,
+          "total_queries": 35,
+          "p50_ms": 3.5307490034028888,
+          "p95_ms": 37.60453499853611,
+          "first_pass_median_ms": 3.898935974575579,
+          "queries_measured": 175,
+          "by_type": {
+            "exact": {
+              "p50_ms": 2.906840993091464,
+              "p95_ms": 3.0086800106801093,
+              "runs": 25
+            },
+            "prefix": {
+              "p50_ms": 3.474155004369095,
+              "p95_ms": 5.0670419877860695,
+              "runs": 25
+            },
+            "contains": {
+              "p50_ms": 3.716314007760957,
+              "p95_ms": 38.41103499871679,
+              "runs": 125
+            }
+          },
+          "serving_process_memory": {
+            "VmHWM": 41672704,
+            "VmRSS": 41672704
+          }
+        },
+        "xerj": {
+          "correct_queries": 35,
+          "total_queries": 35,
+          "p50_ms": 3.4146890102420002,
+          "p95_ms": 3.9257700263988227,
+          "first_pass_median_ms": 87.80250500421971,
+          "queries_measured": 175,
+          "by_type": {
+            "exact": {
+              "p50_ms": 3.000212978804484,
+              "p95_ms": 3.352913015987724,
+              "runs": 25
+            },
+            "prefix": {
+              "p50_ms": 3.465368994511664,
+              "p95_ms": 3.7042489857412875,
+              "runs": 25
+            },
+            "contains": {
+              "p50_ms": 3.4909010282717645,
+              "p95_ms": 3.9543820021208376,
+              "runs": 125
+            }
+          },
+          "serving_process_memory": {
+            "VmHWM": 602509312,
+            "VmRSS": 136577024
+          }
+        }
+      },
+      "correctness_errors": [],
+      "method": "same-host loopback HTTP, single client, all matches counted and first 20 IDs returned; 1 first pass then 5 warm rounds; engine order rotated"
+    },
+    "production_unchanged": true,
+    "test_storage": "tmpfs on server-44",
+    "cap": "2 CPU equivalents per engine/benchmark; 3 GiB memory cap",
+    "caveats": [
+      "Existing installed XERJ build, not upgraded.",
+      "Lexical metadata only; no embeddings.",
+      "Shared host, no OS cache drop; first pass is not true cold storage.",
+      "Process RSS and tmpfs index bytes overlap and should not be added blindly.",
+      "No production-MCP or WAN latency included."
+    ]
+  },
+  "unseen_queries": {
+    "queries": 45,
+    "request_cache_bypass": "requested via ?request_cache=false; first pass also uses entirely unseen query strings",
+    "errors": [],
+    "engines": {
+      "sqlite-current": {
+        "unseen": {
+          "p50_ms": 28.228252980625257,
+          "p95_ms": 68.94265601295047,
+          "runs": 45
+        },
+        "repeat": {
+          "p50_ms": 22.12946699000895,
+          "p95_ms": 55.28870999114588,
+          "runs": 90
+        },
+        "by_type": {
+          "unseen_exact": {
+            "p50_ms": 2.7124424959765747,
+            "p95_ms": 7.2950299945659935
+          },
+          "unseen_prefix": {
+            "p50_ms": 3.697766995173879,
+            "p95_ms": 8.870645018760115
+          },
+          "unseen_contains": {
+            "p50_ms": 41.66384701966308,
+            "p95_ms": 70.20151900360361
+          },
+          "repeat_exact": {
+            "p50_ms": 2.446094498736784,
+            "p95_ms": 2.7156639844179153
+          },
+          "repeat_prefix": {
+            "p50_ms": 2.9074784979457036,
+            "p95_ms": 4.111741000087932
+          },
+          "repeat_contains": {
+            "p50_ms": 31.36968750914093,
+            "p95_ms": 66.93428198923357
+          }
+        }
+      },
+      "sqlite-lean": {
+        "unseen": {
+          "p50_ms": 6.38139498187229,
+          "p95_ms": 52.90738199255429,
+          "runs": 45
+        },
+        "repeat": {
+          "p50_ms": 3.8383389910450205,
+          "p95_ms": 27.0169030118268,
+          "runs": 90
+        },
+        "by_type": {
+          "unseen_exact": {
+            "p50_ms": 2.722801495110616,
+            "p95_ms": 11.808185983682051
+          },
+          "unseen_prefix": {
+            "p50_ms": 4.125929990550503,
+            "p95_ms": 8.911531011108309
+          },
+          "unseen_contains": {
+            "p50_ms": 18.064378993585706,
+            "p95_ms": 53.11771499691531
+          },
+          "repeat_exact": {
+            "p50_ms": 2.5257209927076474,
+            "p95_ms": 2.8659229865297675
+          },
+          "repeat_prefix": {
+            "p50_ms": 2.892573000281118,
+            "p95_ms": 4.221520997816697
+          },
+          "repeat_contains": {
+            "p50_ms": 11.082708006142639,
+            "p95_ms": 31.28901799209416
+          }
+        }
+      },
+      "xerj": {
+        "unseen": {
+          "p50_ms": 66.17806400754489,
+          "p95_ms": 94.85357601079158,
+          "runs": 45
+        },
+        "repeat": {
+          "p50_ms": 3.538671982823871,
+          "p95_ms": 3.9758060011081398,
+          "runs": 90
+        },
+        "by_type": {
+          "unseen_exact": {
+            "p50_ms": 3.6720729985972866,
+            "p95_ms": 4.1727400093805045
+          },
+          "unseen_prefix": {
+            "p50_ms": 5.678275003447197,
+            "p95_ms": 7.468636002158746
+          },
+          "unseen_contains": {
+            "p50_ms": 87.82337501179427,
+            "p95_ms": 96.09821901540272
+          },
+          "repeat_exact": {
+            "p50_ms": 3.0539114959537983,
+            "p95_ms": 3.168135997839272
+          },
+          "repeat_prefix": {
+            "p50_ms": 3.464712484856136,
+            "p95_ms": 3.668429999379441
+          },
+          "repeat_contains": {
+            "p50_ms": 3.637675996287726,
+            "p95_ms": 3.9989459910430014
+          }
+        }
+      }
+    }
+  },
+  "document_text_smoke_test": {
+    "documents": 20,
+    "requested": 24,
+    "downloaded": 24,
+    "text_bytes": 118394,
+    "queries": 20,
+    "kind": "literal full-text smoke test, not a semantic relevance evaluation",
+    "sqlite_build_seconds": 0.00798189698252827,
+    "xerj_build_seconds": 0.0654156639939174,
+    "sqlite_bytes": 229376,
+    "errors": [
+      {
+        "engine": "xerj",
+        "kind": "term",
+        "query": "settings",
+        "expected": 7,
+        "actual": 6
+      },
+      {
+        "engine": "xerj",
+        "kind": "term",
+        "query": "service",
+        "expected": 6,
+        "actual": 3
+      },
+      {
+        "engine": "xerj",
+        "kind": "term",
+        "query": "current",
+        "expected": 5,
+        "actual": 4
+      }
+    ],
+    "latency": {
+      "sqlite": {
+        "p50_ms": 1.844610000262037,
+        "p95_ms": 2.579625026555732
+      },
+      "xerj": {
+        "p50_ms": 2.116963005391881,
+        "p95_ms": 2.883989014662802
+      }
+    }
+  },
+  "recovery_and_compression": {
+    "text_diagnosis": [
+      {
+        "term": "settings",
+        "doc_id": 17,
+        "tokenizer_preserves_filename_token": [
+          "settings.jpg"
+        ]
+      },
+      {
+        "term": "service",
+        "doc_id": 2,
+        "tokenizer_preserves_filename_token": [
+          "edge.service"
+        ]
+      },
+      {
+        "term": "service",
+        "doc_id": 9,
+        "tokenizer_preserves_filename_token": [
+          "dns.service"
+        ]
+      },
+      {
+        "term": "service",
+        "doc_id": 20,
+        "tokenizer_preserves_filename_token": [
+          "watchdog.service"
+        ]
+      },
+      {
+        "term": "current",
+        "doc_id": 15,
+        "tokenizer_preserves_filename_token": [
+          "current.md"
+        ]
+      }
+    ],
+    "xerj_restart": {
+      "ready_seconds": 1.386188831005711,
+      "counts": {
+        "bench-yadisk-20261031": 50000,
+        "bench-docs-20261031": 20
+      },
+      "method": "same tmpfs data directory, process restart only; not power-loss or S3 recovery"
+    },
+    "sqlite_reopen": [
+      {
+        "kind": "current",
+        "rows": 50000,
+        "reopen_and_count_ms": 9.596249990863726
+      },
+      {
+        "kind": "lean",
+        "rows": 50000,
+        "reopen_and_count_ms": 9.601482975995168
+      }
+    ],
+    "isolated_xerj_stopped": true,
+    "xerj_metadata_snapshot": {
+      "raw_bytes": 16641103,
+      "gzip_bytes": 14292676
+    }
+  },
+  "not_tested": [
+    "Native XERJ S3 backend / rclone S3 gateway",
+    "Full 622692-row XERJ ingest",
+    "Neural or semantic relevance",
+    "High concurrency or sustained mixed writes",
+    "True cold disk or network storage latency"
+  ],
+  "interpretation": "Optimized SQLite is the lower-RAM and faster-unseen-query choice for this catalog. XERJ has the smaller raw index and faster cached substring searches. Optimized SQLite has the smaller gzip cloud snapshot.",
+  "cleanup": {
+    "isolated_xerj_stopped": true,
+    "generated_data_removed": true,
+    "bytes_freed_from_tmpfs": 318637238,
+    "production_unchanged": true
+  }
+}
