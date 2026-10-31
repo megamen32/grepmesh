@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "scopes": [
+    {
+      "scope": "grepmesh-code-pilot",
+      "source_host": "server-100",
+      "source_root": "/home/roomhacker/agents-projects/grepmesh"
+    },
+    {
+      "scope": "airlock-members-cloud",
+      "source_host": "server-100",
+      "source_root": "/home/roomhacker/agents-projects/airlock-members-api"
+    }
+  ]
+}

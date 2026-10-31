@@ -45,3 +45,9 @@ Before removing any native fleet database:
 5. Only then stop the old writer and remove the old index after checking that it contains no unique irreplaceable extracted content.
 
 The code contains no native-database deletion command. The existing 81 GiB server-100 index remains unchanged by this work.
+
+## Automatic Git snapshot refresh (not deployed)
+
+The `refresh_git.py` script refreshes only explicitly allowlisted Git projects from server-100, without reading its legacy SQLite index. It verifies the complete source stream and original cloud manifest. If unchanged it performs zero writes. If changed, it publishes a new immutable generation with the pointer written last, while retaining the previous version for rollback. Empty scans, malformed data, or sudden loss of over half the documents fail closed. Runtime source streams and SQLite shards must remain in tmpfs.
+
+This is a bounded full-scope refresh, **not incremental per-file indexing**. It supports at most 100,000 documents and 64 MiB of source-stream data per scope. OCR/PDF extraction refresh is not implemented. The updater has not been installed as a timer; see `refresh_git_scopes.example.json` for the two existing Git scopes. User authorization alone does not grant the GPT Admin connection its required owner/admin role or verified filesystem ACL.

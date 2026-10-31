@@ -15,6 +15,7 @@ PREFIX = 'yadisk:Backups/GrepMesh/cloud-index-v1'
 SOURCE_MACHINE = os.environ.get('GREPMESH_CLOUD_GATEWAY', '')
 RCLONE = os.environ.get('GREPMESH_CLOUD_RCLONE', 'rclone')
 HOST = os.environ.get('GREPMESH_CLOUD_HOST_ID', 'server-44-cloud-text')
+INDEX_LAYOUT = 'fts5-trigram-detail-none-v2'
 MIB = 1024 * 1024
 MAX_DOCUMENT = MIB
 MAX_RAW_SHARD = 64 * MIB
@@ -253,7 +254,7 @@ class Publisher:
         if any(line.strip() for line in it):raise ValueError('Unexpected records after source footer')
         if docs:parts.extend(self.shard(docs))
         path_descriptor=self.path_index(paths)
-        manifest={'path_index':path_descriptor,'format':1,'scope':scope,'source_host':head['source_host'],'source_root':str(source),'policy':head['policy'],'skipped':end['skipped'],'documents':count,'logical_sha256':h.hexdigest(),'parts':parts,'generated_at':time.time(),'complete_for_policy':True,'storage':'cloud immutable shards / bounded RAM cache','build_seconds':round(time.monotonic()-started,3)}
+        manifest={'path_index':path_descriptor,'index_layout':INDEX_LAYOUT,'format':1,'scope':scope,'source_host':head['source_host'],'source_root':str(source),'policy':head['policy'],'skipped':end['skipped'],'documents':count,'logical_sha256':h.hexdigest(),'parts':parts,'generated_at':time.time(),'complete_for_policy':True,'storage':'cloud immutable shards / bounded RAM cache','build_seconds':round(time.monotonic()-started,3)}
         blob=json_bytes(manifest)
         if len(blob)>MAX_MANIFEST:raise ValueError('Manifest too large')
         key='manifests/'+scope+'/'+digest(blob)+'.json';self.store.put(key,blob)
