@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Synthetic two-root federated cloud retrieval and ACL isolation tests."""
-import io,json,os,pathlib,tempfile
-from cloud_index import ensure_tmpfs,MemoryStore,Publisher,document,json_bytes
+import io,json,os,pathlib,tempfile,threading
+from unittest.mock import patch
+from cloud_index import ensure_tmpfs,MemoryStore,Publisher,Reader,document,json_bytes
 from multi_cloud import MultiReader
 BASE=pathlib.Path('/run/user')/str(os.getuid())/'grepmesh-cloud-multi-tests'
 ensure_tmpfs(BASE)
@@ -29,6 +30,15 @@ with tempfile.TemporaryDirectory(dir=BASE) as tmp:
     check('independent manifests counted',a.manifest['documents']==4)
     r=a.query('shared')
     check('cross-corpus text search',len(r['results'])==2 and not r['partial'])
+    barrier=threading.Barrier(2)
+    original_query=Reader.query
+    def synchronized_query(self,*args,**kwargs):
+        barrier.wait(timeout=2.0)
+        return original_query(self,*args,**kwargs)
+    with patch.object(Reader,'query',synchronized_query):
+        concurrent=a.query('*.md',glob=True)
+    check('independent path-scope queries actually run concurrently',
+          len(concurrent['results'])==1 and not concurrent['partial'])
     check('RAM cache budget',a.used<=128*1024*1024)
     check('source-root narrowing',len(a.query('shared',roots=['/src/code'])['results'])==1)
     check('ACL isolates restricted source',len(a.query('shared',authorized_roots=['/src/documents'])['results'])==1)

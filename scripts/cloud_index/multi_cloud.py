@@ -6,7 +6,7 @@ peer per cloud corpus. Every scope's durable shards remain in Yandex.Disk,
 while each reader uses only bounded tmpfs cache. No native index is changed.
 """
 from __future__ import annotations
-import argparse, json, os
+import argparse, json, os, time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from cloud_index import CloudStore, Reader, ensure_tmpfs, safe_scope, serve, MIB, HOST
@@ -77,27 +77,56 @@ class MultiReader:
             selected.append(r)
         if not selected and roots:
             raise ValueError('Requested root is outside the cloud corpus set')
-        results=[];seen=set();warnings=[];truncated=False;cloud_fetches=0;elapsed_ms=0
-        # Each scope has an independently verified immutable manifest.
-        for reader in selected:
+        results=[];seen=set();warnings=[];truncated=False;cloud_fetches=0
+        started=time.monotonic()
+        def read_scope(reader,budget):
             try:
-                out=reader.query(
+                result=reader.query(
                     query,limit=limit+1,glob=glob,case_sensitive=case_sensitive,
                     roots=None if not roots or any(x in ('local','*',self.scope) for x in roots) else roots,
-                    path_globs=path_globs,deadline_seconds=deadline_seconds,
+                    path_globs=path_globs,deadline_seconds=budget,
                     authorized_roots=authorized_roots)
-                cloud_fetches+=out['cloud_fetches']
-                elapsed_ms+=out['elapsed_ms']
-                truncated |= bool(out['truncated'])
-                if out['partial']:
-                    warnings.extend(reader.scope+': '+str(s) for s in out.get('warnings',[]))
-                for hit in out['results']:
-                    ident=(hit['source_host'],hit['path'])
-                    if ident not in seen:
-                        seen.add(ident);results.append(hit)
+                return reader.scope,result
             except Exception as error:
-                warnings.append(reader.scope+': '+type(error).__name__+': '+str(error)[:160])
+                return reader.scope,error
+        def add_result(name,out):
+            nonlocal cloud_fetches,truncated
+            if isinstance(out,Exception):
+                warnings.append(name+': '+type(out).__name__+': '+str(out)[:160])
+                return
+            cloud_fetches+=out['cloud_fetches']
+            truncated |= bool(out['truncated'])
+            if out['partial']:
+                warnings.extend(name+': '+str(s) for s in out.get('warnings',[]))
+            for hit in out['results']:
+                ident=(hit['source_host'],hit['path'])
+                if ident not in seen:
+                    seen.add(ident);results.append(hit)
+        if glob and len(selected)>1:
+            # Path-only indexes are already hot in tmpfs, and independent
+            # glob searches are inexpensive to process in parallel.
+            with ThreadPoolExecutor(max_workers=min(4,len(selected))) as pool:
+                for name,out in pool.map(lambda r:read_scope(r,deadline_seconds),selected):
+                    add_result(name,out)
+        else:
+            # Cloud full-text downloads are expensive and rate-limited.
+            # Never fan out 8 readers * 6 speculative rclone subprocesses:
+            # process scopes in deterministic order, stop when the requested
+            # limit is reached, and share ONE deadline across all scopes.
+            for index,reader in enumerate(selected):
+                budget=deadline_seconds-(time.monotonic()-started)
+                if budget<=0:
+                    warnings.append('Global cloud text deadline; remaining scopes not searched')
+                    break
+                name,out=read_scope(reader,budget)
+                add_result(name,out)
+                if len(results)>=limit:
+                    # Unsearched scopes can contain additional results;
+                    # signal truncation instead of claiming exhaustive search.
+                    truncated |= index<len(selected)-1 or len(results)>limit
+                    break
         truncated |= len(results)>limit
+        elapsed_ms=round((time.monotonic()-started)*1000,2)
         return {
             'results':results[:limit],'partial':bool(warnings),'truncated':truncated,
             'warnings':warnings,'content_indexed':True,'scope':self.scope,
