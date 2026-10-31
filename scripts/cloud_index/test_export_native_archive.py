@@ -3,6 +3,8 @@
 from __future__ import annotations
 import gzip, hashlib, json, os, pathlib, sqlite3, sys, tempfile
 from export_native_archive import export
+from verify_native_archive import verify
+from recover_native_archive import read_document
 
 class FakeCloud:
     prefix='yadisk:Backups/GrepMesh/cloud-index-v1'
@@ -60,6 +62,11 @@ def run():
         create_source(db)
         store=FakeCloud()
         result=export(db,'server-100',root,'20261101T000000Z-01234567',store,4*1024*1024)
+        assert verify('server-100','20261101T000000Z-01234567',store,validate_json=True)['documents']==3
+        recovered=read_document(store,'server-100','20261101T000000Z-01234567','/home/test/deleted-since-index.txt')
+        assert recovered['body']=='Historical text from missing file'
+        assert read_document(store,'server-100','20261101T000000Z-01234567','/home/test/not-in-old-index') is None
+        assert 'СТАРЫЙ ТЕКСТ' in read_document(store,'server-100','20261101T000000Z-01234567','/home/test/old-scan.pdf')['body']
         assert result['tables']['grepmesh_documents_content']['rows']==3
         assert result['tables']['grepmesh_document_rows']['rows']==3
         assert result['tables']['grepmesh_extraction_cache']['rows']==1
