@@ -179,7 +179,7 @@ def scan_git(root: P, host: str, output):
 
 class Publisher:
     def __init__(self,store,root,shard_text_bytes=8*MIB):
-        self.store=store;self.root=P(root);self.target=max(64*1024,min(shard_text_bytes,8*MIB))
+        self.store=store;self.root=P(root);self.target=max(64*1024,min(shard_text_bytes,16*MIB))
     def shard(self,docs):
         scratch=self.root/('build-'+os.urandom(8).hex()+'.sqlite')
         c=sqlite3.connect(scratch)

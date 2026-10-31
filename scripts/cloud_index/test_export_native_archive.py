@@ -71,9 +71,9 @@ def run():
         original_roots=reindex.ROOTS
         reindex.ROOTS=('/home/test',)
         try:
-            selected,skips=reindex.prepare_sources(store,result,root/'synthetic-scope', 'server-100')
+            selected,skips=reindex.prepare_sources(store,result,pathlib.Path(temp)/'synthetic-scope', 'server-100')
             assert sum(n for _,n in selected)==3
-            resumed, same_skips=reindex.load_staged(root/'synthetic-scope','server-100','20261101T000000Z-01234567')
+            resumed, same_skips=reindex.load_staged(pathlib.Path(temp)/'synthetic-scope','server-100','20261101T000000Z-01234567')
             assert resumed==selected and same_skips==skips
             assert sum(skips.values())==0
             for path,n in selected:

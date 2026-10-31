@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import time
+from concurrent.futures import ProcessPoolExecutor
 
 from cloud_index import (
     CloudStore, Publisher, digest, document, ensure_tmpfs, json_bytes, MAX_DOCUMENT, MIB,
@@ -139,7 +140,7 @@ def load_staged(root,host,snapshot):
         footer=json.loads(records[-1])
         if footer.get('kind')!='end' or not footer.get('complete_for_policy'):
             raise ValueError('Incomplete staged source')
-        if not isinstance(footer.get('count'),int) or footer['count']<=0:
+        if not isinstance(footer.get('count'),int) or footer['count']<0:
             raise ValueError('Invalid staged document count')
         if skipped is None:
             skipped=footer.get('skipped',{})
@@ -149,19 +150,31 @@ def load_staged(root,host,snapshot):
     return paths,skipped
 
 
+def publish_one(job):
+    host,root,i,path,expected=job
+    scope=f'legacy-{host.replace("-","")}-{i}'
+    # Each process has its own SQLite writer/CloudStore, avoiding Python's GIL.
+    # All scratch files stay in tmpfs and independent cloud scopes have
+    # separate immutable manifests; the parent commits no global pointer.
+    with path.open('r',encoding='utf-8') as stream:
+        manifest=Publisher(CloudStore(),root,shard_text_bytes=16*MIB).publish(scope,stream)
+    if manifest['documents']!=expected:
+        raise ValueError('Cloud publication document count mismatch')
+    result={'scope':scope,'documents':expected,'parts':len(manifest['parts']),
+            'packed_bytes':sum(x['packed_bytes'] for x in manifest['parts'])}
+    print(json.dumps({'event':'cloud_scope_published','host':host,**result}),flush=True)
+    return result
+
+
 def publish(store,paths,host,snapshot,root):
     ensure_tmpfs(root)
-    out=[]
-    for i,(path,expected) in enumerate(paths):
-        scope=f'legacy-{host.replace("-","")}-{i}'
-        with path.open('r',encoding='utf-8') as stream:
-            manifest=Publisher(store,root,shard_text_bytes=8*MIB).publish(scope,stream)
-        if manifest['documents']!=expected:
-            raise ValueError('Cloud publication document count mismatch')
-        out.append({'scope':scope,'documents':expected,'parts':len(manifest['parts']),
-                    'packed_bytes':sum(x['packed_bytes'] for x in manifest['parts'])})
-        path.unlink() # tmpfs stage only; immutable cloud manifest is verified
-        print(json.dumps({'event':'cloud_scope_published','host':host,**out[-1]}),flush=True)
+    jobs=[(host,root,i,path,expected) for i,(path,expected) in enumerate(paths)]
+    # At most two CPU-intensive independent processes at a time under the
+    # parent cgroup; retain staged input after any partial failure.
+    with ProcessPoolExecutor(max_workers=2) as workers:
+        out=list(workers.map(publish_one,jobs))
+    for path,_ in paths:
+        path.unlink()  # Only after all eight durable scopes published
     return out
 
 

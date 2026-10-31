@@ -21,6 +21,8 @@ def run():
         assert condition,name;cases.append(name)
     with tempfile.TemporaryDirectory(dir=BASE) as work:
         root=pathlib.Path(work);store=MemoryStore();pub=Publisher(store,root,64*1024)
+        ok('historical scoped writer accepts explicit 16 MiB flush',Publisher(store,root,16*1024*1024).target==16*1024*1024)
+        ok('default project shard target unchanged',Publisher(store,root).target==8*1024*1024)
         docs=[('/fixture/one.md','alpha needleONE\nsecond line\n'+'stable words '*6000),('/fixture/two.md','beta needleTWO\n'+'unchanged words '*6000),('/fixture/фото.md','Кириллица строка\nStraße other\n'+'unicode note '*6000),('/fixture/Case.md','case upper only'),('/fixture/case.md','case lower only')]
         m=pub.publish('fixture',stream(docs));ok('full snapshot row accounting',m['documents']==5 and len(m['parts'])>=3)
         ok('path-only index published',m.get('path_index',{}).get('documents')==5)
