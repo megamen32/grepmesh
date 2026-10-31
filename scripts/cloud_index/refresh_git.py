@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -231,6 +232,29 @@ def refresh_one(store, ram_root, entry, stream, shard_kib=4096):
     }
 
 
+def refresh_all(store, ram_root, entries, max_stream_bytes=MAX_STREAM,
+                scan=acquire_source_stream):
+    """Serialize with the standard cloud publisher, including manual uploads.
+
+    The lock and all source streams are in tmpfs, never on the host SSD.
+    A failed scan does not start a new publication for that scope.
+    """
+    ensure_tmpfs(ram_root)
+    outputs = []
+    with open(ram_root / "publisher.lock", "a+b") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("Another cloud index publisher is active") from None
+        for entry in entries:
+            with tempfile.TemporaryFile(mode="w+b", dir=ram_root) as stream:
+                copied = scan(entry, stream, max_bytes=max_stream_bytes)
+                result = refresh_one(store, ram_root, entry, stream)
+                result["source_stream_bytes"] = copied
+                outputs.append(result)
+    return outputs
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=P, required=True)
@@ -245,17 +269,11 @@ def main():
     ensure_tmpfs(args.root)
     items = load_scopes(args.config)
     store = CloudStore()
-    outputs = []
-    for entry in items:
-        # Separate temporary source stream, never retained on SSD.
-        with tempfile.TemporaryFile(mode="w+b", dir=args.root) as stream:
-            copied = acquire_source_stream(
-                entry, stream, max_bytes=args.max_stream_mib * 1024 * 1024
-            )
-            result = refresh_one(store, args.root, entry, stream)
-            result["source_stream_bytes"] = copied
-            outputs.append(result)
-    print(json.dumps({"ok": True, "results": outputs}, ensure_ascii=False), flush=True)
+    results = refresh_all(
+        store, args.root, items,
+        max_stream_bytes=args.max_stream_mib * 1024 * 1024,
+    )
+    print(json.dumps({"ok": True, "results": results}, ensure_ascii=False), flush=True)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Deterministic tests for update-only cloud publishing, no real network."""
+import fcntl
 import hashlib
 import io
 import json
@@ -8,7 +9,7 @@ import pathlib
 import tempfile
 
 from cloud_index import MemoryStore, Publisher, Reader, document, ensure_tmpfs, digest, json_bytes
-from refresh_git import load_scopes, refresh_one, verify_stream
+from refresh_git import load_scopes, refresh_one, refresh_all, verify_stream
 
 BASE = pathlib.Path('/run/user') / str(os.getuid()) / 'grepmesh-cloud-refresh-tests'
 ensure_tmpfs(BASE)
@@ -90,6 +91,42 @@ def run():
         except ValueError: pass
         else: raise AssertionError('Broad home folder accepted')
         passed('home-wide source is rejected', True)
+        # Shared publisher.lock prevents overlap with manual cloud publishing.
+        def synthetic_scan(item, output, max_bytes=64*1024*1024):
+            raw = encoded(many, source, 'server-100').getvalue()
+            assert len(raw) <= max_bytes
+            output.write(raw)
+            output.flush()
+            output.seek(0)
+            return len(raw)
+
+        uploads_before = store.puts
+        status = refresh_all(store, root, [entry], scan=synthetic_scan)
+        passed('serialized refresh skips unchanged source', status[0]['action'] == 'unchanged')
+        passed('serialized unchanged refresh writes nothing', store.puts == uploads_before)
+
+        with open(root / 'publisher.lock', 'a+b') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                refresh_all(store, root, [entry], scan=synthetic_scan)
+            except RuntimeError as error:
+                passed('concurrent cloud publisher refused', 'publisher' in str(error))
+            else:
+                raise AssertionError('Overlapping publisher was admitted')
+
+        def failing_scan(item, output, max_bytes=64*1024*1024):
+            output.write(b'incomplete')
+            raise RuntimeError('Simulated source failure')
+
+        try:
+            refresh_all(store, root, [entry], scan=failing_scan)
+        except RuntimeError:
+            passed('failed scan does not publish', store.objects['scopes/cloud-updater-test/latest.json'] == ptr_many)
+        else:
+            raise AssertionError('Broken source scan was admitted')
+
+        recovered = refresh_all(store, root, [entry], scan=synthetic_scan)
+        passed('failed scan releases publishing lock', recovered[0]['action'] == 'unchanged')
 
     print(json.dumps({'all_passed': True, 'tests': len(checks), 'cases': checks}))
 
