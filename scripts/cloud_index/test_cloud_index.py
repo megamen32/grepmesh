@@ -23,6 +23,7 @@ def run():
         root=pathlib.Path(work);store=MemoryStore();pub=Publisher(store,root,64*1024)
         docs=[('/fixture/one.md','alpha needleONE\nsecond line\n'+'stable words '*6000),('/fixture/two.md','beta needleTWO\n'+'unchanged words '*6000),('/fixture/фото.md','Кириллица строка\nStraße other\n'+'unicode note '*6000),('/fixture/Case.md','case upper only'),('/fixture/case.md','case lower only')]
         m=pub.publish('fixture',stream(docs));ok('full snapshot row accounting',m['documents']==5 and len(m['parts'])>=3)
+        ok('path-only index published',m.get('path_index',{}).get('documents')==5)
         maximum=max(x['raw_bytes'] for x in m['parts']);reader=Reader(store,root,'fixture',maximum,'fixture-host','/fixture');reader.refresh()
         r=reader.query('needleONE');ok('literal body retrieval',len(r['results'])==1 and r['results'][0]['line_number']==1 and not r['partial'])
         ok('first query reads cloud',r['cloud_fetches']>0)
@@ -33,6 +34,7 @@ def run():
         reader.clear();fresh=Reader(store,root,'fixture',maximum,'fixture-host','/fixture');r=fresh.query('needleTWO')
         ok('empty-cache recovery requires no source DB',len(r['results'])==1 and r['cloud_fetches']>=3)
         r=fresh.query('*.md',glob=True,limit=20);ok('filename search and case-distinct paths',len(r['results'])==5 and not r['partial'])
+        ok('filename glob fetches only compact path index',r['cloud_fetches']==1)
         r=fresh.query('case',case_sensitive=True,limit=20);ok('literal case-sensitive query',len(r['results'])==2)
         r=fresh.query('needleONE',path_globs=['*/two.md']);ok('path restriction before results',not r['results'])
         r=fresh.query('needleONE',authorized_roots=['/fixture/two.md']);ok('forwarded read ACL filters text hits',not r['results'])

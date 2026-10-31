@@ -14,7 +14,7 @@ DEFAULT_ROOT = P('/run/user') / str(os.getuid()) / 'grepmesh-cloud-index'
 PREFIX = 'yadisk:Backups/GrepMesh/cloud-index-v1'
 SOURCE_MACHINE = os.environ.get('GREPMESH_CLOUD_GATEWAY', '')
 RCLONE = os.environ.get('GREPMESH_CLOUD_RCLONE', 'rclone')
-HOST = 'server-44-cloud-text'
+HOST = os.environ.get('GREPMESH_CLOUD_HOST_ID', 'server-44-cloud-text')
 MIB = 1024 * 1024
 MAX_DOCUMENT = MIB
 MAX_RAW_SHARD = 64 * MIB
@@ -188,8 +188,35 @@ class Publisher:
         finally:
             with contextlib.suppress(Exception):c.close()
             scratch.unlink(missing_ok=True)
+    def path_index(self,entries):
+        """One small path-only cloud object makes filename lookups independent of text shards."""
+        scratch=self.root/('path-'+os.urandom(8).hex()+'.sqlite')
+        c=sqlite3.connect(scratch)
+        try:
+            c.executescript('''PRAGMA journal_mode=OFF; PRAGMA temp_store=MEMORY;
+                CREATE TABLE paths(path TEXT PRIMARY KEY NOT NULL,size INTEGER,mtime_ns INTEGER,sha TEXT,path_fold TEXT NOT NULL);
+                CREATE INDEX paths_prefix ON paths(path_fold);''')
+            c.executemany('INSERT INTO paths VALUES(?,?,?,?,?)',
+                          [(path,size,mtime,sha,path.casefold()) for path,size,mtime,sha in entries])
+            c.commit()
+            if c.execute('PRAGMA quick_check').fetchone()[0]!='ok':
+                raise RuntimeError('Path index integrity failed')
+            c.close()
+            if scratch.stat().st_size>MAX_RAW_SHARD:
+                raise ValueError('Path index too large; split the source scope')
+            raw=scratch.read_bytes();sha=digest(raw)
+            packed=gzip.compress(raw,compresslevel=3,mtime=0)
+            key='objects/'+sha+'.sqlite.gz'
+            self.store.put(key,packed)
+            return {'key':key,'sha256':sha,'packed_sha256':digest(packed),
+                    'raw_bytes':len(raw),'packed_bytes':len(packed),
+                    'documents':len(entries),'kind':'path_index'}
+        finally:
+            with contextlib.suppress(Exception):c.close()
+            scratch.unlink(missing_ok=True)
+
     def publish(self,scope,lines):
-        safe_scope(scope);started=time.monotonic();parts=[];docs=[];size=0;count=0;seen=set();h=hashlib.sha256();end=None
+        safe_scope(scope);started=time.monotonic();parts=[];docs=[];paths=[];size=0;count=0;seen=set();h=hashlib.sha256();end=None
         it=iter(lines);head=json.loads(next(it))
         if head.get('kind')!='begin' or head.get('format')!=1:raise ValueError('Missing stream header')
         source=P(head['source_root'])
@@ -204,7 +231,7 @@ class Publisher:
             if d['path'] in seen:raise ValueError('Duplicate path in source stream')
             if len(d['body'].encode())>MAX_DOCUMENT:raise ValueError('Oversized document')
             if digest(d['body'].encode())!=d['sha256']:raise ValueError('Input digest mismatch')
-            seen.add(d['path']);h.update(json_bytes([d['path'],d['sha256']]))
+            seen.add(d['path']);h.update(json_bytes([d['path'],d['sha256']]));paths.append((d['path'],d['size'],d['mtime_ns'],d['sha256']))
             docs.append(d);size+=len(d['body'].encode());count+=1
             if size>=self.target or len(docs)>=512:
                 parts.extend(self.shard(docs));docs=[];size=0
@@ -213,7 +240,8 @@ class Publisher:
             raise RuntimeError('Incomplete source stream; existing cloud generation preserved')
         if any(line.strip() for line in it):raise ValueError('Unexpected records after source footer')
         if docs:parts.extend(self.shard(docs))
-        manifest={'format':1,'scope':scope,'source_host':head['source_host'],'source_root':str(source),'policy':head['policy'],'skipped':end['skipped'],'documents':count,'logical_sha256':h.hexdigest(),'parts':parts,'generated_at':time.time(),'complete_for_policy':True,'storage':'cloud immutable shards / bounded RAM cache','build_seconds':round(time.monotonic()-started,3)}
+        path_descriptor=self.path_index(paths)
+        manifest={'path_index':path_descriptor,'format':1,'scope':scope,'source_host':head['source_host'],'source_root':str(source),'policy':head['policy'],'skipped':end['skipped'],'documents':count,'logical_sha256':h.hexdigest(),'parts':parts,'generated_at':time.time(),'complete_for_policy':True,'storage':'cloud immutable shards / bounded RAM cache','build_seconds':round(time.monotonic()-started,3)}
         blob=json_bytes(manifest)
         if len(blob)>MAX_MANIFEST:raise ValueError('Manifest too large')
         key='manifests/'+scope+'/'+digest(blob)+'.json';self.store.put(key,blob)
@@ -239,11 +267,13 @@ class Reader:
         if self.allowed_host and m['source_host']!=self.allowed_host:raise ValueError('Source host not admitted')
         if self.allowed_root and m['source_root']!=self.allowed_root:raise ValueError('Source root not admitted')
         if sum(p['documents'] for p in m['parts'])!=m['documents']:raise ValueError('Manifest row accounting failed')
-        for part in m['parts']:
+        if m.get('path_index') and m['path_index'].get('documents')!=m['documents']:
+            raise ValueError('Path index row accounting mismatch')
+        for part in m['parts']+([m['path_index']] if m.get('path_index') else []):
             if not re.fullmatch(r'[0-9a-f]{64}',part['sha256']) or part['raw_bytes']>MAX_RAW_SHARD or part['raw_bytes']<4096:raise ValueError('Invalid shard descriptor')
             if part['key']!='objects/'+part['sha256']+'.sqlite.gz':raise ValueError('Shard identity mismatch')
             if part['packed_bytes']>MAX_RAW_SHARD:raise ValueError('Packed shard too large')
-            might_match(part['bloom'],'')
+            if part.get('kind')!='path_index':might_match(part['bloom'],'')
         self.manifest=m;return m
     def clear(self):
         with self.lock:
@@ -280,6 +310,39 @@ class Reader:
                 permitted=[str(P(r)) for r in roots if P(r).is_absolute() and P(r).is_relative_to(m['source_root'])]
                 if not permitted:raise ValueError('No authorized root in this corpus')
             else:permitted=[m['source_root']]
+            if glob and m.get('path_index'):
+                try:
+                    path=self.load(m['path_index'])
+                    c=sqlite3.connect('file:'+quote(str(path))+'?mode=ro&immutable=1',uri=True)
+                    c.row_factory=sqlite3.Row
+                    c.execute('PRAGMA cache_size=-2048')
+                    c.set_progress_handler(lambda: time.monotonic()-started>deadline_seconds,1000)
+                    try:
+                        for row in c.execute('SELECT path,size,mtime_ns,sha FROM paths'):
+                            if time.monotonic()-started>deadline_seconds:
+                                raise TimeoutError('path-only lookup deadline')
+                            rp=row['path']
+                            if not any(rp==v or rp.startswith(v.rstrip('/')+'/') for v in permitted):continue
+                            if authorized_roots is not None and not any(rp==v or rp.startswith(v.rstrip('/')+'/') for v in authorized_roots):continue
+                            if path_globs and not any(fnmatch.fnmatchcase(rp,g) for g in path_globs):continue
+                            pattern=query.casefold()
+                            if not (fnmatch.fnmatchcase(rp.casefold(),pattern)
+                                    or fnmatch.fnmatchcase(P(rp).name.casefold(),pattern)):continue
+                            hits.append({'host_id':HOST,'source_host':m['source_host'],
+                                'path':rp,'line_number':0,'column':0,'context':[],'text':'',
+                                'size':row['size'],'modified_ms':row['mtime_ns']//1000000,
+                                'created_ms':None,'body_sha256':row['sha'],
+                                'snapshot_at':m['generated_at']})
+                            if len(hits)>limit:break
+                    finally:c.close()
+                except Exception as e:incomplete.append(type(e).__name__+': '+str(e)[:180])
+                return {'results':hits[:limit],'partial':bool(incomplete),
+                    'truncated':len(hits)>limit,'warnings':incomplete,'content_indexed':True,
+                    'scope':self.scope,'source_documents':m['documents'],
+                    'cache_bytes':self.used,'cache_limit_bytes':self.limit,
+                    'cloud_fetches':self.store.gets-reads0,
+                    'elapsed_ms':round((time.monotonic()-started)*1000,2),
+                    'complete_for_policy':m['complete_for_policy']}
             for index,part in enumerate(m['parts']):
                 if time.monotonic()-started>deadline_seconds:incomplete.append('query deadline reached; remaining shards not searched');break
                 if not glob and not might_match(part['bloom'],query):continue
@@ -358,7 +421,7 @@ def serve(reader,port):
                     selected=args.get('hosts') or ['local'];selected=[selected] if isinstance(selected,str) else selected
                     if not any(x in ['local','*',HOST] for x in selected):raise ValueError('Wrong cloud host')
                     if int(args.get('hop_count') or 0)>1:raise ValueError('Mesh hop limit exceeded')
-                    if name=='list_locations':out={**envelope(args),'target_host_id':HOST,'locations':[{'host':HOST,'name':reader.scope,'path':m['source_root']}],'source_host':m['source_host'],'content_indexed':True,'coverage_policy':m['policy']}
+                    if name=='list_locations':out={**envelope(args),'target_host_id':HOST,'locations':getattr(reader,'locations',[{'host':HOST,'name':reader.scope,'path':m['source_root']}]),'source_host':m['source_host'],'content_indexed':True,'coverage_policy':m['policy']}
                     elif name=='search_status':
                         local={'host_id':HOST,'root':m['source_root'],'roots':[reader.scope],'backend':'cloud shards / contentless FTS / bounded RAM','file_count':m['documents'],'indexed_files':m['documents'],'index_db_bytes':reader.used,'index_state':'Ready','index_generation':int(m['generated_at']),'index_last_error':None,'index_directory_activity':[]}
                         out={**envelope(args),'local':local,'nodes':[local],'topology':{'freshness':None,'generation':1,'last_refresh_error':None},'persistent_index_bytes':0,'cache_limit_bytes':reader.limit,'cloud_shards':len(m['parts']),'scope':reader.scope,'coverage_policy':m['policy']}
