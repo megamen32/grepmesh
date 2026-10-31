@@ -28,8 +28,9 @@ P = pathlib.Path
 SOURCE_HOST = "server-100"
 GATEWAY = "roomhacker@192.168.2.100"
 SCANNER = "/home/roomhacker/agents-projects/grepmesh/scripts/cloud_index/cloud_index.py"
+TREE_SCANNER = "/home/roomhacker/agents-projects/grepmesh/scripts/cloud_index/scan_tree.py"
 ROOT_PREFIX = "/home/roomhacker/agents-projects/"
-MAX_STREAM = 64 * 1024 * 1024
+MAX_STREAM = 256 * 1024 * 1024
 MAX_LINE = MAX_DOCUMENT * 7
 MAX_FILES = 100000
 SCAN_TIMEOUT = 120
@@ -50,6 +51,7 @@ def load_scopes(path: P):
         root = entry.get("source_root")
         if (
             scope in seen
+            or entry.get("scanner", "git") not in ("git", "tree")
             or entry.get("source_host") != SOURCE_HOST
             or not isinstance(root, str)
             or not root.startswith(ROOT_PREFIX)
@@ -65,11 +67,12 @@ def load_scopes(path: P):
 
 def acquire_source_stream(entry, output, max_bytes=MAX_STREAM, timeout=SCAN_TIMEOUT):
     """Bound bytes and time; remote scanner reads tracked originals, not SQLite."""
+    scanner_path = TREE_SCANNER if entry.get("scanner") == "tree" else SCANNER
     command = [
         "ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
         "-o", "ServerAliveInterval=15", GATEWAY,
         shlex.join([
-            "python3", SCANNER, "scan", "--source-root", entry["source_root"],
+            "python3", scanner_path, "scan", "--source-root", entry["source_root"],
             "--source-host", entry["source_host"],
         ]),
     ]
@@ -260,9 +263,10 @@ def main():
     parser.add_argument("--config", type=P, required=True)
     parser.add_argument("--root", type=P, default=P("/run/user") / str(os.getuid()) / "grepmesh-cloud-index")
     parser.add_argument("--max-stream-mib", type=int, default=64)
+    parser.add_argument("--restart-on-change", choices=["grepmesh-cloud-projects-100.service"])
     args = parser.parse_args()
-    if not 1 <= args.max_stream_mib <= 64:
-        raise ValueError("Max stream bytes must be <=64 MiB")
+    if not 1 <= args.max_stream_mib <= 256:
+        raise ValueError("Max stream bytes must be <=256 MiB")
     if hasattr(os, "sched_setaffinity"):
         os.sched_setaffinity(0, sorted(os.sched_getaffinity(0))[:2])
     os.nice(10)
@@ -274,6 +278,10 @@ def main():
         max_stream_bytes=args.max_stream_mib * 1024 * 1024,
     )
     print(json.dumps({"ok": True, "results": results}, ensure_ascii=False), flush=True)
+    if args.restart_on_change and any(item["action"] == "published" for item in results):
+        # Do not restart a healthy search service on an unchanged source.
+        subprocess.run(["systemctl", "--user", "restart", args.restart_on_change],
+                       stdin=subprocess.DEVNULL, check=True, timeout=25)
 
 
 if __name__ == "__main__":

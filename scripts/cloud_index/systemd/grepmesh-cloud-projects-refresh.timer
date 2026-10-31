@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh GrepMesh cloud project index every 30 minutes
+
+[Timer]
+OnCalendar=*-*-* *:00,30:00
+RandomizedDelaySec=60
+AccuracySec=2min
+Persistent=false
+Unit=grepmesh-cloud-projects-refresh.service
+
+[Install]
+WantedBy=timers.target

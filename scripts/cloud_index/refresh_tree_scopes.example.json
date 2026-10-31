@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "scopes": [
+    {
+      "scope": "agent-herder-current",
+      "source_host": "server-100",
+      "source_root": "/home/roomhacker/agents-projects/agent-herder",
+      "scanner": "tree"
+    },
+    {
+      "scope": "exmanager-current",
+      "source_host": "server-100",
+      "source_root": "/home/roomhacker/agents-projects/exmanager",
+      "scanner": "tree"
+    }
+  ]
+}

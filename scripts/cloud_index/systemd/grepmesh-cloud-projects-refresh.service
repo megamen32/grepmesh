@@ -1,0 +1,22 @@
+[Unit]
+Description=Refresh explicit GrepMesh project full-text shards on Yandex.Disk (RAM-only)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=GREPMESH_CLOUD_GATEWAY=roomhacker@192.168.2.100
+Environment=GREPMESH_CLOUD_RCLONE=/home/roomhacker/.local/bin/rclone
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /home/roomhacker/agents-projects/grepmesh/scripts/cloud_index/refresh_git.py --config /home/roomhacker/.config/grepmesh-cloud-projects-refresh.json --root /run/user/1000/grepmesh-cloud-index --max-stream-mib 256 --restart-on-change grepmesh-cloud-projects-100.service
+TimeoutStartSec=15min
+CPUQuota=100%
+MemoryHigh=1024M
+MemoryMax=1536M
+TasksMax=128
+IOWeight=20
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

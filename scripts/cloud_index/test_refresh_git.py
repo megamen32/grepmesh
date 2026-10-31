@@ -91,6 +91,14 @@ def run():
         except ValueError: pass
         else: raise AssertionError('Broad home folder accepted')
         passed('home-wide source is rejected', True)
+        policy.write_text(json.dumps({'version': 1, 'scopes': [{**entry, 'scanner': 'tree'}]}))
+        result = load_scopes(policy)
+        passed('direct source tree scanner admitted', result[0]['scanner'] == 'tree')
+        policy.write_text(json.dumps({'version': 1, 'scopes': [{**entry, 'scanner': 'arbitrary-code'}]}))
+        try: load_scopes(policy)
+        except ValueError: passed('unrecognized scanner rejected', True)
+        else: raise AssertionError('Arbitrary scanner admitted')
+
         # Shared publisher.lock prevents overlap with manual cloud publishing.
         def synthetic_scan(item, output, max_bytes=64*1024*1024):
             raw = encoded(many, source, 'server-100').getvalue()

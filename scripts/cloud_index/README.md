@@ -1,12 +1,12 @@
 # Cloud-backed GrepMesh text index
 
-Status: real Yandex.Disk pilots now cover 157 tracked code/text files and 51 previously extracted documents (14 PDF, 1 DOCX) on a shared cloud-text peer. NOT a completed fleet migration.
+Status: 2 additional direct-source-tree scopes on server-100 now index Agent Herder (1,969 current files) and ExManager (10,782 current files) in Yandex.Disk, alongside 896 older pilot documents on server-44. Total across the two cloud services: 13,647 documents. This is NOT full fleet migration.
 Results: [initial pilot](../../benchmarks/cloud-index/2026-10-31-real-yadisk.md), [legacy OCR / unified cloud index](../../benchmarks/cloud-index/2026-10-31-legacy-ocr-and-path-index.md), and [compact FTS5 / Airlock canary](../../benchmarks/cloud-index/2026-10-31-compact-fts-airlock.md).
 No native fleet index was deleted, switched off, or replaced. The cloud-backed pilot is limited to its declared text policy; full-text queries via the main GrepMesh still require authorized filesystem ACL propagation.
 
 ## Storage contract
 
-- Source agent reads original tracked UTF-8 text files directly. It does not read or build a local SQLite index.
+- Source scanner reads original UTF-8 text/code files directly: Git-tracked files for the Git scanner, or currently present tracked/untracked eligible files for the tree scanner. It does not read or build a local search SQLite index.
 - Publisher builds bounded immutable SQLite shards in tmpfs. A contentless FTS5 trigram table uses `detail=none,columnsize=0`; compressed body text is stored once per distinct body within a shard. Queries use bounded conjunctions of safe individual trigrams with exact-body verification. Short/tokenizer-unfriendly queries fall back to a bounded per-shard scan, never an authoritative empty response.
 - A compact path-only SQLite index is also written per scope and preloaded into bounded RAM, so filename globs do not require fetching all full-text shards.
 - Durable shard objects and immutable generation manifests live in the configured private cloud prefix. The latest pointer is published only after the full source footer and object verification succeed.
@@ -46,8 +46,8 @@ Before removing any native fleet database:
 
 The code contains no native-database deletion command. The existing 81 GiB server-100 index remains unchanged by this work.
 
-## Automatic Git snapshot refresh (not deployed)
+## Scheduled current-source snapshot refresh (deployed on server-100)
 
-The `refresh_git.py` script refreshes only explicitly allowlisted Git projects from server-100, without reading its legacy SQLite index. It verifies the complete source stream and original cloud manifest. If unchanged it performs zero writes. If changed, it publishes a new immutable generation with the pointer written last, while retaining the previous version for rollback. Empty scans, malformed data, or sudden loss of over half the documents fail closed. Runtime source streams and SQLite shards must remain in tmpfs.
+The `refresh_git.py` script refreshes only explicitly allowlisted Git or source-tree projects from server-100, without reading its legacy SQLite index. It verifies the complete source stream and original cloud manifest. If unchanged it performs zero writes. If changed, it publishes a new immutable generation with the pointer written last, while retaining the previous version for rollback. Empty scans, malformed data, or sudden loss of over half the documents fail closed. Runtime source streams and SQLite shards must remain in tmpfs.
 
-This is a bounded full-scope refresh, **not incremental per-file indexing**. It supports at most 100,000 documents and 64 MiB of source-stream data per scope. OCR/PDF extraction refresh is not implemented. The updater has not been installed as a timer; see `refresh_git_scopes.example.json` for the two existing Git scopes. The scheduled refresher and manual publisher share a nonblocking `publisher.lock` in tmpfs: overlapping runs fail closed, and failed scans release the lock without changing the active cloud pointer. User authorization alone does not grant the GPT Admin connection its required owner/admin role or verified filesystem ACL.
+This is a bounded full-scope refresh, **not incremental per-file indexing**. It supports at most 100,000 documents and 256 MiB of source-stream data per scope (64 MiB default for nonproduction use). PDF/OCR extraction refresh is not implemented. The active timer `grepmesh-cloud-projects-refresh.timer` runs every 30 minutes under a user-systemd cgroup, with a 512 MiB RAM-cached search service. See `refresh_tree_scopes.example.json` and `systemd/` for the deployed Agent Herder and ExManager policy; `refresh_git_scopes.example.json` remains available for the two Git pilots. An unchanged scope performs zero cloud writes. Any changed scope is published atomically and triggers the cloud search service to restart and reload its verified manifests. The scheduled refresher and manual publisher share a nonblocking `publisher.lock` in tmpfs: overlapping runs fail closed, and failed scans release the lock without changing the active cloud pointer. User authorization alone does not grant a GPT Admin connection the verified filesystem ACL required by native multi-peer full-text routing.
