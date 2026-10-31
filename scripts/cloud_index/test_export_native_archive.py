@@ -5,6 +5,7 @@ import gzip, hashlib, json, os, pathlib, sqlite3, sys, tempfile
 from export_native_archive import export
 from verify_native_archive import verify
 from recover_native_archive import read_document
+import reindex_native_archive as reindex
 
 class FakeCloud:
     prefix='yadisk:Backups/GrepMesh/cloud-index-v1'
@@ -67,6 +68,19 @@ def run():
         assert recovered['body']=='Historical text from missing file'
         assert read_document(store,'server-100','20261101T000000Z-01234567','/home/test/not-in-old-index') is None
         assert 'СТАРЫЙ ТЕКСТ' in read_document(store,'server-100','20261101T000000Z-01234567','/home/test/old-scan.pdf')['body']
+        original_roots=reindex.ROOTS
+        reindex.ROOTS=('/home/test',)
+        try:
+            selected,skips=reindex.prepare_sources(store,result,root/'synthetic-scope', 'server-100')
+            assert sum(n for _,n in selected)==3
+            assert sum(skips.values())==0
+            for path,n in selected:
+                records=[json.loads(line) for line in path.read_text().splitlines()]
+                assert records[-1]['kind']=='end' and records[-1]['count']==n
+                assert records[0]['source_root']=='/'
+                path.unlink()
+        finally:
+            reindex.ROOTS=original_roots
         assert result['tables']['grepmesh_documents_content']['rows']==3
         assert result['tables']['grepmesh_document_rows']['rows']==3
         assert result['tables']['grepmesh_extraction_cache']['rows']==1
@@ -103,6 +117,6 @@ def run():
         else:
             raise AssertionError('incomplete source archived')
         assert not any(x.endswith('complete.json') for x in other.objects)
-        print(json.dumps({'passed':True,'tests':11,'archive_tables':list(result['tables']),'objects':len(store.objects)}))
+        print(json.dumps({'passed':True,'tests':16,'archive_tables':list(result['tables']),'objects':len(store.objects)}))
 
 if __name__=='__main__':run()
