@@ -46,6 +46,12 @@ Before removing any native fleet database:
 
 The code contains no native-database deletion command. The existing 81 GiB server-100 index remains unchanged by this work.
 
+## Full historical-data archival (separate from live search)
+
+`export_native_archive.py` creates an immutable, complete private cloud archive of the **original FTS document bodies**, deleted-path history still present in the legacy database, extracted OCR cache, row-ID mappings, pending OCR/attempt metadata, and SQLite metadata. It reads the source in a single consistent SQLite WAL snapshot, uploads independently checksum-verified compressed JSONL chunks directly from memory, and publishes `archives/<host>/<snapshot>/complete.json` **only after every table and the manifest are verified**. This is a lossless *logical source archive*, not a working native FTS index or a new full-text search service. FTS token structures can be reconstructed from the source bodies and preserved row IDs. It neither deletes local SQLite nor claims full online search parity.
+
+Run under an explicit bounded cgroup with `GREPMESH_CLOUD_GATEWAY`, `GREPMESH_CLOUD_RCLONE` and a tmpfs `--root`. Each read pins a consistent WAL snapshot; the command **aborts if the source WAL exceeds 3 GiB** so live write amplification cannot silently fill SSD. An interrupted archive has no completion pointer and is not accepted for deletion. A completed backup still needs restoration verification and an authorized full-search cutover before the native database can be removed. See `test_export_native_archive.py` for a synthetic round-trip including deleted source paths and OCR.
+
 ## Scheduled current-source snapshot refresh (deployed on server-100)
 
 The `refresh_git.py` script refreshes only explicitly allowlisted Git or source-tree projects from server-100, without reading its legacy SQLite index. It verifies the complete source stream and original cloud manifest. If unchanged it performs zero writes. If changed, it publishes a new immutable generation with the pointer written last, while retaining the previous version for rollback. Empty scans, malformed data, or sudden loss of over half the documents fail closed. Runtime source streams and SQLite shards must remain in tmpfs.
