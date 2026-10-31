@@ -1,0 +1,103 @@
+{
+  "date": "2026-10-31",
+  "status": "complete",
+  "files": 622692,
+  "metadata_complete": true,
+  "content_indexed": false,
+  "schema_version": 2,
+  "working_database_storage": "tmpfs on server-44",
+  "durable_storage": "Yandex Disk snapshot",
+  "old_database_bytes": 680771584,
+  "new_database_bytes": 319864832,
+  "ram_bytes_saved": 360906752,
+  "ram_reduction_percent": 53.01,
+  "old_cloud_bytes": 109616609,
+  "new_cloud_bytes": 57994502,
+  "snapshot_reduction_percent": 47.09,
+  "compaction_seconds": 41.479,
+  "all_records_identical": true,
+  "logical_rows_sha256": "992a364feb0a7711c0e75bd082f2b5139cb38e8ade36e465e1efb401c273d61d",
+  "cloud_restore_verified": true,
+  "restored_records": 622692,
+  "main_mesh_checked": true,
+  "old_ram_database_removed": true,
+  "previous_cloud_snapshot_retained": true,
+  "synthetic_validation": {
+    "cases": 32,
+    "both_schemas_passed": true,
+    "case_distinct_paths_preserved": true,
+    "all_fixture_records_identical": true,
+    "trigram_plan": [
+      "SCAN n VIRTUAL TABLE INDEX 0:G0",
+      "SEARCH f USING INTEGER PRIMARY KEY (rowid=?)"
+    ]
+  },
+  "existing_adapter_regression_cases": 13,
+  "rebuild_validation": {
+    "future_rebuild_stays_compact": true,
+    "case_distinct_paths_preserved": true,
+    "network_calls": 0,
+    "fixture_files": 3
+  },
+  "post_deployment_latency": {
+    "stage": "lean",
+    "files": 622692,
+    "measurements": [
+      {
+        "case": "device",
+        "median_http_ms": 3.501,
+        "runs": 3,
+        "results": 10,
+        "truncated": true
+      },
+      {
+        "case": "receipt",
+        "median_http_ms": 3.936,
+        "runs": 3,
+        "results": 3,
+        "truncated": false
+      },
+      {
+        "case": "takeout",
+        "median_http_ms": 2.836,
+        "runs": 3,
+        "results": 0,
+        "truncated": false
+      },
+      {
+        "case": "negative",
+        "median_http_ms": 4.161,
+        "runs": 3,
+        "results": 0,
+        "truncated": false
+      },
+      {
+        "case": "pdf",
+        "median_http_ms": 2.88,
+        "runs": 3,
+        "results": 10,
+        "truncated": true
+      },
+      {
+        "case": "unicode",
+        "median_http_ms": 2.452,
+        "runs": 3,
+        "results": 2,
+        "truncated": false
+      }
+    ],
+    "scope": "same live catalog; loopback HTTP; 3 runs per query; not cold-storage latency"
+  },
+  "resource_budget": {
+    "memory_high": "1536 MiB",
+    "memory_max": "2 GiB",
+    "swap_max": 0,
+    "cpu_affinity": "at most two allowed CPUs",
+    "no_disk_database": true
+  },
+  "scope_limits": [
+    "Only the Yandex metadata catalog was compacted.",
+    "No document contents were reindexed.",
+    "The older general-purpose server indexes were not moved or deleted."
+  ]
+}
