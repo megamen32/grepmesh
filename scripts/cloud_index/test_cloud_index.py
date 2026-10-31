@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Deterministic cloud-index correctness tests. Synthetic text only; tmpfs required."""
-import hashlib, importlib.util, io, json, os, pathlib, sqlite3, subprocess, tempfile, time
+import hashlib, importlib.util, io, json, os, pathlib, sqlite3, subprocess, tempfile, time, threading
 from unittest.mock import patch
-from cloud_index import Publisher, Reader, MemoryStore, CloudStore, document, json_bytes, ensure_tmpfs, scan_git
+from cloud_index import Publisher, Reader, MemoryStore, CloudStore, document, json_bytes, ensure_tmpfs, scan_git, prefetched_shards
 
 BASE=pathlib.Path('/run/user/1000/grepmesh-cloud-index-tests')
 
@@ -93,6 +93,35 @@ def run():
         ok('cloud reads disconnect source stdin',mocked.call_args_list[0].kwargs.get('stdin') == subprocess.DEVNULL)
         ok('uploads preserve their explicit byte stream',mocked.call_args_list[1].kwargs.get('input') == payload)
         ok('upload verification disconnects source stdin',mocked.call_args_list[2].kwargs.get('stdin') == subprocess.DEVNULL)
+        with patch('cloud_index.SOURCE_MACHINE','local'):
+            with patch('cloud_index.ensure_tmpfs') as guarded:
+                local_command=CloudStore().command(['cat','yadisk:example/file'])
+                ok('local owner gateway skips redundant SSH',local_command[:2]==['/bin/sh','-c'] and 'exec rclone cat' in local_command[2])
+                ok('local gateway insists on tmpfs',guarded.called)
+        with patch('cloud_index.SOURCE_MACHINE','authorized-remote-host'):
+            remote_command=CloudStore().command(['cat','yadisk:example/file'])
+            ok('remote gateway still requires authenticated SSH',remote_command[0]=='ssh' and remote_command[-2]=='authorized-remote-host')
+        class SimulatedCloud:
+            def __init__(self):
+                self.lock=threading.Lock();self.active=0;self.peak=0
+            def get(self,key,limit):
+                with self.lock:
+                    self.active+=1
+                    self.peak=max(self.peak,self.active)
+                try:
+                    time.sleep(.03)
+                    if key=='part-3':raise ValueError('synthetic cloud failure')
+                    return key.encode()
+                finally:
+                    with self.lock:self.active-=1
+        mock_store=SimulatedCloud()
+        parts=[{'sha256':f'{i:064x}','key':f'part-{i}','packed_bytes':50} for i in range(7)]
+        data=list(prefetched_shards(mock_store,parts,{parts[0]['sha256']:root},time.monotonic(),1,workers=4))
+        ok('parallel prefetch bounded to four workers',2<=mock_store.peak<=4)
+        ok('parallel prefetch keeps manifest order',[p['key'] for p,_ in data]==[p['key'] for p in parts])
+        ok('cached blob does not need another download',data[0][1] is None)
+        ok('failed cloud fetch stays an explicit error',isinstance(data[3][1],ValueError))
+        ok('other cloud fetches are unmodified',data[4][1]==b'part-4')
     report={'all_passed':True,'tests':len(cases),'cases':cases,'duration_seconds':round(time.monotonic()-start,3),'production_unchanged':True,'test_store':'synthetic in-memory cloud transport','real_cloud_test_separate':True}
     (BASE/'result.json').write_text(json.dumps(report,indent=2));print(json.dumps(report))
 

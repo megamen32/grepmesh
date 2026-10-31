@@ -12,6 +12,19 @@
       "source_host": "server-100",
       "source_root": "/home/roomhacker/agents-projects/exmanager",
       "scanner": "tree"
+    },
+    {
+      "scope": "video-watching-current",
+      "source_host": "server-100",
+      "source_root": "/home/roomhacker/PycharmProjects/video_watching",
+      "scanner": "tree"
+    },
+    {
+      "scope": "omniroute-code-current",
+      "source_host": "server-100",
+      "source_root": "/home/roomhacker/agents-projects/omniroute-zcode",
+      "scanner": "tree",
+      "only_top": ["src", "tests", "open-sse", "scripts", "bin", "skills", "public", "@omniroute"]
     }
   ]
 }

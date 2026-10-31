@@ -34,6 +34,7 @@ SKIP_TOP_DIRS = {'.tmp', '.worktrees', 'var', 'graphify-out'}
 BACKUP_DIR_PREFIXES = ('dist.backup-', 'dist.bak-', 'dist.pre-', 'dist.pre-final-')
 SKIP_DIRS = {
     '.git', '.hg', '.svn', 'node_modules', '.pnpm-store', '.cache',
+    '.tmpbin', '.worktrees', 'forensics_out',
     '.next', '.nuxt', '.vite', '.turbo', '.venv', 'venv',
     '__pycache__', '.pytest_cache', '.mypy_cache', '.tox',
     '.gradle', 'target', 'dist', 'build', 'coverage', '.idea',
@@ -50,25 +51,31 @@ SECRET_NAME_RE = re.compile(
 
 
 def admissible_root(root: P) -> P:
-    parent = ALLOWED_PARENT.resolve(strict=True)
     root = root.resolve(strict=True)
-    if (
-        root == parent or
-        not root.is_relative_to(parent) or
-        len(root.relative_to(parent).parts) != 1 or
-        not root.is_dir()
-    ):
+    parents = (ALLOWED_PARENT, P('/home/roomhacker/PycharmProjects'))
+    allowed = False
+    for configured_parent in parents:
+        parent = configured_parent.resolve(strict=True)
+        if root != parent and root.is_relative_to(parent) and len(root.relative_to(parent).parts) == 1:
+            allowed = True
+            break
+    if not allowed or not root.is_dir():
         raise ValueError('Explicit, one-project source directory required')
     return root
 
 
 def scan_tree(root: P, host: str, output, *, max_files=MAX_FILES,
-              max_text_bytes=MAX_SOURCE_TEXT):
+              max_text_bytes=MAX_SOURCE_TEXT, only_top=None):
     root = admissible_root(root)
     if not host or any(c.isspace() for c in host):
         raise ValueError('Stable source host identifier is required')
     if not 1 <= max_files <= MAX_FILES or not 1 <= max_text_bytes <= MAX_SOURCE_TEXT:
         raise ValueError('Scan limits are not within admitted maximums')
+    if only_top is not None:
+        if (not isinstance(only_top, (list, tuple)) or not 1 <= len(only_top) <= 24
+            or any(not isinstance(s,str) or (s != '<root>' and not re.fullmatch(r'[A-Za-z0-9@._-]{1,80}', s)) or s in {'.','..'} for s in only_top)):
+            raise ValueError('Invalid top-level source directory allowlist')
+        only_top = set(only_top)
     excluded = collections.Counter()
     count = 0
     body_bytes = 0
@@ -77,10 +84,15 @@ def scan_tree(root: P, host: str, output, *, max_files=MAX_FILES,
         'kind': 'begin', 'format': 1, 'source_host': host,
         'source_root': str(root),
         'policy': 'current UTF-8 text/code in one project; no symlinks, secrets, '
-                  'generated dependencies, binaries, PDFs or OCR; file <=1 MiB',
+                  'generated dependencies, binaries, PDFs or OCR; file <=1 MiB'
+                  + ('; allowed_top=' + ','.join(sorted(only_top)) if only_top is not None else ''),
     }
     output.write(json.dumps(header, ensure_ascii=False) + '\n')
     for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
+        if P(current) == root and only_top is not None:
+            dirs[:] = [d for d in dirs if d in only_top]
+            if '<root>' not in only_top:
+                files = []
         dirs.sort()
         retained = []
         for d in dirs:
@@ -161,13 +173,15 @@ def main():
     parser.add_argument('--source-host', required=True)
     parser.add_argument('--max-files', type=int, default=MAX_FILES)
     parser.add_argument('--max-text-mib', type=int, default=256)
+    parser.add_argument('--only-top', action='append')
     args = parser.parse_args()
     if hasattr(os, 'sched_setaffinity'):
         os.sched_setaffinity(0, sorted(os.sched_getaffinity(0))[:2])
     os.nice(10)
     scan_tree(args.source_root, args.source_host, sys.stdout,
               max_files=args.max_files,
-              max_text_bytes=args.max_text_mib * 1024 * 1024)
+              max_text_bytes=args.max_text_mib * 1024 * 1024,
+              only_top=args.only_top)
 
 
 if __name__ == '__main__':

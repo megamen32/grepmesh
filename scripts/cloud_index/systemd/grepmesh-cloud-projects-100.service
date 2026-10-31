@@ -1,0 +1,23 @@
+[Unit]
+Description=GrepMesh cloud project search (Yandex Disk, RAM-only index)
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=GREPMESH_CLOUD_GATEWAY=local
+Environment=GREPMESH_CLOUD_RCLONE=/home/roomhacker/.local/bin/rclone
+Environment=GREPMESH_CLOUD_HOST_ID=server-100-cloud-text
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /home/roomhacker/.local/lib/grepmesh-cloud-index/multi_cloud.py serve --root /run/user/1000/grepmesh-cloud-index --config /home/roomhacker/.config/grepmesh-cloud-projects-100.json --cache-mib 512 --port 19437
+Restart=on-failure
+RestartSec=30
+UMask=0077
+MemoryHigh=768M
+MemoryMax=1024M
+CPUQuota=100%
+TasksMax=128
+IOWeight=20
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

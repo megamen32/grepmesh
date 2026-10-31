@@ -37,7 +37,7 @@ def run():
             (project / 'escape.md').symlink_to('/etc/hosts')
             (project / 'node_modules').mkdir()
             (project / 'node_modules' / 'irrelevant.js').write_text('INVISIBLE_DEPENDENCY')
-            for ignored in ('.tmp', '.worktrees', 'var', 'graphify-out', 'dist.backup-20261031'):
+            for ignored in ('.tmp', '.worktrees', 'var', 'graphify-out', 'dist.backup-20261031', '.tmpbin'):
                 (project / ignored).mkdir()
                 (project / ignored / 'garbage.ts').write_text('GENERATED_SHOULD_NOT_SEARCH')
 
@@ -56,7 +56,7 @@ def run():
             ok('oversized files rejected',footer['skipped'].get('oversize')==1)
             ok('binary files rejected',footer['skipped'].get('binary')==1)
             ok('symlink files rejected',footer['skipped'].get('symlink_file')==1)
-            ok('dependency directory ignored',footer['skipped'].get('generated_or_dependency_dir')==6)
+            ok('dependency directory ignored',footer['skipped'].get('generated_or_dependency_dir')==7)
             ok('symlink directory ignored',footer['skipped'].get('symlink_dir')==1)
             ok('no secret text exported',not any('SECRET' in x['body'] for x in source))
             store = MemoryStore()
@@ -70,6 +70,17 @@ def run():
             ok('path lookup uses compact index',len(reader.query('*.vue',glob=True)['results'])==1)
             ok('no source-side SQLite',not list(project.rglob('*.sqlite')))
             ok('manifest row accounting',manifest['documents']==5)
+            selected = io.StringIO()
+            scan_tree.scan_tree(project,'server-100',selected,only_top=['nested'])
+            chosen = [json.loads(line) for line in selected.getvalue().splitlines()]
+            selected_docs = [item for item in chosen if item.get('kind')=='document']
+            ok('top-level allowlist selects only chosen subtree',
+               len(selected_docs)==1 and selected_docs[0]['path'].endswith('/nested/query.sql'))
+            ok('top-level allowlist is recorded in the source policy',
+               'allowed_top=nested' in chosen[0]['policy'])
+            try:scan_tree.scan_tree(project,'server-100',io.StringIO(),only_top=['../escape'])
+            except ValueError:ok('top-level selection refuses parent traversal',True)
+            else:raise AssertionError('unsafe selector accepted')
             try:scan_tree.scan_tree(root,'server-100',io.StringIO())
             except ValueError:ok('broad root refused',True)
             else:raise AssertionError('Broad root scanned')

@@ -7,6 +7,7 @@ while each reader uses only bounded tmpfs cache. No native index is changed.
 """
 from __future__ import annotations
 import argparse, json, os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from cloud_index import CloudStore, Reader, ensure_tmpfs, safe_scope, serve, MIB, HOST
 
@@ -42,12 +43,15 @@ class MultiReader:
                 for r in self.readers]
 
     def refresh(self):
-        manifests=[]
-        for r in self.readers:
-            m=r.refresh()
-            # Keep tiny path-only indexes hot; glob lookups then avoid cold text shards.
-            if m.get('path_index'):r.load(m['path_index'])
-            manifests.append(m)
+        def start_reader(reader):
+            m=reader.refresh()
+            # Hot path-only indexes are independent per scope and stay in tmpfs.
+            if m.get('path_index'):reader.load(m['path_index'])
+            return m
+        # Initialize independent scopes concurrently before accepting requests.
+        # A failed manifest or hash aborts startup rather than dropping coverage.
+        with ThreadPoolExecutor(max_workers=min(4,len(self.readers))) as pool:
+            manifests=list(pool.map(start_reader,self.readers))
         self.manifest={
             'scope':self.scope,'source_root':'/',
             'source_host':'multiple','documents':sum(x['documents'] for x in manifests),

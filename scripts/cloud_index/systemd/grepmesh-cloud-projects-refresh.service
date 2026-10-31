@@ -5,7 +5,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-Environment=GREPMESH_CLOUD_GATEWAY=roomhacker@192.168.2.100
+Environment=GREPMESH_CLOUD_GATEWAY=local
 Environment=GREPMESH_CLOUD_RCLONE=/home/roomhacker/.local/bin/rclone
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/usr/bin/python3 /home/roomhacker/agents-projects/grepmesh/scripts/cloud_index/refresh_git.py --config /home/roomhacker/.config/grepmesh-cloud-projects-refresh.json --root /run/user/1000/grepmesh-cloud-index --max-stream-mib 256 --restart-on-change grepmesh-cloud-projects-100.service

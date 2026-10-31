@@ -6,6 +6,7 @@ The native fleet database is NEVER deleted or modified by this module.
 from __future__ import annotations
 import argparse, base64, collections, contextlib, fnmatch, gzip, hashlib, io, json
 import os, pathlib, re, shlex, shutil, sqlite3, subprocess, sys, threading, time, zlib
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote
 
@@ -63,6 +64,11 @@ class CloudStore:
         if not SOURCE_MACHINE:raise ValueError('Set GREPMESH_CLOUD_GATEWAY to an authorized existing SSH/rclone gateway')
         tmp=os.environ.get('GREPMESH_CLOUD_GATEWAY_TMP', '/run/user/1000/grepmesh-cloud-gateway')
         cmd='umask 077; mkdir -p '+shlex.quote(tmp)+'; export TMPDIR='+shlex.quote(tmp)+'; exec '+shlex.join([RCLONE]+args+['--cache-dir',tmp])
+        if SOURCE_MACHINE == 'local':
+            # On the rclone owner host, avoid an SSH round trip to itself.
+            # Reuse that user's existing rclone authentication and tmpfs only.
+            ensure_tmpfs(P(tmp))
+            return ['/bin/sh','-c',cmd]
         return ['ssh','-T','-o','BatchMode=yes','-o','ConnectTimeout=8','-o','ServerAliveInterval=15',SOURCE_MACHINE,cmd]
     def get(self,key,limit=MAX_RAW_SHARD):
         key=valid_key(key)
@@ -264,6 +270,52 @@ class Publisher:
         return manifest
 
 
+def prefetched_shards(store, parts, cached, started, deadline_seconds, workers=6):
+    """Fetch a bounded lookahead of cloud blobs concurrently, preserving order.
+
+    Only compressed bytes are fetched by workers. A single owning query thread
+    verifies checksums, opens SQLite and mutates its bounded tmpfs LRU cache.
+    This never admits a partially downloaded shard as a search result.
+    """
+    if not parts:
+        return
+    queue = collections.deque()
+    remaining = iter(parts)
+    pool = ThreadPoolExecutor(max_workers=min(workers, len(parts)),
+                              thread_name_prefix='grepmesh-cloud-get')
+    def submit_one():
+        try:
+            part = next(remaining)
+        except StopIteration:
+            return
+        if part['sha256'] in cached:
+            queue.append((part, None))
+        else:
+            future = pool.submit(store.get, part['key'], part['packed_bytes'])
+            queue.append((part, future))
+    try:
+        for _ in range(min(workers, len(parts))):
+            submit_one()
+        while queue:
+            part, future = queue.popleft()
+            if time.monotonic()-started < deadline_seconds:
+                submit_one()
+            if future is None:
+                yield part, None
+                continue
+            budget = deadline_seconds - (time.monotonic()-started)
+            if budget <= 0:
+                yield part, TimeoutError('cloud shard deadline')
+                continue
+            try:
+                payload = future.result(timeout=budget)
+            except Exception as error:
+                payload = error
+            yield part, payload
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
 class Reader:
     def __init__(self,store,root,scope,cache_bytes=512*MIB,allowed_host=None,allowed_root=None):
         self.store=store;self.root=P(root);self.scope=safe_scope(scope);self.limit=cache_bytes
@@ -292,14 +344,14 @@ class Reader:
         with self.lock:
             for path in self.cache.values():path.unlink(missing_ok=True)
             self.cache.clear();self.used=0
-    def load(self,part):
+    def load(self,part,packed=None):
         ident=part['sha256']
         if ident in self.cache:
             path=self.cache.pop(ident);self.cache[ident]=path;return path
         if part['raw_bytes']>self.limit:raise ValueError('Shard exceeds RAM cache admission limit')
         while self.used+part['raw_bytes']>self.limit and self.cache:
             _,old=self.cache.popitem(last=False);self.used-=old.stat().st_size;old.unlink()
-        packed=self.store.get(part['key'],part['packed_bytes'])
+        if packed is None:packed=self.store.get(part['key'],part['packed_bytes'])
         if len(packed)!=part['packed_bytes'] or digest(packed)!=part['packed_sha256']:raise ValueError('Cloud shard checksum mismatch')
         path=self.directory/(ident+'.sqlite');temp=path.with_suffix('.partial');h=hashlib.sha256();n=0
         try:
@@ -356,11 +408,13 @@ class Reader:
                     'cloud_fetches':self.store.gets-reads0,
                     'elapsed_ms':round((time.monotonic()-started)*1000,2),
                     'complete_for_policy':m['complete_for_policy']}
-            for index,part in enumerate(m['parts']):
+            candidates=[part for part in m['parts'] if glob or might_match(part['bloom'],query)]
+            prefetched=prefetched_shards(self.store,candidates,self.cache,started,deadline_seconds)
+            for part,downloaded in prefetched:
                 if time.monotonic()-started>deadline_seconds:incomplete.append('query deadline reached; remaining shards not searched');break
-                if not glob and not might_match(part['bloom'],query):continue
                 try:
-                    path=self.load(part)
+                    if isinstance(downloaded,Exception):raise downloaded
+                    path=self.load(part,packed=downloaded)
                     c=sqlite3.connect('file:'+quote(str(path))+'?mode=ro&immutable=1',uri=True)
                     c.row_factory=sqlite3.Row;c.execute('PRAGMA cache_size=-2048');c.execute('PRAGMA temp_store=MEMORY')
                     c.set_progress_handler(lambda: time.monotonic()-started>deadline_seconds,1000)
@@ -397,6 +451,7 @@ class Reader:
                     finally:c.close()
                 except Exception as e:incomplete.append(type(e).__name__+': '+str(e)[:180])
                 if len(hits)>limit:break
+            prefetched.close()
         return {'results':hits[:limit],'partial':bool(incomplete),'truncated':len(hits)>limit,'warnings':incomplete,'content_indexed':True,'scope':self.scope,'source_documents':m['documents'],'cache_bytes':self.used,'cache_limit_bytes':self.limit,'cloud_fetches':self.store.gets-reads0,'elapsed_ms':round((time.monotonic()-started)*1000,2),'complete_for_policy':m['complete_for_policy']}
 
 

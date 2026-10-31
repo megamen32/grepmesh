@@ -91,9 +91,28 @@ def run():
         except ValueError: pass
         else: raise AssertionError('Broad home folder accepted')
         passed('home-wide source is rejected', True)
+        policy.write_text(json.dumps({'version': 1, 'scopes': [{**entry, 'source_root': '/home/roomhacker/PycharmProjects/video_watching', 'scanner': 'tree'}]}))
+        passed('scoped PycharmProjects tree scanner admitted', len(load_scopes(policy)) == 1)
+        policy.write_text(json.dumps({'version': 1, 'scopes': [{**entry, 'source_root': '/home/roomhacker/PycharmProjects', 'scanner': 'tree'}]}))
+        try: load_scopes(policy)
+        except ValueError: passed('PycharmProjects broad parent rejected', True)
+        else: raise AssertionError('Parent root was admitted')
         policy.write_text(json.dumps({'version': 1, 'scopes': [{**entry, 'scanner': 'tree'}]}))
         result = load_scopes(policy)
         passed('direct source tree scanner admitted', result[0]['scanner'] == 'tree')
+        selected_entry={**entry,'scanner':'tree','only_top':['src','tests','@omniroute']}
+        policy.write_text(json.dumps({'version':1,'scopes':[selected_entry]}))
+        passed('explicit project subtrees accepted',load_scopes(policy)[0]['only_top']==selected_entry['only_top'])
+        selected_entry['only_top']=['../escape']
+        policy.write_text(json.dumps({'version':1,'scopes':[selected_entry]}))
+        try:load_scopes(policy)
+        except ValueError:passed('unsafe subtree selector denied',True)
+        else:raise AssertionError('Unsafe subtree selector accepted')
+        selected_entry={**entry,'scanner':'git','only_top':['src']}
+        policy.write_text(json.dumps({'version':1,'scopes':[selected_entry]}))
+        try:load_scopes(policy)
+        except ValueError:passed('Git scanner cannot silently apply tree-only filter',True)
+        else:raise AssertionError('Incompatible filter/scanner accepted')
         policy.write_text(json.dumps({'version': 1, 'scopes': [{**entry, 'scanner': 'arbitrary-code'}]}))
         try: load_scopes(policy)
         except ValueError: passed('unrecognized scanner rejected', True)

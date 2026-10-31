@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import selectors
 import shlex
 import subprocess
@@ -29,7 +30,10 @@ SOURCE_HOST = "server-100"
 GATEWAY = "roomhacker@192.168.2.100"
 SCANNER = "/home/roomhacker/agents-projects/grepmesh/scripts/cloud_index/cloud_index.py"
 TREE_SCANNER = "/home/roomhacker/agents-projects/grepmesh/scripts/cloud_index/scan_tree.py"
-ROOT_PREFIX = "/home/roomhacker/agents-projects/"
+ROOT_PREFIXES = (
+    "/home/roomhacker/agents-projects/",
+    "/home/roomhacker/PycharmProjects/",
+)
 MAX_STREAM = 256 * 1024 * 1024
 MAX_LINE = MAX_DOCUMENT * 7
 MAX_FILES = 100000
@@ -54,13 +58,20 @@ def load_scopes(path: P):
             or entry.get("scanner", "git") not in ("git", "tree")
             or entry.get("source_host") != SOURCE_HOST
             or not isinstance(root, str)
-            or not root.startswith(ROOT_PREFIX)
-            or root == ROOT_PREFIX.rstrip("/")
+            or not any(root.startswith(prefix) for prefix in ROOT_PREFIXES)
             or ".." in P(root).parts
             or P(root).as_posix() != root
-            or len(P(root).parts) < 5
+            or len(P(root).parts) != 5
         ):
             raise ValueError("Unauthorized, duplicate or overly broad Git source root")
+        top = entry.get("only_top")
+        if top is not None:
+            if (entry.get("scanner") != "tree" or not isinstance(top, list)
+                or not 1 <= len(top) <= 24 or len(set(map(str,top))) != len(top)
+                or any(not isinstance(s,str) or
+                       (s != "<root>" and not re.fullmatch(r"[A-Za-z0-9@._-]{1,80}",s))
+                       or s in (".","..") for s in top)):
+                raise ValueError("Invalid top-level source allowlist")
         seen.add(scope)
     return items
 
@@ -68,13 +79,15 @@ def load_scopes(path: P):
 def acquire_source_stream(entry, output, max_bytes=MAX_STREAM, timeout=SCAN_TIMEOUT):
     """Bound bytes and time; remote scanner reads tracked originals, not SQLite."""
     scanner_path = TREE_SCANNER if entry.get("scanner") == "tree" else SCANNER
+    scanner_args = [
+        "python3", scanner_path, "scan", "--source-root", entry["source_root"],
+        "--source-host", entry["source_host"],
+    ]
+    for top in entry.get("only_top") or []:
+        scanner_args.extend(["--only-top", top])
     command = [
         "ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
-        "-o", "ServerAliveInterval=15", GATEWAY,
-        shlex.join([
-            "python3", scanner_path, "scan", "--source-root", entry["source_root"],
-            "--source-host", entry["source_host"],
-        ]),
+        "-o", "ServerAliveInterval=15", GATEWAY, shlex.join(scanner_args),
     ]
     copied = 0
     started = time.monotonic()
@@ -252,7 +265,8 @@ def refresh_all(store, ram_root, entries, max_stream_bytes=MAX_STREAM,
         for entry in entries:
             with tempfile.TemporaryFile(mode="w+b", dir=ram_root) as stream:
                 copied = scan(entry, stream, max_bytes=max_stream_bytes)
-                result = refresh_one(store, ram_root, entry, stream)
+                result = refresh_one(store, ram_root, entry, stream,
+                                     shard_kib=8192 if entry.get('scanner') == 'tree' else 4096)
                 result["source_stream_bytes"] = copied
                 outputs.append(result)
     return outputs
