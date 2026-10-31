@@ -29,6 +29,10 @@ def run():
         ok('first query reads cloud',r['cloud_fetches']>0)
         r=reader.query('needleONE');ok('warm query cache hit',r['cloud_fetches']==0)
         r=reader.query('строка');ok('Cyrillic text retrieval',len(r['results'])==1 and not r['partial'])
+        r=reader.query('alpha needleONE');ok('multi-token exact substring using trigram AND',len(r['results'])==1 and not r['partial'])
+        r=reader.query('Кириллица строка');ok('Cyrillic phrase in contentless FTS',len(r['results'])==1 and not r['partial'])
+        r=reader.query('needleONE\nsecond line');ok('cross-line exact substring in contentless FTS',len(r['results'])==1 and not r['partial'])
+        r=reader.query('alpha needleTWO');ok('noncontiguous terms do not cause false hits',not r['results'])
         r=reader.query('STRASSE');ok('expanding Unicode case folding',len(r['results'])==1)
         ok('bounded LRU',reader.used<=maximum and len(reader.cache)<=1)
         reader.clear();fresh=Reader(store,root,'fixture',maximum,'fixture-host','/fixture');r=fresh.query('needleTWO')
@@ -63,7 +67,8 @@ def run():
         r=fresh.query('needleUPDATED');ok('corrupt object is explicit failure not false absence',r['partial'] and r['warnings'])
         store.objects[part['key']]=saved
         fresh.clear();r=fresh.query('needleUPDATED');path=next(iter(fresh.cache.values()))
-        c=sqlite3.connect(path);ok('FTS does not duplicate stored source text',c.execute('SELECT body FROM terms LIMIT 1').fetchone()[0] is None)
+        c=sqlite3.connect(path);ftssql=c.execute("SELECT sql FROM sqlite_master WHERE name='terms'").fetchone()[0].lower()
+        ok('FTS does not duplicate stored source text',"content=''" in ftssql and 'detail=none' in ftssql and 'columnsize=0' in ftssql)
         ok('compressed body copy only',c.execute('SELECT count(*) FROM bodies').fetchone()[0]==2);c.close()
         old_keys=[k for k in store.objects if k.startswith('manifests/fixture/')];ok('rollback manifests retained',len(old_keys)==2)
         # Source agent reads originals and leaves no local SQLite/files of its own.

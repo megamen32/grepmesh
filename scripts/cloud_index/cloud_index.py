@@ -20,7 +20,7 @@ MAX_DOCUMENT = MIB
 MAX_RAW_SHARD = 64 * MIB
 MAX_MANIFEST = 16 * MIB
 BLOOM_BYTES = 16384
-EXTENSIONS = {'.rs','.py','.go','.js','.ts','.tsx','.jsx','.md','.txt','.toml','.json','.yaml','.yml','.sh','.html','.css','.sql','.c','.h','.cpp','.cmake','.xml','.csv'}
+EXTENSIONS = {'.rs','.py','.go','.js','.ts','.tsx','.jsx','.vue','.proto','.mjs','.cjs','.jsonl','.md','.txt','.toml','.json','.yaml','.yml','.sh','.html','.css','.sql','.c','.h','.cpp','.cmake','.xml','.csv'}
 SECRET_NAMES = {'auth.json','credentials.json','client_secrets.json','id_rsa','id_ed25519','.env','.netrc'}
 
 
@@ -97,6 +97,18 @@ def grams(text):
     return {text[i:i+3] for i in range(max(0,len(text)-2))}
 
 
+def fts_gram_query(query):
+    """Bounded FTS5 conjunction of individual trigrams, valid with detail=none.
+
+    Every real substring contains these grams; exact body verification filters
+    false positives. Restrict to alphanumeric grams for tokenizer portability.
+    """
+    q=query.casefold()
+    tokens=sorted({q[i:i+3] for i in range(max(0,len(q)-2))
+                   if all(ch.isalnum() for ch in q[i:i+3])})
+    return ' AND '.join('"' + token.replace('"','""') + '"' for token in tokens[:16])
+
+
 def bloom_for(texts):
     bits=bytearray(BLOOM_BYTES)
     for text in texts:
@@ -165,7 +177,7 @@ class Publisher:
         scratch=self.root/('build-'+os.urandom(8).hex()+'.sqlite')
         c=sqlite3.connect(scratch)
         try:
-            c.executescript("PRAGMA journal_mode=OFF; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-4096; CREATE TABLE bodies(sha TEXT PRIMARY KEY,compressed BLOB NOT NULL); CREATE TABLE docs(id INTEGER PRIMARY KEY,path TEXT UNIQUE NOT NULL,size INTEGER,mtime_ns INTEGER,sha TEXT NOT NULL); CREATE VIRTUAL TABLE terms USING fts5(path,body,content='',tokenize='trigram');")
+            c.executescript("PRAGMA journal_mode=OFF; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-4096; CREATE TABLE bodies(sha TEXT PRIMARY KEY,compressed BLOB NOT NULL); CREATE TABLE docs(id INTEGER PRIMARY KEY,path TEXT UNIQUE NOT NULL,size INTEGER,mtime_ns INTEGER,sha TEXT NOT NULL); CREATE VIRTUAL TABLE terms USING fts5(path,body,content='',tokenize='trigram',detail=none,columnsize=0);")
             expanding=False
             for i,d in enumerate(docs,1):
                 raw=d['body'].encode();sha=digest(raw)
@@ -352,9 +364,11 @@ class Reader:
                     c.row_factory=sqlite3.Row;c.execute('PRAGMA cache_size=-2048');c.execute('PRAGMA temp_store=MEMORY')
                     c.set_progress_handler(lambda: time.monotonic()-started>deadline_seconds,1000)
                     try:
-                        if not glob and len(query)>=3 and not part.get('expanding_casefold'):
+                        gram_query=fts_gram_query(query) if not glob else ''
+                        if (gram_query and not part.get('expanding_casefold')
+                            and query.casefold()==query.lower()):
                             sql='SELECT d.* FROM terms t JOIN docs d ON d.id=t.rowid WHERE terms MATCH ?'
-                            rows=c.execute(sql,('"'+query.replace('"','""')+'"',))
+                            rows=c.execute(sql,(gram_query,))
                         else:rows=c.execute('SELECT * FROM docs')
                         for r in rows:
                             if time.monotonic()-started>deadline_seconds:raise TimeoutError('query deadline')

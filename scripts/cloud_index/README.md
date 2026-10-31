@@ -1,13 +1,13 @@
 # Cloud-backed GrepMesh text index
 
 Status: real Yandex.Disk pilots now cover 157 tracked code/text files and 51 previously extracted documents (14 PDF, 1 DOCX) on a shared cloud-text peer. NOT a completed fleet migration.
-Results: [initial pilot](../../benchmarks/cloud-index/2026-10-31-real-yadisk.md) and [legacy OCR / unified cloud index](../../benchmarks/cloud-index/2026-10-31-legacy-ocr-and-path-index.md).
+Results: [initial pilot](../../benchmarks/cloud-index/2026-10-31-real-yadisk.md), [legacy OCR / unified cloud index](../../benchmarks/cloud-index/2026-10-31-legacy-ocr-and-path-index.md), and [compact FTS5 / Airlock canary](../../benchmarks/cloud-index/2026-10-31-compact-fts-airlock.md).
 No native fleet index was deleted, switched off, or replaced. The cloud-backed pilot is limited to its declared text policy; full-text queries via the main GrepMesh still require authorized filesystem ACL propagation.
 
 ## Storage contract
 
 - Source agent reads original tracked UTF-8 text files directly. It does not read or build a local SQLite index.
-- Publisher builds bounded immutable SQLite shards in tmpfs. A contentless FTS5 table stores postings, not a second body copy. Compressed body text is stored once per distinct body within a shard.
+- Publisher builds bounded immutable SQLite shards in tmpfs. A contentless FTS5 trigram table uses `detail=none,columnsize=0`; compressed body text is stored once per distinct body within a shard. Queries use bounded conjunctions of safe individual trigrams with exact-body verification. Short/tokenizer-unfriendly queries fall back to a bounded per-shard scan, never an authoritative empty response.
 - A compact path-only SQLite index is also written per scope and preloaded into bounded RAM, so filename globs do not require fetching all full-text shards.
 - Durable shard objects and immutable generation manifests live in the configured private cloud prefix. The latest pointer is published only after the full source footer and object verification succeed.
 - Reader loads requested shards into a byte-bounded LRU in tmpfs. Default index cache cap is 512 MiB; each raw shard is at most 64 MiB. Compressed-transfer buffers, manifests, SQLite caches, and the interpreter are additional RAM, so a service cgroup is still required.
@@ -22,7 +22,7 @@ Supported extracted UTF-8 bodies are at most 1 MiB each. Symlinks, known secret 
 
 Literal/case-insensitive text and path retrieval and filename glob search are implemented. Regex, relevance ranking and a snapshot read_text MCP tool are not implemented. They must not be advertised as supported. The worker listens only on loopback and requires an existing authenticated connector/SSH path. Forwarded text queries require a filesystem read ACL and its roots filter results; this does not replace the transport's authentication.
 
-A per-shard trigram Bloom filter can avoid unnecessary fetches. Its false positives only cause extra reads. Bloom size is fixed; very large or broad corpora may need improved routing/filters. Cold searches across many uncached shards can be much slower than warm searches; measured real-cloud latency applies only to the narrow pilots, not millions of documents.
+The new reader must be deployed before publishing `detail=none` shards; older phrase-MATCH readers cannot query that format. A per-shard trigram Bloom filter can avoid unnecessary fetches. Its false positives only cause extra reads. Bloom size is fixed; very large or broad corpora may need improved routing/filters. Cold searches across many uncached shards can be much slower than warm searches; measured real-cloud latency applies only to the narrow pilots, not millions of documents.
 
 ## Configuration boundaries
 
