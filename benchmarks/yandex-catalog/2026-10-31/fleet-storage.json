@@ -1,0 +1,180 @@
+{
+  "date": "2026-10-31",
+  "cloud_catalog": {
+    "schema": 2,
+    "files": 622692,
+    "runtime_host": "server-44",
+    "runtime_storage": "tmpfs",
+    "database_bytes": 319864832,
+    "cloud_bytes": 57994502,
+    "coverage": "names/paths/sizes/dates; not file contents"
+  },
+  "mesh_route_checks": {
+    "server_100": "passed in preceding rollout",
+    "server_44": "passed",
+    "server_88": "passed",
+    "mac_m1": "passed",
+    "mac_mini": "passed",
+    "test": "find_paths for a known cloud receipt, host server-44-yadisk",
+    "all_current_checks_partial": false
+  },
+  "native_indexes": [
+    {
+      "host": "server-100",
+      "bytes": 87034703872,
+      "freelist_bytes": 1632112640,
+      "keyed_records": 3101553
+    },
+    {
+      "host": "server-44",
+      "bytes": 19083595776,
+      "freelist_bytes": 20701184
+    },
+    {
+      "host": "server-88",
+      "bytes": 23617646592
+    },
+    {
+      "host": "mac-m1",
+      "bytes": 4692992000
+    },
+    {
+      "host": "mac-mini",
+      "observed_cache_file_bytes": 77824,
+      "note": "only the found cache file; not proof that all index locations were measured"
+    }
+  ],
+  "server100_index_sample": {
+    "records_scanned": 2000000,
+    "complete": false,
+    "top_path_counts": [
+      [
+        "agents-projects",
+        685781
+      ],
+      [
+        "PycharmProjects",
+        524124
+      ],
+      [
+        ".local/share",
+        211956
+      ],
+      [
+        ".local/state",
+        94360
+      ],
+      [
+        ".codex/worktrees",
+        74300
+      ],
+      [
+        ".config/container-use",
+        49098
+      ],
+      [
+        ".config/google-chrome",
+        31336
+      ]
+    ],
+    "overlapping_counts": {
+      "release_copies": 81627,
+      "agent_history": 133560,
+      "browser": 36532
+    },
+    "warning": "Counts describe a partial path scan, not bytes or proven removable duplicates."
+  },
+  "native_schema": {
+    "search_table": "FTS5(path UNINDEXED, body, tokenize=trigram)",
+    "extraction_cache_has_separate_body": true,
+    "warning": "The cloud metadata schema is not a drop-in replacement for the native full-text schema. OCR/extracted text must not be discarded."
+  },
+  "limitations": [
+    "Whole-table size aggregation reached explicit time/resource limits; no per-table byte totals claimed.",
+    "Native maintenance invocation was blocked by the execution tool; no alternative destructive path attempted.",
+    "No large native database was deleted or modified.",
+    "Home-directory disk-usage scan is separate and may be partial."
+  ],
+  "production_changes_in_this_step": [],
+  "large_databases_deleted": [],
+  "server100_home_scan": {
+    "complete": false,
+    "exit_code": 124,
+    "reason": "80-second bounded scan; uncompleted directories are not counted",
+    "completed_directories": [
+      [
+        ".cache",
+        135446654976
+      ],
+      [
+        ".config",
+        22662541312
+      ],
+      [
+        "backups",
+        18781114368
+      ],
+      [
+        "airlock-admin",
+        14208942080
+      ],
+      [
+        ".lmstudio",
+        10244124672
+      ],
+      [
+        ".hermes",
+        9241354240
+      ],
+      [
+        ".codeium",
+        7424647168
+      ]
+    ],
+    "warning": "The GrepMesh index is included in .cache; these sizes must not be double-counted."
+  },
+  "server100_cache_scan": {
+    "complete": true,
+    "exit_code": 0,
+    "total_bytes": 135403016192,
+    "largest_directories": [
+      [
+        "grepmesh",
+        87061446656
+      ],
+      [
+        "yadisk-oauth-profile",
+        7549165568
+      ],
+      [
+        "go-build",
+        7523454976
+      ],
+      [
+        "omniroute-dev-src",
+        3961307136
+      ],
+      [
+        "git-private2public",
+        3151695872
+      ],
+      [
+        "omniroute-artifacts",
+        2545278976
+      ],
+      [
+        "huggingface",
+        2472652800
+      ],
+      [
+        "uv",
+        2037452800
+      ],
+      [
+        "browser-os",
+        1814323200
+      ]
+    ],
+    "warning": "Browser profiles may contain active sessions; rollback/build artifacts and models were not approved for blind deletion."
+  }
+}
