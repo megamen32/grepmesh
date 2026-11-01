@@ -146,6 +146,20 @@ with tempfile.TemporaryDirectory(dir=BASE) as tmp:
     check('forwarded search without authenticated policy refused',
           is_error(response) and 'verified GPTAdmin filesystem ACL'
           in response['result']['content'][0]['text'])
+    response=rpc('find_paths',{'pattern':'*.md','hosts':['local'],
+                               'hop_count':1,'origin_host':'peer'})
+    check('forwarded find_paths without authenticated policy refused',
+          is_error(response) and 'verified GPTAdmin filesystem ACL'
+          in response['result']['content'][0]['text'])
+    # Path listing must be narrowed by the same signed ACL as text search.
+    path_args={'pattern':'*.md','hosts':['local'],'hop_count':1,'origin_host':'peer'}
+    path_body=json_bytes({'jsonrpc':'2.0','id':7,'method':'tools/call',
+                          'params':{'name':'find_paths','arguments':path_args}})
+    response=rpc('find_paths',path_args,
+                 signed_headers(path_body,policy(['/fixture/one.md'])),path_body)
+    check('signed find_paths lists only the verified file root',
+          not is_error(response) and
+          [r['path'] for r in inner(response)['results']]==['/fixture/one.md'])
     # 3) A correctly signed transport policy is accepted and narrows access.
     arguments={'query':'alpha','hosts':['local'],'hop_count':1,'origin_host':'peer'}
     body=json_bytes({'jsonrpc':'2.0','id':7,'method':'tools/call',

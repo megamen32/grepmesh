@@ -844,7 +844,7 @@ def serve(reader,port):
                     elif name in ['search','search_text','find_paths']:
                         if name=='find_paths' and args.get('mode')=='regex':
                             raise ValueError('find_paths matches globs only; regex belongs to search')
-                        allowed=forwarded_acl_roots(args,transport_acl) if name in ['search','search_text'] else None
+                        allowed=forwarded_acl_roots(args,transport_acl)
                         out=reader.query(str(args.get('pattern',args.get('query',''))),int(args.get('limit',args.get('max_matches',20))),glob=name=='find_paths',case_sensitive=args.get('mode')=='literal',roots=args.get('roots'),path_globs=args.get('path_globs'),authorized_roots=allowed,regex=args.get('mode')=='regex')
                         env=envelope(args,out['partial'],'; '.join(out['warnings']) if out['warnings'] else None);env['truncated']=out['truncated'];out.update(env)
                         if name=='find_paths':out['paths']=[{'host':HOST,'path':r['path'],'kind':'file'} for r in out['results']]
