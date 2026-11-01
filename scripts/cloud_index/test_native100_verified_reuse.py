@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from publish_native100_rolling_private import VerifiedImmutableReuseStore
+from cloud_index import CloudStore
 
 
 class VerifiedReuseTests(unittest.TestCase):
@@ -113,6 +114,36 @@ class VerifiedReuseTests(unittest.TestCase):
                             ["lsjson"], rc, output, err)):
                         with self.assertRaises(RuntimeError):
                             VerifiedImmutableReuseStore()
+    def test_transient_private_archive_read_retried(self):
+        with patch.object(VerifiedImmutableReuseStore, "_load_verified_inventory", return_value={}):
+            store = VerifiedImmutableReuseStore()
+        with patch.object(CloudStore, "get", side_effect=[
+                RuntimeError("Cloud read failed: archives/test"),
+                b"immutable-data"]) as read:
+            with patch("time.sleep"):
+                result = store.get("archives/test")
+        self.assertEqual(result, b"immutable-data")
+        self.assertEqual(read.call_count, 2)
+
+    def test_private_archive_read_corruption_not_retried(self):
+        with patch.object(VerifiedImmutableReuseStore, "_load_verified_inventory", return_value={}):
+            store = VerifiedImmutableReuseStore()
+        with patch.object(CloudStore, "get", side_effect=
+                          ValueError("Cloud object exceeds declared bound")) as read:
+            with self.assertRaisesRegex(ValueError, "exceeds declared bound"):
+                store.get("archives/test")
+        self.assertEqual(read.call_count, 1)
+
+    def test_private_archive_read_timeout_fails_closed(self):
+        with patch.object(VerifiedImmutableReuseStore, "_load_verified_inventory", return_value={}):
+            store = VerifiedImmutableReuseStore()
+        exc = subprocess.TimeoutExpired(cmd=["rclone", "cat"], timeout=90)
+        with patch.object(CloudStore, "get", side_effect=exc) as read:
+            with patch("time.sleep"):
+                with self.assertRaisesRegex(RuntimeError, "bounded retries"):
+                    store.get("archives/test")
+        self.assertEqual(read.call_count, 3)
+
 
 
 if __name__ == "__main__":

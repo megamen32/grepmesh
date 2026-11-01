@@ -100,6 +100,25 @@ class VerifiedImmutableReuseStore(CloudStore):
             known[key] = (size, md5)
         return known
 
+    def get(self, key, limit=64 * MIB):
+        # All archive parts and immutable manifests are checked by the caller
+        # against source SHA-256. A transient remote read error should not
+        # discard hours of verified construction progress. Never retry
+        # corruption, a forbidden key, a too-large object or a policy failure.
+        import subprocess
+        for attempt in range(3):
+            try:
+                return super().get(key, limit)
+            except subprocess.TimeoutExpired as exc:
+                failure = exc
+            except RuntimeError as exc:
+                if not str(exc).startswith("Cloud read failed: "):
+                    raise
+                failure = exc
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+        raise RuntimeError("Immutable cloud source read unavailable after bounded retries") from failure
+
     def put(self, key, data):
         key = valid_key(key)
         if not key.startswith("objects/"):
