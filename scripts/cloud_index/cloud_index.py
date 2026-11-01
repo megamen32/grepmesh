@@ -4,7 +4,7 @@ No source SQLite is required. Scope snapshots replace atomically and retain roll
 The native fleet database is NEVER deleted or modified by this module.
 """
 from __future__ import annotations
-import argparse, base64, collections, contextlib, fnmatch, gzip, hashlib, io, json
+import argparse, base64, collections, contextlib, fnmatch, gzip, hashlib, hmac, io, json
 import os, pathlib, re, shlex, shutil, sqlite3, subprocess, sys, threading, time, zlib
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -719,20 +719,25 @@ def envelope(args,partial=False,error=None):
     return {'request_id':args.get('request_id') or os.urandom(12).hex(),'origin_host':args.get('origin_host') or HOST,'hop_count':int(args.get('hop_count') or 0),'host_id':HOST,'partial':partial,'truncated':False,'host_status':[{'host_id':HOST,'ok':not partial,'state':'partial' if partial else 'ok','error':error}]}
 
 
-def forwarded_acl_roots(args):
-    """Strictly check delegated metadata; trust requires an authenticated peer.
+def forwarded_acl_roots(args,transport=None):
+    """Return the verified read roots for this call, or None for a local read.
 
-    This is a transport-bound ACL shape check, NOT cryptographic attestation.
-    Never attach this loopback-only reviewer to an untrusted public route.
+    A filesystem ACL is NEVER taken from the tool arguments: those are
+    caller-controlled, so trusting them would let any client widen its own
+    access to the historical corpus. A forwarded read (hop_count >= 1)
+    therefore requires a policy verified over an authenticated transport
+    (see verify_transport_acl); without such a policy the read is refused.
+    A verified policy only ever narrows access.
     """
+    if args.get('filesystem_acl') is not None:
+        raise ValueError('Caller-supplied filesystem ACL is not trusted')
     hop=int(args.get('hop_count') or 0)
-    if hop==0:
-        if args.get('filesystem_acl') is not None:
-            raise ValueError('Caller-supplied filesystem ACL is not trusted')
-        return None
+    if transport is None:
+        if hop==0:return None
+        raise PermissionError('Forwarded text requires a verified GPTAdmin filesystem ACL')
     if hop!=1 or not isinstance(args.get('origin_host'),str) or not args['origin_host']:
         raise PermissionError('Invalid authenticated peer origin')
-    acl=args.get('filesystem_acl')
+    acl=transport
     if not isinstance(acl,dict) or acl.get('version')!=1:
         raise PermissionError('Forwarded text requires a verified GPTAdmin filesystem ACL')
     if (not isinstance(acl.get('profile_id'),str) or not acl['profile_id'] or
@@ -752,6 +757,41 @@ def forwarded_acl_roots(args):
                 for root in roots)):
         raise PermissionError('No valid delegated read roots')
     return roots
+
+ACL_POLICY_HEADER='X-GrepMesh-Filesystem-Acl'
+ACL_SIGNATURE_HEADER='X-GrepMesh-Acl-Signature'
+ACL_SECRET_ENV='GREPMESH_CLOUD_ACL_SECRET'
+
+def acl_secret():
+    value=os.environ.get(ACL_SECRET_ENV,'').strip()
+    return value or None
+
+def verify_transport_acl(headers,body):
+    """Verify a filesystem ACL delivered over an authenticated transport.
+
+    The policy is accepted only when an HMAC-SHA256 signature over the exact
+    request body matches the shared secret that the authorized relay holds.
+    Without a configured secret no forwarded request can be admitted, and a
+    policy found in tool arguments is never considered (see
+    forwarded_acl_roots). The signature covers the whole body, so the policy
+    is bound to exactly these arguments and cannot be replayed for others.
+    """
+    secret=acl_secret()
+    if not secret:return None
+    raw=(headers.get(ACL_POLICY_HEADER) or '').strip()
+    signature=(headers.get(ACL_SIGNATURE_HEADER) or '').strip().lower()
+    if not raw and not signature:return None
+    if not raw or not signature:
+        raise PermissionError('Incomplete authenticated filesystem ACL transport')
+    message=body+b'\n'+raw.encode('utf-8')
+    expected=hmac.new(secret.encode('utf-8'),message,hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected,signature):
+        raise PermissionError('Filesystem ACL transport signature mismatch')
+    try:policy=json.loads(raw)
+    except ValueError:raise PermissionError('Malformed authenticated filesystem ACL')
+    if not isinstance(policy,dict):
+        raise PermissionError('Malformed authenticated filesystem ACL')
+    return policy
 
 def tools():
     common={'hosts':{'anyOf':[{'type':'string'},{'type':'array','items':{'type':'string'}}]},'roots':{'type':'array','items':{'type':'string'}},'request_id':{'type':'string'},'origin_host':{'type':'string'},'hop_count':{'type':'integer'},'limit':{'type':'integer'},'max_matches':{'type':'integer'},'mode':{'type':'string'},'path_globs':{'type':'array','items':{'type':'string'}}}
@@ -777,7 +817,11 @@ def serve(reader,port):
             try:
                 length=int(self.headers.get('Content-Length','0'))
                 if length<=0 or length>65536:raise ValueError('Invalid request size')
-                req=json.loads(self.rfile.read(length));method=req.get('method');par=req.get('params',{})
+                raw=self.rfile.read(length)
+                # A filesystem ACL is only trusted when it arrives over an
+                # authenticated transport; the tool arguments never carry it.
+                transport_acl=verify_transport_acl(self.headers,raw)
+                req=json.loads(raw);method=req.get('method');par=req.get('params',{})
                 if method=='initialize':result={'protocolVersion':'2024-11-05','capabilities':{'tools':{}},'serverInfo':{'name':'grepmesh','version':'cloud-index-v1'}}
                 elif method=='notifications/initialized':self.send_response(202);self.end_headers();return
                 elif method=='tools/list':result={'tools':tools()}
@@ -793,14 +837,14 @@ def serve(reader,port):
                         out={**envelope(args),'local':local,'nodes':[local],'topology':{'freshness':None,'generation':1,'last_refresh_error':None},'persistent_index_bytes':0,'cache_limit_bytes':reader.limit,'cloud_shards':len(m['parts']),'scope':reader.scope,'coverage_policy':m['policy']}
                     elif name=='read_text':
                         if args.get('host') not in ('local',HOST):raise ValueError('Wrong cloud read host')
-                        allowed=forwarded_acl_roots(args)
+                        allowed=forwarded_acl_roots(args,transport_acl)
                         out=reader.read_text(args.get('path'),args.get('start_line',1),args.get('end_line'),authorized_roots=allowed)
                         out.update(envelope(args))
                         out['target_host_id']=HOST
                     elif name in ['search','search_text','find_paths']:
                         if name=='find_paths' and args.get('mode')=='regex':
                             raise ValueError('find_paths matches globs only; regex belongs to search')
-                        allowed=forwarded_acl_roots(args) if name in ['search','search_text'] else None
+                        allowed=forwarded_acl_roots(args,transport_acl) if name in ['search','search_text'] else None
                         out=reader.query(str(args.get('pattern',args.get('query',''))),int(args.get('limit',args.get('max_matches',20))),glob=name=='find_paths',case_sensitive=args.get('mode')=='literal',roots=args.get('roots'),path_globs=args.get('path_globs'),authorized_roots=allowed,regex=args.get('mode')=='regex')
                         env=envelope(args,out['partial'],'; '.join(out['warnings']) if out['warnings'] else None);env['truncated']=out['truncated'];out.update(env)
                         if name=='find_paths':out['paths']=[{'host':HOST,'path':r['path'],'kind':'file'} for r in out['results']]
