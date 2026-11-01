@@ -83,6 +83,17 @@ into a deletion-authorizing receipt.
 
 **Never delete or redirect the original 81.1 GiB SQLite based on this provisional archive.** A separate frozen-writer reconciliation, complete OCR/extraction metadata capture, verified full-text search and authorized consumer cutover are still required.
 
+The private native100 FTS publisher can be safely restarted after an interrupted
+long-running shard upload with `GREPMESH_REUSE_VERIFIED_SHARDS=1`. It
+reconstructs the complete manifest and per-bucket logical checksums from the
+immutable original source, but skips uploading an existing content-addressed
+shard only when the remote Yandex.Disk object has exactly the expected size
+and MD5. Missing shards are uploaded normally; corrupt objects or unknown
+cloud errors abort without publishing any latest pointers. A nonblocking
+tmpfs flock prevents two concurrent publishers. This is **retry of a
+provisional candidate**, not an accepted consistent source snapshot, and
+does not authorize an index deletion or a production route switch.
+
 
 ## Scheduled current-source snapshot refresh (deployed on server-100)
 

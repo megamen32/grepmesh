@@ -16,7 +16,7 @@ import time
 
 from cloud_index import (CloudStore, Publisher, digest, json_bytes,
                          document, ensure_tmpfs, INDEX_LAYOUT,
-                         MAX_DOCUMENT, MAX_MANIFEST, MIB)
+                         MAX_DOCUMENT, MAX_MANIFEST, MIB, valid_key)
 
 SNAPSHOT = "20261031T233108Z-5732b979"
 PREFIX = "archives/server-100/rolling/" + SNAPSHOT
@@ -43,6 +43,40 @@ def safe_json(path, payload):
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
+
+
+class VerifiedImmutableReuseStore(CloudStore):
+    """Reuse only already-verified immutable FTS objects after an interrupted run.
+
+    A matching private remote size+MD5 is mandatory. Missing objects are uploaded
+    and independently verified by the ordinary CloudStore.put implementation.
+    Any cloud error, hash mismatch or unexpected response aborts publication.
+    Mutable manifest/pointer writes retain their original fail-closed semantics.
+    """
+    def __init__(self):
+        super().__init__()
+        self.reused = 0
+
+    def put(self, key, data):
+        key = valid_key(key)
+        if not key.startswith("objects/"):
+            return super().put(key, data)
+        import subprocess
+        cmd = self.command(["lsjson", self.prefix + "/" + key, "--stat", "--hash"])
+        result = subprocess.run(cmd, stdin=subprocess.DEVNULL,
+                                capture_output=True, timeout=45)
+        if result.returncode == 0:
+            info = json.loads(result.stdout)
+            expected_md5 = hashlib.md5(data).hexdigest()
+            if (info.get("Size") != len(data)
+                    or info.get("Hashes", {}).get("md5") != expected_md5):
+                raise RuntimeError("Immutable cloud object collision or corruption")
+            self.reused += 1
+            return
+        message = result.stderr.decode("utf-8", "replace").lower()
+        if not ("directory not found" in message or "object not found" in message):
+            raise RuntimeError("Immutable cloud existence check failed; refusing overwrite")
+        return super().put(key, data)
 
 
 class Partition:
@@ -80,6 +114,12 @@ class Partition:
 def run():
     os.umask(0o077)
     ensure_tmpfs(ROOT)
+    import fcntl
+    lock_fd = os.open(ROOT / "private-build.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        raise RuntimeError("Private FTS build already running; refusing duplicate") from exc
     if RECEIPT.exists():
         raise RuntimeError("Existing private search receipt must be inspected; no duplicate run")
     if not AUDIT.is_file():
@@ -93,7 +133,9 @@ def run():
             and audit.get("safe_for_deletion") is False
             and audit.get("consistent_snapshot") is False):
         raise RuntimeError("Full independent source audit has not passed")
-    store = CloudStore()
+    store = (VerifiedImmutableReuseStore()
+             if os.environ.get("GREPMESH_REUSE_VERIFIED_SHARDS") == "1"
+             else CloudStore())
     progress = json.loads(store.get(PREFIX + "/progress.json", 16 * MIB))
     if not (progress.get("finished") is True
             and progress.get("safe_for_deletion") is False
@@ -148,6 +190,8 @@ def run():
                 "searchable_documents": sum(p.count for p in partitions),
                 "oversize_preserved_in_source": oversize,
                 "cloud_immutable_shards_uploaded": sum(len(p.parts) for p in partitions),
+                "cloud_immutable_shards_reused": getattr(store, "reused", 0),
+                "cloud_immutable_shards_uploaded_this_run": store.puts,
                 "elapsed_seconds": round(time.monotonic() - started, 1),
                 "consistent_snapshot": False,
                 "safe_for_deletion": False,
@@ -215,6 +259,7 @@ def run():
         "production_route_switched": False,
         "old_sqlite_deleted": False,
         "ssd_reclaimed_bytes": 0,
+        "cloud_immutable_shards_reused": getattr(store, "reused", 0),
         "elapsed_seconds": round(time.monotonic() - started, 1),
     }
     safe_json(RECEIPT, summary)
