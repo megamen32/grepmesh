@@ -19,7 +19,8 @@ lost. ``ends_mid_line`` means "the next chunk continues this logical line".
 from __future__ import annotations
 import bisect, hashlib, json, os, re, threading, time, zlib
 from pathlib import Path as P
-from cloud_index import MAX_DOCUMENT, MIB, valid_key, json_bytes, digest
+from cloud_index import MAX_DOCUMENT, MIB, valid_key, json_bytes, digest, \
+    regex_match_positions, regex_can_span_newlines
 
 CHUNK_TARGET_BYTES = 512 * 1024
 MAX_CHUNK_BYTES = 8 * MIB
@@ -371,18 +372,7 @@ class OversizeIndex:
                 if time.monotonic()-started>=deadline_seconds:
                     raise TimeoutError('Historical oversize read deadline')
                 chunk=chunks[k]
-                packed=self.store.get(chunk['key'],chunk['packed_bytes']+1)
-                if len(packed)!=chunk['packed_bytes'] or \
-                        digest(packed)!=chunk['packed_sha256']:
-                    raise RuntimeError('Historical oversize chunk integrity failure')
-                decoder=zlib.decompressobj()
-                raw=decoder.decompress(packed,chunk['raw_bytes']+1)
-                if (not decoder.eof or len(raw)!=chunk['raw_bytes'] or
-                        decoder.unused_data or digest(raw)!=chunk['sha256']):
-                    raise RuntimeError('Historical oversize chunk integrity failure')
-                try:text=raw.decode('utf-8')
-                except UnicodeDecodeError:
-                    raise RuntimeError('Historical oversize chunk integrity failure')
+                text=self._load_chunk(chunk)
                 region.append((chunk,text))
             # The region is byte-contiguous and starts exactly on a line
             # boundary, so splitlines over it preserves shard-reader parity.
@@ -409,3 +399,83 @@ class OversizeIndex:
                 'chunks':[{'start_line':start_line,'end_line':start_line,
                            'lines':[]}],
                 'snapshot_at':self.manifest.get('generated_at')}
+    def _load_chunk(self,chunk):
+        """Fetch, verify and decode one chunk; integrity failures are loud."""
+        packed=self.store.get(chunk['key'],chunk['packed_bytes']+1)
+        if len(packed)!=chunk['packed_bytes'] or \
+                digest(packed)!=chunk['packed_sha256']:
+            raise RuntimeError('Historical oversize chunk integrity failure')
+        decoder=zlib.decompressobj()
+        raw=decoder.decompress(packed,chunk['raw_bytes']+1)
+        if (not decoder.eof or len(raw)!=chunk['raw_bytes'] or
+                decoder.unused_data or digest(raw)!=chunk['sha256']):
+            raise RuntimeError('Historical oversize chunk integrity failure')
+        try:payload=raw.decode('utf-8')
+        except UnicodeDecodeError:
+            raise RuntimeError('Historical oversize chunk integrity failure')
+        return payload
+    def _verified_chunks(self,record,deadline):
+        """Yield verified chunk texts in order under one shared deadline."""
+        for chunk in record['chunks']:
+            if time.monotonic()>=deadline:
+                raise TimeoutError('Historical oversize scan deadline')
+            yield self._load_chunk(chunk)
+    def scan_lines(self,record,deadline):
+        """Stream (line_number,text) for one oversize body. Line semantics
+        match the shard reader exactly, including a '\r\n' terminator that
+        was byte-split across two chunks mid-piece."""
+        line=1;buffer='';cr=False
+        for text in self._verified_chunks(record,deadline):
+            for piece in text.splitlines(keepends=True):
+                if cr:
+                    cr=False
+                    yield line,buffer
+                    line+=1;buffer=''
+                    if piece[:1]=='\n':
+                        if not piece[1:]:continue
+                        piece=piece[1:]
+                if piece.endswith('\r'):
+                    # A lone '\r' terminator can pair with a '\n' at the
+                    # very start of the next piece (or next chunk); defer.
+                    buffer+=piece[:-1];cr=True;continue
+                terminator=_terminator_length(piece)
+                if terminator:
+                    full=buffer+piece
+                    yield line,full[:len(full)-terminator]
+                    line+=1;buffer=''
+                else:
+                    buffer+=piece
+        if cr:
+            # The trailing '\r' really was the final terminator.
+            yield line,buffer
+    def first_match(self,record,deadline,needle=None,case_sensitive=True,
+                    regex_pair=None):
+        """Find the first matching line of one oversize record.
+
+        Literal mode returns the first line containing the needle
+        (case-folded unless sensitive), exactly like the shard reader.
+        Regex mode mirrors Reader.query: per-line grep semantics first, a
+        whole-body search only when the pattern can span newlines. Returns
+        (line_number, column, matched_text) or None. Raises TimeoutError
+        when the shared deadline expires.
+        """
+        if regex_pair is not None:
+            if regex_can_span_newlines(regex_pair[0].pattern) is not None:
+                body=''.join(self._verified_chunks(record,deadline))
+                found=regex_match_positions(regex_pair[0],regex_pair[1],
+                                            body,deadline)
+                return None if found is None else found
+            std,hard=regex_pair
+            for line_number,line in self.scan_lines(record,deadline):
+                if time.monotonic()>=deadline:
+                    raise TimeoutError('Historical oversize scan deadline')
+                match=hard.search(line,timeout=max(deadline-time.monotonic(),1e-9)) \
+                    if hard is not None else std.search(line)
+                if match is not None:
+                    return line_number,match.start(),line
+            return None
+        for line_number,line in self.scan_lines(record,deadline):
+            hay=line if case_sensitive else line.casefold()
+            probe=needle if case_sensitive else needle.casefold()
+            if probe in hay:return line_number,0,line
+        return None

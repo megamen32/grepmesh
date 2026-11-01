@@ -1,9 +1,13 @@
-# Oversize historical bodies: chunk objects + lazy index reader (step 2)
+# Oversize historical bodies: chunk objects, lazy index reader, real publish (step 2)
 
-Date: 2026-11-01. Scope: `scripts/cloud_index/oversize_support.py` (new) and
-`scripts/cloud_index/test_publish_native_oversize.py` (new). Committed work
-only; the rolling-archive systemd unit, native SQLite indexes and the default
-mesh are untouched.
+Date: 2026-11-01. Scope: `scripts/cloud_index/oversize_support.py` (new),
+`scripts/cloud_index/test_publish_native_oversize.py` (new),
+`scripts/cloud_index/publish_native_oversize.py` (new),
+`scripts/cloud_index/test_publish_native_oversize_cli.py` (new),
+`scripts/cloud_index/reconcile_oversize_live.py` (new),
+`scripts/cloud_index/multi_cloud.py`, `scripts/cloud_index/test_multi_cloud.py`,
+`scripts/cloud_index/README.md`. Committed work only; the rolling-archive
+systemd unit, native SQLite indexes and the default mesh are untouched.
 
 ## What landed
 
@@ -57,28 +61,86 @@ test_scan_tree 21, test_refresh_git 26, test_legacy_bootstrap 10,
 test_export_native_archive 17, test_export_native_rolling 9,
 test_verify_native_rolling 11 — no regressions.
 
+## Real publish (server-44, 2026-11-01)
+
+Published from the already-verified archive
+`yadisk:Backups/GrepMesh/cloud-index-v1/archives/server-44/20261031T214414Z-ae84d605/`
+(the same source the legacy scopes were built from; the live SQLite was only
+read read-only for reconciliation). No staging on disk, no MCP peer
+registered, no native index touched, no SSD growth on the host.
+
+Run: `publish_native_oversize.py --host server-44 --snapshot 20261031T214414Z-ae84d605 --expect 75`
+(gateway env `GREPMESH_CLOUD_GATEWAY=local`, existing system rclone auth).
+
+Result:
+
+- **75 oversized documents**, **672 chunk objects**, raw 325 853 221 B,
+  packed **82 043 741 B** (~78 MiB, 3.97x compression) under
+  `oversize/server-44/20261031T214414Z-ae84d605/`;
+- pointer `oversize/server-44/20261031T214414Z-ae84d605/latest.json`,
+  manifest `.../manifest.json` with per-chunk sha256/packed sha256;
+- publish scan: 849 785 archive rows walked, exactly 75 above the 1 MiB
+  shard limit — the count matches the live-DB gate;
+- admission: the published index was re-read through `OversizeIndex`
+  (pointer → manifest → per-chunk sha chain) and a bounded canary verified
+  three sampled paths (first, median, largest) down to the chunk payload.
+
+Reconciliation against the live server-44 FTS DB (read-only, immutable):
+75 live oversized rows, 75 published records, **75 paths in both, 0 only-live,
+0 only-published**. One path has a different digest:
+`/home/roomhacker/llm-keys-migration/standby-sync/stage/config-delta.json`
+(live 2 588 562 B vs archived 2 582 055 B, delta 6 507 B). The live file
+mtime is after the snapshot, so the archive legitimately holds the
+historical revision — the published bytes are the historical truth, which
+is the point of the historical index. All 74 other paths match byte for byte.
+
+Honest note: an earlier `--min-bytes 325854701` gate (taken from the live
+SQLite `LENGTH(CAST(c1 AS BLOB))` sum) was 1 480 B above the archived text
+sum; the archived and live sums differ by exactly the one changed file, so
+the gate was a live-vs-archive artifact, not a publish defect.
+
+## Bounded search over oversized bodies
+
+`OversizeIndex.first_match()` scans the verified chunk chain under one
+shared deadline and returns the first matching line with the same line
+semantics as the shard reader (a `\r\n` terminator byte-split across a
+chunk boundary is rejoined correctly). Literal mode folds case the same
+way; regex mode reuses `cloud_index.regex_match_positions`, so per-line
+`^`/`$` grep semantics and the whole-body fallback for newline-capable
+patterns are identical to the shard path.
+
+`MultiReader.query` now searches the oversize indexes after the shard
+scopes, under the same global deadline and the same hit limit, with the
+same fail-closed `authorized_roots` filtering and `path_globs` matching.
+Reaching the limit or the deadline yields honest `truncated`/`partial`
+states with a readable warning instead of a silent "complete" claim.
+`test_multi_cloud.py` grew to 43 checks (8 new: literal hit inside an
+oversized body with its digest, honest miss, regex hit, regex anchors,
+ACL exclusion, glob hit, plus the earlier read-path cases).
+
 ## Known limits (honest)
 
 - Whole-region reads of one call are bounded by `MAX_OVERSIZE_DOCUMENT`
   (64 MiB) body cap; `line_count`/`size_bytes` must hold at publish time.
   A >48 MiB manifest is refused rather than truncated.
+- A single logical line larger than 1 MiB is publishable and chunked
+  correctly, but no reader can return it as text: the response guard
+  (`Historical text range exceeds 1 MiB`) rejects it. Such a line is
+  still verifiable at chunk level and searchable by line number/column.
+- Search over oversized bodies walks documents sequentially; with 75
+  documents and a 25 s default budget that is fine, but a much larger
+  corpus would need an index by content, not a scan.
 - Access is per host+snapshot identity only; no default-mesh routing has
   changed and nothing is switched over yet.
 
-## Next gates (updated 2026-11-01, second commit)
+## Next gates
 
-1. MultiReader integration — **DONE in this day's follow-up commit**:
-   `multi_cloud.py` accepts an optional per-scope
-   `{"oversize": {"host":…, "snapshot":…}}` entry; invalid or mismatched
-   pointer identity fails at reader init, the index loads lazily on first
-   use, and `read_text` consults it only after a shard route miss, with the
-   path scoped to the admitting source root. Federation manifest exposes
-   `oversize_entries`; `test_multi_cloud.py` now runs 31 checks (12 new:
-   federated line parity on a 1.2 MiB multi-chunk body, ACL deny,
-   scope-root escape denial, empty results past the end, init-time
-   fail-closed admission errors, unchanged plain-scope reads).
-2. Real publish run of the 75 oversized server-44 rows to Yandex.Disk with
-   the existing gateway env, then bounded sha-chain verification, then a
-   read canary through the oversize config (no service/cwd/systemd change).
-3. Bounded search over oversized docs (shared deadline, honest partial).
-4. Real filesystem ACL verification step 3.
+1. ~~MultiReader integration~~ — done.
+2. ~~Real publish run of the 75 oversized server-44 rows~~ — done and
+   reconciled against the live DB.
+3. ~~Bounded search over oversized docs~~ — done.
+4. Real filesystem ACL verification (verified filesystem ACL / fail-closed,
+   no trusted auth from client args) — the remaining step 3 gate.
+5. Live read canary through an explicit oversize scope config entry
+   (no service/cwd/systemd change) — the config that a future MCP peer
+   would carry.

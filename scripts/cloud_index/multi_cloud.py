@@ -6,10 +6,11 @@ peer per cloud corpus. Every scope's durable shards remain in Yandex.Disk,
 while each reader uses only bounded tmpfs cache. No native index is changed.
 """
 from __future__ import annotations
-import argparse, json, os, time
+import argparse, fnmatch, json, os, time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from cloud_index import CloudStore, Reader, ensure_tmpfs, safe_scope, serve, MIB, HOST, compile_bounded_regex
+from cloud_index import CloudStore, Reader, ensure_tmpfs, safe_scope, serve, MIB, HOST, \
+    compile_bounded_regex, regex_match_positions
 from oversize_support import OversizeIndex, oversize_pointer_key
 
 class MultiReader:
@@ -45,6 +46,7 @@ class MultiReader:
                 if spec.get('pointer_key') and spec['pointer_key']!=pointer:
                     raise ValueError('Oversize pointer mismatch')
                 self.oversize.append({'scope':scope,'source_root':source_root,
+                                      'source_host':source_host,
                                       'host':spec['host'],
                                       'snapshot':spec['snapshot'],
                                       'pointer_key':pointer,'index':None})
@@ -129,6 +131,72 @@ class MultiReader:
                 continue
         raise FileNotFoundError('Historical path is not in searchable cloud scopes')
 
+    def _oversize_query_hits(self,entry,query,remaining_hits,glob,case_sensitive,
+                             path_globs,authorized_roots,deadline,regex=False,
+                             compiled=None):
+        """Scan one scope's oversize index; returns (hits, warnings)."""
+        warnings=[];hits=[]
+        try:
+            index=self._oversize_index(entry)
+        except Exception as error:
+            return [],[entry['scope']+': '+type(error).__name__+': '+str(error)[:140]]
+        try:
+            with index.lock:
+                index._require()
+                root=entry['source_root']
+                needle='' if glob else (query if case_sensitive else query.casefold())
+                records=sorted(index.by_path.values(),key=lambda r:r['path'])
+                for record in records:
+                    if time.monotonic()>=deadline:
+                        warnings.append(entry['scope']+
+                            ': oversize scan deadline; remaining documents not searched')
+                        break
+                    path=record['path']
+                    if not (path==root or path.startswith(root.rstrip('/')+'/')):continue
+                    if authorized_roots is not None and not any(
+                            path==v or path.startswith(v.rstrip('/')+'/')
+                            for v in authorized_roots):continue
+                    if path_globs and not any(fnmatch.fnmatchcase(path,g)
+                                              for g in path_globs):continue
+                    if glob:
+                        probe=query.casefold()
+                        if not (fnmatch.fnmatchcase(path.casefold(),probe) or
+                                fnmatch.fnmatchcase(Path(path).name.casefold(),probe)):
+                            continue
+                        line,column,text=0,0,''
+                    else:
+                        if regex:
+                            if compiled is None:
+                                compiled=compile_bounded_regex(query)
+                                if compiled is None:
+                                    return [],warnings
+                            found=index.first_match(record,deadline,
+                                regex_pair=compiled)
+                        else:
+                            found=index.first_match(record,deadline,
+                                needle=needle,case_sensitive=case_sensitive)
+                        if found is None:
+                            probe=needle
+                            python_path=path if case_sensitive else path.casefold()
+                            if probe and probe in python_path:
+                                line,column,text=0,0,'[path match] '+path
+                            else:continue
+                        else:
+                            line,column,text=found
+                    hits.append({'host_id':HOST,'source_host':entry['source_host'],
+                                 'path':path,'line_number':line,'column':column,
+                                 'context':[],'text':text[:3000],
+                                 'size':record['size_bytes'],'modified_ms':None,
+                                 'created_ms':None,'body_sha256':record['body_sha256'],
+                                 'snapshot_at':index.manifest['generated_at']})
+                    if len(hits)>remaining_hits:break
+        except TimeoutError:
+            warnings.append(entry['scope']+
+                ': oversize scan deadline; remaining documents not searched')
+        except Exception as error:
+            warnings.append(entry['scope']+': '+type(error).__name__+': '+str(error)[:160])
+        return hits,warnings
+
     def query(self,query,limit=20,glob=False,case_sensitive=False,roots=None,
               path_globs=None,deadline_seconds=25,authorized_roots=None,regex=False):
         if self.manifest is None:self.refresh()
@@ -196,6 +264,43 @@ class MultiReader:
                     truncated |= index<len(selected)-1 or len(results)>limit
                     break
         truncated |= len(results)>limit
+        if self.oversize:
+            if len(results)>=limit:
+                truncated=True
+                warnings.append('Hit limit reached; oversized bodies not searched')
+            else:
+                budget=deadline_seconds-(time.monotonic()-started)
+                if budget<=0:
+                    truncated=True
+                    warnings.append('Global cloud text deadline; oversized bodies not searched')
+                else:
+                    deadline=started+deadline_seconds
+                    for entry in self.oversize:
+                        if len(results)>=limit:
+                            truncated=True
+                            warnings.append('Hit limit reached; remaining oversized documents not searched')
+                            break
+                        if time.monotonic()>=deadline:
+                            truncated=True
+                            warnings.append('Global cloud text deadline; remaining oversized documents not searched')
+                            break
+                        source=entry['source_root']
+                        if roots and not any(
+                            x in ('*','local',self.scope,entry['scope'],source)
+                            or (isinstance(x,str) and x.startswith(source.rstrip('/')+'/'))
+                            or (isinstance(x,str) and source.startswith(x.rstrip('/')+'/'))
+                            for x in roots):
+                            continue
+                        gets0=self.store.gets
+                        hits,extra=self._oversize_query_hits(
+                            entry,query,limit-len(results),glob,case_sensitive,
+                            path_globs,authorized_roots,deadline,regex=regex)
+                        cloud_fetches+=self.store.gets-gets0
+                        warnings.extend(extra)
+                        for hit in hits:
+                            ident=(hit['source_host'],hit['path'])
+                            if ident not in seen:
+                                seen.add(ident);results.append(hit)
         elapsed_ms=round((time.monotonic()-started)*1000,2)
         return {
             'results':results[:limit],'partial':bool(warnings),'truncated':truncated,

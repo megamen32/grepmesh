@@ -117,8 +117,55 @@ with tempfile.TemporaryDirectory(dir=BASE) as tmp:
                         authorized_roots=['/src/beta'],deadline_seconds=25)
     check('plain scope historical read unchanged',
           plain['chunks'][0]['lines'][0]['text']=='beta tail text')
-    check('federated query still works beside oversize scope',
-          len(fed.query('tail')['results'])==1)
+    hits=fed.query('tail')
+    check('federated full text includes regular and oversized documents',
+          not hits['partial'] and not hits['truncated'] and
+          {x['path'] for x in hits['results']}==
+          {'/src/beta/gamma.rs','/src/alpha/big.log'})
+    beta_only=fed.query('tail',authorized_roots=['/src/beta'])
+    check('federated full-text ACL excludes oversized other roots',
+          not beta_only['partial'] and
+          {x['path'] for x in beta_only['results']}=={'/src/beta/gamma.rs'})
+    alpha_only=fed.query('tail',authorized_roots=['/src/alpha'])
+    check('federated full-text ACL admits only authorized oversize',
+          not alpha_only['partial'] and
+          {x['path'] for x in alpha_only['results']}=={'/src/alpha/big.log'})
+    check('empty verified ACL denies all federated text',
+          not fed.query('tail',authorized_roots=[])['results'])
+    regexp=fed.query('^tail$',regex=True)
+    check('oversized historical body participates in bounded regex',
+          not regexp['partial'] and
+          {x['path'] for x in regexp['results']}=={'/src/alpha/big.log'})
+    globbed=fed.query('*.log',glob=True)
+    check('oversized historical path participates in glob',
+          not globbed['partial'] and
+          {x['path'] for x in globbed['results']}=={'/src/alpha/big.log'})
+    # Oversized bodies are searchable through the same federation query.
+    hit=fed.query('alpha')
+    check('federated query finds a literal inside an oversized body',
+          any(r['path']=='/src/alpha/big.log' and r['line_number']==1
+              for r in hit['results']))
+    check('oversize hit carries the body digest',
+          any(r['body_sha256']==__import__('hashlib').sha256(
+              body.encode('utf-8')).hexdigest()
+              for r in hit['results']))
+    miss=fed.query('nonexistent-token-xyz')
+    check('federated query misses honestly in oversized bodies',
+          not any(r['path']=='/src/alpha/big.log' for r in miss['results']))
+    regex_hit=fed.query('line 4999',regex=True)
+    check('federated regex search reaches oversized bodies',
+          any(r['path']=='/src/alpha/big.log' and r['line_number']==5000
+              for r in regex_hit['results']))
+    anchored=fed.query('^line 4999 ',regex=True)
+    check('federated regex anchors work inside oversized bodies',
+          any(r['path']=='/src/alpha/big.log' and r['line_number']==5000
+              for r in anchored['results']))
+    denied=fed.query('alpha',authorized_roots=['/src/beta'])
+    check('federated oversize search respects the read ACL',
+          not any(r['path']=='/src/alpha/big.log' for r in denied['results']))
+    globbed=fed.query('*big.log',glob=True)
+    check('federated glob finds the oversized path',
+          any(r['path']=='/src/alpha/big.log' for r in globbed['results']))
     try:MultiReader(st,tmp,[{'scope':'z','source_root':'/z','source_host':'h',
                              'oversize':{'snapshot':'s','host':'bad/host'}}],cache_mib=64)
     except ValueError:check('invalid oversize host rejected at init',True)
