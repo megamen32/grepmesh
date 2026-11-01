@@ -84,7 +84,30 @@ def run():
     tampered = dict(state, chunks=[state["chunks"][0], state["chunks"][0]])
     s.put(checkpoint, json.dumps(tampered).encode())
     must_fail(lambda: verify(s, SNAP, [0]))
-    print(json.dumps({"passed":True, "checks":11, "all_chunks_replayed":True,
+    # Every catch-up chunk must be strictly above a completed immutable base.
+    s.put(checkpoint,json.dumps(state).encode())
+    delta='20261101T044000Z-fedca987'
+    delta_prefix=f'archives/server-100/rolling/{delta}'
+    raw=(json.dumps([13,'/new','just added'])+'\n').encode()
+    packed=gzip.compress(raw,mtime=0)
+    sha=hashlib.sha256(packed).hexdigest()
+    part=dict(key=f'{delta_prefix}/parts/000000-{sha}.jsonl.gz',
+              sha256=sha,compressed_bytes=len(packed),raw_bytes=len(raw),
+              rows=1,first_rowid=13,last_rowid=13)
+    s.put(part['key'],packed)
+    child=dict(state,snapshot=delta,lower_rowid=12,base_snapshot=SNAP,
+               capture_mode='provisional_high_rowid_only',upper_rowid=13,
+               last_rowid=13,rows=1,raw_bytes=len(raw),chunks=[part])
+    key=delta_prefix+'/progress.json'
+    s.put(key,json.dumps(child).encode())
+    checked=verify(s,delta)
+    assert checked['verified_rows']==1 and checked['lower_rowid']==12
+    assert checked['base_snapshot']==SNAP
+    s.put(key,json.dumps(dict(child,lower_rowid=11)).encode())
+    must_fail(lambda: verify(s,delta))
+    s.put(key,json.dumps(dict(child,safe_for_deletion=True)).encode())
+    must_fail(lambda: verify(s,delta))
+    print(json.dumps({"passed":True, "checks":14, "all_chunks_replayed":True,
                       "safe_for_deletion":False}))
 
 

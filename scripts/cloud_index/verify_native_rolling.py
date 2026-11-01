@@ -40,10 +40,29 @@ def verify(store, snapshot: str, sample_indices=None):
     upper = state.get("upper_rowid")
     if type(upper) is not int or upper < 1:
         fail("Missing or invalid upper rowid")
+    lower = state.get("lower_rowid", 0)
+    parent = state.get("base_snapshot")
+    if type(lower) is not int or not 0 <= lower < upper:
+        fail("Invalid catch-up lower row ID")
+    if lower:
+        if (not isinstance(parent, str) or parent == snapshot
+            or not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}",parent)
+            or state.get("capture_mode") != "provisional_high_rowid_only"):
+            fail("Missing or invalid immutable catch-up parent")
+        base = json.loads(store.get(f"{PREFIX}/{parent}/progress.json", MAX_CHECKPOINT))
+        if (base.get("snapshot")!=parent or base.get("format")!=state["format"]
+            or base.get("source")!=state["source"]
+            or base.get("upper_rowid")!=lower
+            or base.get("finished") is not True
+            or base.get("consistent_snapshot") is not False
+            or base.get("safe_for_deletion") is not False):
+            fail("Catch-up base checkpoint cannot be verified")
+    elif parent is not None:
+        fail("Unexpected base for full provisional rolling capture")
     parts = state.get("chunks")
     if not isinstance(parts, list) or not parts:
         fail("Missing rolling chunks")
-    previous = 0
+    previous = lower
     total_rows = total_raw = total_packed = 0
     for i, p in enumerate(parts):
         if not isinstance(p, dict):
@@ -113,6 +132,8 @@ def verify(store, snapshot: str, sample_indices=None):
         "checkpoint_chunks": len(parts),
         "last_rowid": previous,
         "upper_rowid": upper,
+        "lower_rowid": lower,
+        "base_snapshot": parent,
         "finished": bool(state.get("finished")),
         "verified_chunks": len(chosen),
         "verified_rows": checked_rows,

@@ -66,6 +66,21 @@ The production native server-100 SQLite has over 3 million indexed paths and rem
 
 `export_native_rolling.py` is an **alternative provisional capture**, not a SQLite snapshot: it reads batches of at most 128 rows with independent short-lived read transactions, writes immutable SHA-256 checked gzip chunks directly to private Yandex.Disk and checkpoints a resumable `progress.json`. Every checkpoint explicitly declares `consistent_snapshot=false` and `safe_for_deletion=false`. The source SQLite is never edited. A locked tmpfs control file prevents competing exports, and the process aborts if the source WAL exceeds 2 GiB. Starting a new unique snapshot requires `--create`; continuation requires its existing cloud checkpoint. Synthetic tests cover interruption/resume, exact row order/contents and a refused duplicate archive ID.
 
+A completed, independently verified rolling checkpoint may be followed by an
+**optional high-row-ID catch-up** using export_native_rolling.py with --create,
+--lower-rowid (the parent checkpoint's upper row ID), --base-snapshot (that
+completed parent's ID) and a new unique --snapshot ID. Supply the **same**
+offset/base flags on resume. It captures only FTS text rows whose row IDs
+exceed the preceding checkpoint's recorded upper bound, with an immutable
+parent reference, independently checked chunks, a shared nonblocking exporter
+lock and the same bounded short reads/WAL threshold. The verifier refuses a
+delta whose parent or source does not match, whose row IDs overlap, or whose
+deletion-safety flags are relaxed. **This is a provisional high-rowid capture,
+not a change journal or consistent snapshot:** updates/deletions at older row
+IDs, transient rows lost between checkpoints, OCR/extraction metadata, and
+the writer-freeze reconcile remain uncovered. Never combine these checkpoints
+into a deletion-authorizing receipt.
+
 **Never delete or redirect the original 81.1 GiB SQLite based on this provisional archive.** A separate frozen-writer reconciliation, complete OCR/extraction metadata capture, verified full-text search and authorized consumer cutover are still required.
 
 

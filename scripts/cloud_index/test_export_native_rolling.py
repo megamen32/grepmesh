@@ -46,6 +46,31 @@ def run():
         try:dump(db,cloud,runid,root,max_chunks=1,batch_rows=8,chunk_raw=96*1024,create=True)
         except ValueError:pass
         else:raise AssertionError('Duplicate archive ID was allowed')
-        print(json.dumps({'passed':True,'checks':9,'documents':len(recovered),'chunks':len(resume['chunks']),'safe_for_deletion':False}))
+        # Only newer, high-rowid documents are captured: no second full scan.
+        conn=sqlite3.connect(db)
+        additions=[(i,'/home/synthetic/new-'+str(i)+'.md','new'+str(i))
+                   for i in range(201,208)]
+        conn.executemany('INSERT INTO grepmesh_documents_content VALUES (?,?,?)',additions)
+        conn.commit()
+        conn.close()
+        nextid='20261101T043000Z-delta001'
+        delta=dump(db,cloud,nextid,root,batch_rows=8,chunk_raw=96*1024,
+                   create=True,lower_rowid=resume['upper_rowid'],base_snapshot=runid)
+        assert delta['finished'] and delta['rows']==7
+        assert delta['lower_rowid']==200 and delta['upper_rowid']==207
+        assert delta['base_snapshot']==runid
+        assert delta['consistent_snapshot'] is False and delta['safe_for_deletion'] is False
+        packed=cloud.get(delta['chunks'][0]['key'],100000)
+        assert [json.loads(x) for x in gzip.decompress(packed).splitlines()] == [list(x) for x in additions]
+        try:dump(db,cloud,'20261101T044000Z-delta002',root,batch_rows=8,
+                 create=True,lower_rowid=199,base_snapshot=runid)
+        except ValueError:pass
+        else:raise AssertionError('Accepted a delta with a gap/overlap against its base')
+        try:dump(db,cloud,nextid,root,batch_rows=8,create=False)
+        except ValueError:pass
+        else:raise AssertionError('Resumed a delta without its immutable base reference')
+        print(json.dumps({'passed':True,'checks':15,'documents':len(recovered),
+                          'delta_documents':len(additions),'chunks':len(resume['chunks']),
+                          'safe_for_deletion':False}))
 
 if __name__=='__main__':run()
