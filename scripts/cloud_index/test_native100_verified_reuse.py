@@ -146,5 +146,56 @@ class VerifiedReuseTests(unittest.TestCase):
 
 
 
+    def test_post_upload_timeout_reconciles_matching_remote_without_reupload(self):
+        with patch.object(VerifiedImmutableReuseStore, "_load_verified_inventory",
+                          return_value={}):
+            store = VerifiedImmutableReuseStore()
+        responses = [
+            (1, b"", b"directory not found"),  # initial remote object absent
+            (0, b"", b""),  # rcat uploaded immutable object
+            subprocess.TimeoutExpired(["rclone", "lsjson"], 45),  # verify timed out
+            (0, self.metadata(), b""),  # object is safely present, verified
+        ]
+        commands = []
+
+        def fake_run(cmd, **kwargs):
+            commands.append(cmd[0])
+            reply = responses.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return subprocess.CompletedProcess(cmd, *reply)
+
+        with patch.object(store, "command", side_effect=lambda args: args):
+            with patch("subprocess.run", side_effect=fake_run):
+                store.put(self.key, self.data)
+        self.assertEqual(commands, ["lsjson", "rcat", "lsjson", "lsjson"])
+        self.assertEqual(store.puts, 1)
+        self.assertEqual(store.known[self.key], (len(self.data),
+                                                 hashlib.md5(self.data).hexdigest()))
+        self.assertEqual(responses, [])
+
+    def test_post_upload_timeout_fails_closed_on_wrong_remote_md5(self):
+        with patch.object(VerifiedImmutableReuseStore, "_load_verified_inventory",
+                          return_value={}):
+            store = VerifiedImmutableReuseStore()
+        responses = iter([
+            (1, b"", b"directory not found"),
+            (0, b"", b""),
+            subprocess.TimeoutExpired(["rclone", "lsjson"], 45),
+            (0, self.metadata(b"wrong body"), b""),
+        ])
+
+        def fake_run(cmd, **kwargs):
+            reply = next(responses)
+            if isinstance(reply, Exception):
+                raise reply
+            return subprocess.CompletedProcess(cmd, *reply)
+
+        with patch.object(store, "command", side_effect=lambda args: args):
+            with patch("subprocess.run", side_effect=fake_run):
+                with self.assertRaisesRegex(RuntimeError, "size/hash mismatch"):
+                    store.put(self.key, self.data)
+        self.assertEqual(store.puts, 0)
+
 if __name__ == "__main__":
     unittest.main()

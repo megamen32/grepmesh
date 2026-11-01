@@ -157,8 +157,38 @@ class VerifiedImmutableReuseStore(CloudStore):
             message = result.stderr.decode("utf-8", "replace").lower()
             if not ("directory not found" in message or "object not found" in message):
                 raise RuntimeError("Immutable cloud existence check failed; refusing overwrite")
-            super().put(key, data)
-            self.known[key] = expected  # parent independently verified remote MD5
+            try:
+                super().put(key, data)
+            except subprocess.TimeoutExpired as exc:
+                # Upload may have landed; never blindly upload the same object again.
+                # Reconcile the immutable object by exact remote size and MD5.
+                for verify_attempt in range(2):
+                    try:
+                        verified = subprocess.run(
+                            cmd, stdin=subprocess.DEVNULL,
+                            capture_output=True, timeout=45)
+                    except subprocess.TimeoutExpired:
+                        if verify_attempt == 0:
+                            time.sleep(2)
+                            continue
+                        raise RuntimeError(
+                            "Post-upload immutable object verification timed out") from exc
+                    if verified.returncode:
+                        raise RuntimeError(
+                            "Post-upload immutable object verification unavailable") from exc
+                    try:
+                        info = json.loads(verified.stdout)
+                    except ValueError as bad:
+                        raise RuntimeError(
+                            "Malformed post-upload immutable object metadata") from bad
+                    remote = (info.get("Size"), info.get("Hashes", {}).get("md5"))
+                    if remote != expected:
+                        raise RuntimeError(
+                            "Post-upload immutable object size/hash mismatch") from exc
+                    # Parent increments puts only after its verification succeeds.
+                    self.puts += 1
+                    break
+            self.known[key] = expected  # exact remote size/MD5 is verified
             return
         raise RuntimeError("Cloud object check ended without an authoritative result")
 
