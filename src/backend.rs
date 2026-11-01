@@ -55,6 +55,9 @@ pub struct MatchLine {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SearchHit {
+    /// Query-relative score over already-authorized match text; not corpus statistics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
     #[serde(default)]
     pub size: Option<u64>,
     #[serde(default)]
@@ -763,6 +766,7 @@ impl LocalBackend {
                     successful_roots += 1;
                     hits.extend(index_hits.into_iter().map(|hit| {
                         SearchHit {
+                            score: None,
                             host_id: host_id.clone(),
                             path: hit.path.display().to_string(),
                             line_number: hit.line_number,
@@ -1629,6 +1633,7 @@ async fn search_hit_from_rg_line(
         .await
         .map_err(|_| anyhow!("rg search timed out"))??;
     Ok(Some(SearchHit {
+        score: None,
         host_id: host_id.to_string(),
         path: abs.display().to_string(),
         line_number: line_no,
@@ -1816,6 +1821,7 @@ fn path_hit_from_rg_line(
         root.join(reported_path)
     };
     Some(SearchHit {
+        score: None,
         host_id: host_id.to_string(),
         path: abs.display().to_string(),
         line_number: 0,
@@ -2272,6 +2278,7 @@ mod tests {
             assert_eq!(decoded.size, hit.size);
         }
         let mut remote = vec![super::SearchHit {
+            score: None,
             host_id: "other".into(),
             path: path.display().to_string(),
             size: Some(999),

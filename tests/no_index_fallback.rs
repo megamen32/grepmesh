@@ -23,18 +23,21 @@ async fn no_index_search_uses_rg_and_returns_a_match() {
     );
 
     let result = service
-        .call_search(SearchArgs {
-            query: "NO_INDEX_CANARY_TOKEN".into(),
-            verbose: false,
-            hosts: Some(HostsInput::One("local".into())),
-            request_id: Some("no-index-rg-canary".into()),
-            origin_host: None,
-            hop_count: None,
-            limit: Some(10),
-            context_lines: Some(0),
-            mode: SearchMode::Literal,
-            path_globs: vec![],
-            roots: vec![],
+        .call_search({
+            let mut args: SearchArgs = serde_json::from_value(serde_json::json!({"query":"fixture"})).unwrap();
+            args.rank = true;
+            args.query = "NO_INDEX_CANARY_TOKEN".into();
+            args.verbose = false;
+            args.hosts = Some(HostsInput::One("local".into()));
+            args.request_id = Some("no-index-rg-canary".into());
+            args.origin_host = None;
+            args.hop_count = None;
+            args.limit = Some(10);
+            args.context_lines = Some(0);
+            args.mode = SearchMode::Literal;
+            args.path_globs = vec![];
+            args.roots = vec![];
+            args
         })
         .await
         .unwrap();
@@ -61,18 +64,21 @@ async fn no_index_rg_spawn_failure_is_a_concrete_partial_mcp_result() {
     );
 
     let result = service
-        .call_search(SearchArgs {
-            query: "NO_INDEX_FALLBACK_TOKEN".into(),
-            verbose: false,
-            hosts: Some(HostsInput::One("local".into())),
-            request_id: Some("no-index-rg-spawn-failure".into()),
-            origin_host: None,
-            hop_count: None,
-            limit: Some(10),
-            context_lines: Some(0),
-            mode: SearchMode::Literal,
-            path_globs: vec![],
-            roots: vec![],
+        .call_search({
+            let mut args: SearchArgs = serde_json::from_value(serde_json::json!({"query":"fixture"})).unwrap();
+            args.rank = true;
+            args.query = "NO_INDEX_FALLBACK_TOKEN".into();
+            args.verbose = false;
+            args.hosts = Some(HostsInput::One("local".into()));
+            args.request_id = Some("no-index-rg-spawn-failure".into());
+            args.origin_host = None;
+            args.hop_count = None;
+            args.limit = Some(10);
+            args.context_lines = Some(0);
+            args.mode = SearchMode::Literal;
+            args.path_globs = vec![];
+            args.roots = vec![];
+            args
         })
         .await
         .unwrap();

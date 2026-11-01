@@ -1,3 +1,44 @@
+## Owner decision — 2026-11-01: supersedes standalone Ranked
+
+One public search, rank=true by default; rank=false opts out. Ranking only
+orders already-authorized matches and must not narrow literal/regex, OCR or
+historical deleted-file coverage. The old ranked_search tool is removed, not
+aliased. Do not install a second ranked index/service or reintroduce its MCP entry.
+The independent source-manifest selector remains a corpus policy utility only.
+
+Acceptance: default ranking before top-k; deterministic opt-out; identical match
+sets within the reported candidate/deadline budget; compact/job output preserves
+relevance order (compact fields remain unchanged); forged ACL denied; removed tool unavailable. Keep original indexers and
+SQLite untouched during the ongoing cloud migration. A source commit is NOT a
+claim that the native production runtime has been switched.
+
+Current step: 14 focused Rust checks (including real MCP, compact output and
+no-index fallback), 1 verified-metadata ACL regression and 9 bridge/source-policy
+checks passed: 24 targeted checks. The compact-output regression was fixed without
+adding score fields to compact responses; verbose responses carry scores. Native
+production release remains pending; the test binary deliberately has no OCR/STT
+features and MUST NOT be deployed as a replacement runtime. The owner explicitly retired the standalone variant; only its isolated
+server-100-ranked listener may be disabled. Keep canonical port 9419 and its
+original indexers running until the approved migration/release gate. No original SQLite/WAL/SHM removal is authorized by this change.
+
+Additional regression note: the old broad mesh fixture suite is not accepted: four
+cases failed and an unauthenticated fake-peer fixture stalled. Its isolated test
+unit was stopped; no live service was touched. Do not count this as mesh/ACL
+production acceptance. Focused new ACL and API contract checks are separate.
+
+Live retirement receipt (2026-11-01): grepmesh-ranked.service is disabled and
+inactive. Its dedicated port 19431 was retired; original port 9419 retained PID
+3068 without restart. The standalone index.sqlite (496373760 bytes) is preserved.
+This is intentional retirement, NOT an incident to auto-repair or re-enable.
+Receipt: ~/.local/state/grepmesh-ranked-retired-20261101.json.
+Native production rank=true API is NOT installed yet. Do not deploy the no-feature
+test binary or stop original migration indexers to make the API look complete.
+The legacy asynchronous/fanout fixture suite is still unaccepted; the isolated
+async fixture expects a running job but receives an immediate response. No ACL
+policy was loosened to make these older fixtures green.
+
+---
+
 # Ранжированный GrepMesh: установленный пилот
 
 Добавлен отдельный инструмент `ranked_search`: вопрос из нескольких слов

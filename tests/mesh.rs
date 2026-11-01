@@ -151,19 +151,22 @@ async fn malformed_search_inputs_are_failed_partial_mcp_results() {
         ),
     ] {
         let result = service
-            .call_search(SearchArgs {
-                query: query.into(),
-                verbose: false,
-                hosts: Some(HostsInput::One("local".into())),
-                request_id: Some(request_id.into()),
-                origin_host: None,
-                hop_count: None,
-                limit: Some(10),
-                context_lines: Some(0),
-                mode,
-                path_globs,
-                roots: vec![],
-            })
+            .call_search({
+            let mut args: SearchArgs = serde_json::from_value(serde_json::json!({"query":"fixture"})).unwrap();
+            args.rank = true;
+            args.query = query.into();
+            args.verbose = false;
+            args.hosts = Some(HostsInput::One("local".into()));
+            args.request_id = Some(request_id.into());
+            args.origin_host = None;
+            args.hop_count = None;
+            args.limit = Some(10);
+            args.context_lines = Some(0);
+            args.mode = mode;
+            args.path_globs = path_globs;
+            args.roots = vec![];
+            args
+        })
             .await
             .unwrap();
 
@@ -205,18 +208,21 @@ async fn permission_denied_descendants_do_not_fail_a_readable_root() {
         Topology::new("A", vec![]),
     );
     let result = service
-        .call_search(SearchArgs {
-            query: "Name".into(),
-            verbose: false,
-            hosts: Some(HostsInput::One("local".into())),
-            request_id: Some("permission-partial".into()),
-            origin_host: None,
-            hop_count: None,
-            limit: Some(10),
-            context_lines: Some(0),
-            mode: SearchMode::Literal,
-            path_globs: vec![],
-            roots: vec![],
+        .call_search({
+            let mut args: SearchArgs = serde_json::from_value(serde_json::json!({"query":"fixture"})).unwrap();
+            args.rank = true;
+            args.query = "Name".into();
+            args.verbose = false;
+            args.hosts = Some(HostsInput::One("local".into()));
+            args.request_id = Some("permission-partial".into());
+            args.origin_host = None;
+            args.hop_count = None;
+            args.limit = Some(10);
+            args.context_lines = Some(0);
+            args.mode = SearchMode::Literal;
+            args.path_globs = vec![];
+            args.roots = vec![];
+            args
         })
         .await;
     fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
@@ -301,19 +307,22 @@ async fn unreadable_root_remains_a_failed_partial_text_search() {
     for mode in [0o111, 0o400] {
         fs::set_permissions(root.path(), fs::Permissions::from_mode(mode)).unwrap();
         let result = service
-            .call_search(SearchArgs {
-                query: "missing".into(),
-                verbose: false,
-                hosts: Some(HostsInput::One("local".into())),
-                request_id: Some(format!("unreadable-root-text-{mode:o}")),
-                origin_host: None,
-                hop_count: None,
-                limit: Some(10),
-                context_lines: Some(0),
-                mode: SearchMode::Literal,
-                path_globs: vec![],
-                roots: vec![],
-            })
+            .call_search({
+            let mut args: SearchArgs = serde_json::from_value(serde_json::json!({"query":"fixture"})).unwrap();
+            args.rank = true;
+            args.query = "missing".into();
+            args.verbose = false;
+            args.hosts = Some(HostsInput::One("local".into()));
+            args.request_id = Some(format!("unreadable-root-text-{mode:o}"));
+            args.origin_host = None;
+            args.hop_count = None;
+            args.limit = Some(10);
+            args.context_lines = Some(0);
+            args.mode = SearchMode::Literal;
+            args.path_globs = vec![];
+            args.roots = vec![];
+            args
+        })
             .await;
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let result = result.unwrap();
@@ -407,18 +416,21 @@ async fn one_failed_root_continues_other_roots_and_reports_partial() {
     );
     fs::set_permissions(unreadable.path(), fs::Permissions::from_mode(0o111)).unwrap();
     let result = service
-        .call_search(SearchArgs {
-            query: "GREPMESH_THREE_STATE_CANARY".into(),
-            verbose: false,
-            hosts: Some(HostsInput::One("local".into())),
-            request_id: Some("three-state-partial".into()),
-            origin_host: None,
-            hop_count: None,
-            limit: Some(10),
-            context_lines: Some(0),
-            mode: SearchMode::Literal,
-            path_globs: vec![],
-            roots: vec!["unreadable".into(), "readable".into()],
+        .call_search({
+            let mut args: SearchArgs = serde_json::from_value(serde_json::json!({"query":"fixture"})).unwrap();
+            args.rank = true;
+            args.query = "GREPMESH_THREE_STATE_CANARY".into();
+            args.verbose = false;
+            args.hosts = Some(HostsInput::One("local".into()));
+            args.request_id = Some("three-state-partial".into());
+            args.origin_host = None;
+            args.hop_count = None;
+            args.limit = Some(10);
+            args.context_lines = Some(0);
+            args.mode = SearchMode::Literal;
+            args.path_globs = vec![];
+            args.roots = vec!["unreadable".into(), "readable".into()];
+            args
         })
         .await;
     fs::set_permissions(unreadable.path(), fs::Permissions::from_mode(0o700)).unwrap();

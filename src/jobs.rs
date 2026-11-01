@@ -1028,6 +1028,7 @@ mod tests {
                     PerHostStatus::partial("A", "one root failed"),
                 )]),
                 results: vec![SearchHit {
+                    score: None,
                     host_id: "A".into(),
                     path: "/readable/result.txt".into(),
                     line_number: 1,

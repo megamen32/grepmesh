@@ -1,4 +1,4 @@
-//! Bounded lexical ranked search over the existing index, isolated from exact modes.
+//! Query-relative relevance scoring; unified search ranks already-authorized hits.
 use crate::backend::LocalBackend;
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
@@ -417,6 +417,34 @@ fn open_regular_source(path: &std::path::Path) -> std::io::Result<fs::File> {
         ));
     }
     Ok(file)
+}
+
+/// Rank only existing authorized hits. Never re-open source files: OCR and
+/// deleted-file history must have exactly the same coverage as unranked search.
+/// Matching remains the caller's literal/regex mode; this is not query rewriting.
+pub(crate) fn rank_search_hits(
+    query: &str,
+    _mode: &crate::backend::SearchMode,
+    hits: &mut [crate::backend::SearchHit],
+) {
+    let terms = query_terms(query).unwrap_or_default();
+    for hit in hits.iter_mut() {
+        let body = if hit.context.is_empty() {
+            hit.text.clone()
+        } else {
+            hit.context.iter().map(|line| line.text.as_str()).collect::<Vec<_>>().join("\n")
+        };
+        hit.score = Some(if terms.is_empty() { 0.0 } else {
+            score_document(&hit.host_id, std::path::Path::new(&hit.path), &body, &terms, 0, 0)
+                .map(|passage| passage.score).unwrap_or(0.0)
+        });
+    }
+    hits.sort_by(|a, b| {
+        b.score.unwrap_or(0.0).total_cmp(&a.score.unwrap_or(0.0))
+            .then(a.host_id.cmp(&b.host_id))
+            .then(a.path.cmp(&b.path))
+            .then(a.line_number.cmp(&b.line_number))
+    });
 }
 
 fn score_document(

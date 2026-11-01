@@ -633,13 +633,12 @@ async fn handle_rpc_inner(state: AppState, payload: Value) -> Result<Value> {
                 "protocolVersion": protocol_version,
                 "serverInfo": {"name": "grepmesh", "version": env!("CARGO_PKG_VERSION")},
                 "capabilities": {"tools": {"listChanged": false}},
-                "instructions": "Use GrepMesh when the location is unknown, the search may span multiple mesh hosts, or its configured cross-host scopes are needed. For a known local checkout or explicitly named local path, prefer bounded shell rg/find; it is faster and avoids unnecessary mesh fan-out. Use search for exact literal or regex matching and ranked_search for bounded relevance-ranked retrieval. For multi-host search, set a small wait_ms and use read_text only for an exact result path and host. If a search returns state=running, call search_status with its job_id. Surface partial host_status failures rather than treating partial results as complete.",
+                "instructions": "Use GrepMesh when the location is unknown, the search may span multiple mesh hosts, or its configured cross-host scopes are needed. For a known local checkout or explicitly named local path, prefer bounded shell rg/find; it is faster and avoids unnecessary mesh fan-out. Use search for literal or regex matching, relevance-ranked by default. Set rank=false for deterministic host/path/line order without changing matching or coverage. For multi-host search, set a small wait_ms and use read_text only for an exact result path and host. If a search returns state=running, call search_status with its job_id. Surface partial host_status failures rather than treating partial results as complete.",
             })
         }
         "tools/list" => json!({
             "tools": [
-                tool_meta("search", "Search file names and indexed content across one or more hosts."),
-                tool_meta("ranked_search", "Retrieve relevance-ranked passages from indexed content across one or more hosts; partial coverage is reported explicitly."),
+                tool_meta("search", "Search file names and indexed content across hosts, ranked by relevance by default; set rank=false to disable ranking."),
                 tool_meta("find_paths", "Find file paths across one or more hosts."),
                 tool_meta("find_duplicates", "Hash a bounded sample from configured roots or validated subpaths and report duplicate paths and reclaimable bytes without deleting files."),
                 tool_meta("read_text", "Read a text file from a specific host."),
@@ -704,23 +703,12 @@ fn tool_meta(name: &str, description: &str) -> Value {
                 "task_class": {"type": "string", "maxLength": 80, "description": "Optional shared TaskDescriptor class; verified against actual input before inference."}
             }
         }),
-        "ranked_search" => json!({
-            "type": "object",
-            "required": ["query"],
-            "properties": {
-                "query": {"type": "string", "minLength": 1, "maxLength": 2048},
-                "hosts": hosts,
-                "roots": {"type": "array", "items": {"type": "string"}},
-                "path_globs": {"type": "array", "items": {"type": "string"}},
-                "limit": {"type": "integer", "minimum": 1},
-                "context_lines": {"type": "integer", "minimum": 0, "maximum": 12}
-            }
-        }),
         "search" | "search_text" => json!({
             "type": "object",
             "required": ["query"],
             "properties": {
                 "query": {"type": "string"}, "hosts": hosts,
+                "rank": {"type": "boolean", "default": true, "description": "Rank authorized matches by relevance. False preserves host/path/line order. Matching, OCR, history and ACL are unchanged."},
                 "verbose": {"type": "boolean", "description": "Return legacy per-line search hits instead of compact ranges."},
                 "roots": {"type": "array", "items": {"type": "string"}},
                 "mode": {"type": "string", "enum": ["literal", "regex", "case_insensitive_literal"]},
@@ -784,7 +772,7 @@ fn tool_meta(name: &str, description: &str) -> Value {
         "description": description,
         "inputSchema": schema
     });
-    if matches!(name, "ranked_search" | "search" | "search_text" | "read_text" | "find_paths" | "list_locations" | "list_directory" | "search_status") {
+    if matches!(name, "search" | "search_text" | "read_text" | "find_paths" | "list_locations" | "list_directory" | "search_status") {
         metadata["annotations"] = json!({"readOnlyHint": true, "destructiveHint": false});
     }
     metadata
@@ -801,11 +789,6 @@ async fn call_tool(service: &MeshService, jobs: &SearchJobs, params: Value) -> R
         .cloned();
     apply_filesystem_acl_metadata(name, &mut arguments, delegated_acl)?;
     let tool_result = match name {
-        "ranked_search" => {
-            service
-                .call_ranked_search(serde_json::from_value(arguments)?)
-                .await?
-        }
         "search" | "search_text" => {
             let mut arguments = arguments;
             let explicit_wait_ms = arguments.get("wait_ms").and_then(Value::as_u64);
@@ -902,11 +885,11 @@ fn apply_filesystem_acl_metadata(
 ) -> Result<()> {
     let supported = matches!(
         name,
-        "search" | "search_text" | "ranked_search" | "read_text"
+        "search" | "search_text" | "read_text"
     );
     if delegated_acl.is_some() && !supported {
         anyhow::bail!(
-            "GPTAdmin filesystem ACL is valid only for GrepMesh search/ranked_search/read_text"
+            "GPTAdmin filesystem ACL is valid only for GrepMesh search/read_text"
         )
     }
     let Some(object) = arguments.as_object_mut() else {
@@ -1085,7 +1068,7 @@ fn bound_tool_data(mut data: Value, max_bytes: usize) -> anyhow::Result<Value> {
 mod tests {
     #[test]
     fn retrieval_tools_declare_read_only_annotations() {
-        for name in ["ranked_search", "search", "search_text", "read_text", "find_paths", "list_locations", "list_directory", "search_status"] {
+        for name in ["search", "search_text", "read_text", "find_paths", "list_locations", "list_directory", "search_status"] {
             let meta = super::tool_meta(name, "test");
             assert_eq!(meta["annotations"]["readOnlyHint"], true, "{name}");
             assert_eq!(meta["annotations"]["destructiveHint"], false, "{name}");

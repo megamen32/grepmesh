@@ -365,6 +365,7 @@ impl RemoteIndexStore {
                         text: line.chars().take(1200).collect(),
                     });
                     hits.push(SearchHit {
+                        score: None,
                         host_id: host.clone(),
                         path: path.clone(),
                         line_number: index + 1,

@@ -56,10 +56,10 @@ class BridgeTests(unittest.TestCase):
 
     def test_dynamic_headers_init_and_tool_roundtrip(self):
         for message in ({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}},
-                        {"jsonrpc": "2.0", "id": "a", "method": "tools/call", "params": {"name": "ranked_search", "arguments": {}}}):
+                        {"jsonrpc": "2.0", "id": "a", "method": "tools/call", "params": {"name": "search", "arguments": {}}}):
             self.assertEqual(self.bridge.handle(json.dumps(message))["id"], message["id"])
         self.assertEqual(self.server.seen[0][1]["Mcp-Method"], "initialize")
-        self.assertEqual(self.server.seen[1][1]["Mcp-Name"], "ranked_search")
+        self.assertEqual(self.server.seen[1][1]["Mcp-Name"], "search")
         self.assertNotIn("Authorization", self.server.seen[0][1])
 
     def test_notifications_never_emit_a_response(self):
@@ -101,7 +101,7 @@ class BridgeTests(unittest.TestCase):
     def test_invalid_notification_and_nonfinite_json_do_not_crash_transport(self):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertIsNone(self.bridge.handle('{"jsonrpc":"2.0","method":"notifications/initialized","params":[]}'))
-        self.assertEqual(self.bridge.handle('{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ranked_search","arguments":{"x":NaN}}}')["error"]["code"], -32700)
+        self.assertEqual(self.bridge.handle('{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search","arguments":{"x":NaN}}}')["error"]["code"], -32700)
 
 
 class SourceGeneratorTests(unittest.TestCase):
