@@ -27,8 +27,12 @@ MAX_WAL=2*1024*MIB
 DEFAULT_ROWS=64
 
 
-def dump(db_path:Path,store,snapshot:str,root:Path,max_chunks=0,batch_rows=DEFAULT_ROWS,chunk_raw=RAW_TARGET,create=False,lower_rowid=0,base_snapshot=None):
+def dump(db_path:Path,store,snapshot:str,root:Path,max_chunks=0,batch_rows=DEFAULT_ROWS,chunk_raw=RAW_TARGET,create=False,lower_rowid=0,base_snapshot=None,host='server-100',base_kind='rolling'):
     ensure_tmpfs(root)
+    if host not in ('server-100','server-44') or base_kind not in ('rolling','archive'):
+        raise ValueError('Explicit permitted host and immutable base kind required')
+    if base_kind=='archive' and (not lower_rowid or host!='server-44'):
+        raise ValueError('Archive base only permitted for server-44 tail')
     if not db_path.is_file() or not db_path.name.endswith('.sqlite3'):
         raise ValueError('Explicit native SQLite source required')
     if not (1<=batch_rows<=128) or max_chunks<0 or not 64*1024<=chunk_raw<=RAW_TARGET:
@@ -44,7 +48,7 @@ def dump(db_path:Path,store,snapshot:str,root:Path,max_chunks=0,batch_rows=DEFAU
              or len(base_snapshot)>64)) or
             (lower_rowid==0 and base_snapshot is not None)):
         raise ValueError('Delta must have a valid completed base and a nonnegative lower row ID')
-    prefix=f'archives/server-100/rolling/{snapshot}'
+    prefix=f'archives/{host}/rolling/{snapshot}'
     state_key=prefix+'/progress.json'
     c=sqlite3.connect('file:'+str(db_path)+'?mode=ro',uri=True,timeout=4,isolation_level=None)
     c.execute('PRAGMA query_only=ON')
@@ -63,19 +67,32 @@ def dump(db_path:Path,store,snapshot:str,root:Path,max_chunks=0,batch_rows=DEFAU
             else:
                 raise ValueError('The rolling archive ID already exists')
             if lower_rowid:
-                # A catch-up window may only follow an actually finished
-                # private checkpoint for the SAME source. The base itself
-                # remains provisional and cannot authorize any deletion.
-                base=json.loads(store.get(
-                    f'archives/server-100/rolling/{base_snapshot}/progress.json',16*MIB))
-                if (base.get('format')!='grepmesh-rolling-text-v1' or
-                    base.get('snapshot')!=base_snapshot or
-                    base.get('source')!=str(db_path) or
-                    base.get('finished') is not True or
-                    base.get('upper_rowid')!=lower_rowid or
-                    base.get('consistent_snapshot') is not False or
-                    base.get('safe_for_deletion') is not False):
-                    raise ValueError('Catch-up base is not a matching completed provisional checkpoint')
+                if base_kind=='archive':
+                    # Follow the completed immutable logical snapshot. The
+                    # concurrent-writer tail remains explicitly provisional.
+                    from reindex_native_archive import get_manifest
+                    base=get_manifest(store,host,base_snapshot)
+                    fts=base.get('tables',{}).get(TABLE,{})
+                    parts=fts.get('chunks',[])
+                    if (base.get('consistent_read_snapshot') is not True or
+                        base.get('original_database')!=str(db_path) or
+                        not parts or
+                        parts[-1].get('last_rowid')!=lower_rowid or
+                        fts.get('rows')!=849796 or host!='server-44'):
+                        raise ValueError('Tail base is not the verified server-44 source snapshot')
+                else:
+                    # An appended tail follows an actually finished checkpoint
+                    # of precisely the same SQLite source on the same host.
+                    base=json.loads(store.get(
+                        f'archives/{host}/rolling/{base_snapshot}/progress.json',16*MIB))
+                    if (base.get('format')!='grepmesh-rolling-text-v1' or
+                        base.get('snapshot')!=base_snapshot or
+                        base.get('source')!=str(db_path) or
+                        base.get('finished') is not True or
+                        base.get('upper_rowid')!=lower_rowid or
+                        base.get('consistent_snapshot') is not False or
+                        base.get('safe_for_deletion') is not False):
+                        raise ValueError('Catch-up base is not a matching completed provisional checkpoint')
             state={'format':'grepmesh-rolling-text-v1','source':str(db_path),
                    'snapshot':snapshot,
                    'upper_rowid':c.execute(f'SELECT max(rowid) FROM {TABLE}').fetchone()[0],
@@ -87,7 +104,7 @@ def dump(db_path:Path,store,snapshot:str,root:Path,max_chunks=0,batch_rows=DEFAU
                 raise RuntimeError('No new high-rowid range available to capture')
             if lower_rowid:
                 state.update(lower_rowid=lower_rowid,base_snapshot=base_snapshot,
-                             capture_mode='provisional_high_rowid_only')
+                             base_kind=base_kind,capture_mode='provisional_high_rowid_only')
             store.put(state_key,json_bytes(state))
         else:
             # Any unavailable cloud checkpoint is fatal on resume.
@@ -96,7 +113,8 @@ def dump(db_path:Path,store,snapshot:str,root:Path,max_chunks=0,batch_rows=DEFAU
                 state.get('source')!=str(db_path) or
                 state.get('snapshot')!=snapshot or state.get('finished') or
                 state.get('lower_rowid',0)!=lower_rowid or
-                state.get('base_snapshot')!=base_snapshot):
+                state.get('base_snapshot')!=base_snapshot or
+                state.get('base_kind','rolling')!=base_kind):
                 raise ValueError('Progress state cannot be resumed safely')
         started=time.monotonic()
         raw=io.BytesIO()
@@ -123,7 +141,7 @@ def dump(db_path:Path,store,snapshot:str,root:Path,max_chunks=0,batch_rows=DEFAU
             # immutable object has already been remotely hash-verified.
             store.put(state_key,json_bytes(state))
             progress_count+=1
-            print(json.dumps({'event':'rolling_chunk','host':'server-100',
+            print(json.dumps({'event':'rolling_chunk','host':host,
                 'chunks':len(state['chunks']),'rows':state['rows'],
                 'last_rowid':last_id,'cloud_mib':round(len(payload)/MIB,2),
                 'elapsed_s':round(time.monotonic()-started,1),
@@ -191,14 +209,16 @@ def main():
     p.add_argument('--create',action='store_true')
     p.add_argument('--lower-rowid',type=int,default=0)
     p.add_argument('--base-snapshot')
+    p.add_argument('--host',choices=['server-100','server-44'],default='server-100')
+    p.add_argument('--base-kind',choices=['rolling','archive'],default='rolling')
     args=p.parse_args()
-    lockpath=args.root/'rolling-export100.lock'
+    lockpath=args.root/('rolling-export'+args.host.split('-')[1]+'.lock')
     ensure_tmpfs(args.root)
     with lockpath.open('a+b') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         dump(args.database,CloudStore(),args.snapshot,args.root,args.max_chunks,
              create=args.create,lower_rowid=args.lower_rowid,
-             base_snapshot=args.base_snapshot)
+             base_snapshot=args.base_snapshot,host=args.host,base_kind=args.base_kind)
 
 
 if __name__=='__main__':

@@ -69,7 +69,43 @@ def run():
         try:dump(db,cloud,nextid,root,batch_rows=8,create=False)
         except ValueError:pass
         else:raise AssertionError('Resumed a delta without its immutable base reference')
-        print(json.dumps({'passed':True,'checks':15,'documents':len(recovered),
+        # Independently completed server-44 native archive is a permitted
+        # *base*, but any live high-rowid tail is never a consistent snapshot.
+        archiveid='20261031T214414Z-test0044'
+        manifest={'host_id':'server-44','snapshot_id':archiveid,
+                  'original_database':str(db),'consistent_read_snapshot':True,
+                  'tables':{'grepmesh_documents_content':{
+                      'rows':849796,'chunks':[{'last_rowid':200}]}}}
+        packed=json.dumps(manifest).encode('utf-8')
+        from hashlib import sha256
+        mkey='archives/server-44/'+archiveid+'/manifest.json'
+        cloud.put(mkey,packed)
+        cloud.put('archives/server-44/'+archiveid+'/complete.json',
+                  json.dumps({'host_id':'server-44','snapshot':archiveid,
+                      'complete':True,'manifest':mkey,
+                      'sha256':sha256(packed).hexdigest()}).encode())
+        snap44='20261101T045500Z-delta0044'
+        delta44=dump(db,cloud,snap44,root,batch_rows=8,chunk_raw=96*1024,
+                     create=True,lower_rowid=200,base_snapshot=archiveid,
+                     host='server-44',base_kind='archive')
+        assert delta44['finished'] and delta44['rows']==7
+        assert delta44['base_kind']=='archive'
+        assert delta44['consistent_snapshot'] is False and delta44['safe_for_deletion'] is False
+        assert all(part['key'].startswith('archives/server-44/rolling/')
+                   for part in delta44['chunks'])
+        try:
+            dump(db,cloud,'20261101T050000Z-bad0044',root,
+                 create=True,lower_rowid=199,base_snapshot=archiveid,
+                 host='server-44',base_kind='archive')
+        except ValueError:pass
+        else:raise AssertionError('Archive tail accepted a row ID gap')
+        try:
+            dump(db,cloud,snap44,root,create=False,lower_rowid=200,
+                 base_snapshot=archiveid,host='server-44',base_kind='rolling')
+        except ValueError:pass
+        else:raise AssertionError('Archive tail resumed under an incompatible base')
+
+        print(json.dumps({'passed':True,'checks':21,'documents':len(recovered),
                           'delta_documents':len(additions),'chunks':len(resume['chunks']),
                           'safe_for_deletion':False}))
 
