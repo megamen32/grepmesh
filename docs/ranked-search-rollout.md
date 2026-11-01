@@ -51,9 +51,16 @@ policy was loosened to make these older fixtures green.
   grepmesh-native100-private-search-resume-20261101 is independently
   running; do not duplicate or restart it on stale progress.
 - **Native full-feature release:** locked build from source commit 39db864
-  was started in bounded user unit grepmesh-fullfeat-shadow-39db864 with
-  Cargo default OCR+local-STT features. This is NOT a production deploy;
-  original port 9419 is unchanged.
+  completed successfully (14m28s) with Cargo defaults OCR+local-STT.
+  Immutable 67,507,880-byte binary:
+  ~/.local/share/grepmesh/releases/39db864-default-20261101/grepmesh-mcp;
+  SHA-256 bf4db71e408b98d5fd8b07644dab8281b97aa980e7a0ec70f0c42dec07f9cff1.
+  Full-default-feature loopback MCP canary passed real search rank default=true
+  and rank=false with identical permitted hit sets (literal and regex, two
+  hits each), positive text read, configured root filtering, absent and
+  rejected ranked_search name. Test index was exclusively tmpfs and removed.
+  Durable receipt: release/shadow-mcp-acceptance.json. This is NOT a production
+  deploy or real GPTAdmin verified ACL acceptance; original port 9419 is unchanged.
 - **Still mandatory before SSD deletion:** authenticated GPTAdmin filesystem
   ACL acceptance (not synthetic owner-host scope checks), preservation of
   deleted-file historical text, full live update/OCR/regex parity, real

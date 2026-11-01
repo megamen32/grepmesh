@@ -45,7 +45,10 @@ also passed a real cloud read, literal, regex and per-path denial via
 scripts/cloud_index/test_private_historical44_oversize_live.py.
 This is an isolated owner-host check, NOT a signed GPTAdmin ACL transport
 acceptance, production route cutover, live-update parity or reboot recovery.
-Deletion remains forbidden. Runtime/API release remains pending separately.
+Deletion remains forbidden. Full-feature OCR+local-STT binary 39db864 passed
+real isolated MCP rank default/opt-out and regex/literal read canaries on a
+temporary RAM-only fixture. Production API release and actual delegated ACL
+remain pending; see ranked-search-rollout.md and its immutable release receipt.
 
 ---
 
