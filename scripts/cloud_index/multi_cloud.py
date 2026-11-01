@@ -15,8 +15,8 @@ from oversize_support import OversizeIndex, oversize_pointer_key
 
 class MultiReader:
     def __init__(self, store, root, scopes, cache_mib=512):
-        if not 1 <= len(scopes) <= 8:
-            raise ValueError('An explicit list of 1..8 scopes is required')
+        if not 1 <= len(scopes) <= 16:
+            raise ValueError('An explicit list of 1..16 scopes is required')
         self.store=store
         self.scope='cloud-text-federation'
         self.readers=[]
@@ -94,9 +94,19 @@ class MultiReader:
         if not isinstance(path,str) or not path.startswith('/') or '..' in Path(path).parts:
             raise ValueError('Absolute historical path required')
         if self.manifest is None:self.refresh()
+        # The 16-way server-100 provisional corpus is private and hash-routed;
+        # a cold historical path must never require 16 cloud shard downloads.
+        # Keep the existing 8-way server-44 behavior exactly unchanged.
+        rolling={int(r.scope.rsplit('-',1)[-1]):r for r in self.readers
+                 if r.scope.startswith('rolling100-20261031t233108z-5732b979-')
+                 and r.scope.rsplit('-',1)[-1].isdigit()}
         legacy={int(r.scope.rsplit('-',1)[-1]):r for r in self.readers
                 if r.scope.startswith('legacy-server44-') and r.scope.rsplit('-',1)[-1].isdigit()}
-        if len(legacy)==8 and set(legacy)==set(range(8)):
+        if len(rolling)==16 and set(rolling)==set(range(16)):
+            import hashlib
+            bucket=hashlib.sha256(path.encode('utf-8')).digest()[0]%16
+            selected=[rolling[bucket]]
+        elif len(legacy)==8 and set(legacy)==set(range(8)):
             import hashlib
             bucket=hashlib.sha256(path.encode('utf-8')).digest()[0]%8
             selected=[legacy[bucket]]
