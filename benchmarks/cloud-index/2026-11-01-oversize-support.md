@@ -65,11 +65,18 @@ test_verify_native_rolling 11 — no regressions.
 - Access is per host+snapshot identity only; no default-mesh routing has
   changed and nothing is switched over yet.
 
-## Next gates
+## Next gates (updated 2026-11-01, second commit)
 
-1. MultiReader integration: optional per-scope `{'oversize': {...}}` config
-   entry, lazy load on first use, read_text fallback after the legacy-bucket
-   route miss; federated tests with oversize-configured scopes.
+1. MultiReader integration — **DONE in this day's follow-up commit**:
+   `multi_cloud.py` accepts an optional per-scope
+   `{"oversize": {"host":…, "snapshot":…}}` entry; invalid or mismatched
+   pointer identity fails at reader init, the index loads lazily on first
+   use, and `read_text` consults it only after a shard route miss, with the
+   path scoped to the admitting source root. Federation manifest exposes
+   `oversize_entries`; `test_multi_cloud.py` now runs 31 checks (12 new:
+   federated line parity on a 1.2 MiB multi-chunk body, ACL deny,
+   scope-root escape denial, empty results past the end, init-time
+   fail-closed admission errors, unchanged plain-scope reads).
 2. Real publish run of the 75 oversized server-44 rows to Yandex.Disk with
    the existing gateway env, then bounded sha-chain verification, then a
    read canary through the oversize config (no service/cwd/systemd change).

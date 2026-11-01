@@ -65,4 +65,72 @@ with tempfile.TemporaryDirectory(dir=BASE) as tmp:
     try:a.query('shared',roots=['/src/nope'])
     except ValueError:check('unknown query root denied',True)
     else:raise AssertionError('Unknown root should not be silently accepted')
+
+# Federated oversize support: bodies above the shard limit read through the
+# index, scoped to the admitting source root, with the same ACL semantics.
+from oversize_support import publish_oversize
+with tempfile.TemporaryDirectory(dir=BASE) as tmp:
+    import hashlib
+    st=MemoryStore();pub=Publisher(st,tmp,64*1024)
+    pub.publish('beta',stream('/src/beta','server-100',[('gamma.rs','beta tail text')]))
+    pub.publish('alpha',stream('/src/alpha','server-100',[('small.md','alpha regular text')]))
+    body=(''.join('line %d alpha\u00e9\n' % i for i in range(5000))+
+          'M'*400000+'\n'+'X'*700000+'\ntail\n')
+    assert len(body.encode('utf-8'))>1048576
+    expected=body.splitlines()
+    publish_oversize(st,'server-100','snap-f',
+                     [{'path':'/src/alpha/big.log','body':body},
+                      {'path':'/elsewhere/huge.log','body':body}])
+    scopes=[{'scope':'beta','source_root':'/src/beta','source_host':'server-100'},
+            {'scope':'alpha','source_root':'/src/alpha','source_host':'server-100',
+             'oversize':{'host':'server-100','snapshot':'snap-f'}}]
+    fed=MultiReader(st,tmp,scopes,cache_mib=128)
+    fed.refresh()
+    check('federated manifest lists oversize entries',
+          fed.manifest['oversize_entries']==[{'scope':'alpha','host':'server-100',
+              'snapshot':'snap-f','pointer_key':'oversize/server-100/snap-f/latest.json'}])
+    result=fed.read_text('/src/alpha/big.log',start_line=4999,end_line=5001,
+                         authorized_roots=['/src'],deadline_seconds=25)
+    check('federated oversize read with line parity',
+          result['chunks'][0]['lines']==[{'line_number':4999,'text':expected[4998]},
+              {'line_number':5000,'text':expected[4999]},
+              {'line_number':5001,'text':'M'*400000}] and
+          len(result['chunks'][0]['lines'])==3)
+    check('federated oversize body digest matches',
+          result['body_sha256']==__import__('hashlib').sha256(
+              body.encode('utf-8')).hexdigest())
+    try:fed.read_text('/src/alpha/big.log',1,2,authorized_roots=['/src/beta'],
+                      deadline_seconds=25)
+    except PermissionError:check('federated oversize ACL deny',True)
+    else:raise AssertionError('federated oversize ACL bypass')
+    beyond_end=fed.read_text('/src/alpha/big.log',start_line=10**8,deadline_seconds=25)
+    check('federated oversize read beyond end is empty',
+          beyond_end['chunks'][0]['lines']==[])
+    try:fed.read_text('/elsewhere/huge.log',start_line=1,deadline_seconds=25)
+    except FileNotFoundError:check('oversize path outside admitted roots is denied',True)
+    else:raise AssertionError('oversize index read escaped its scope root')
+    late=fed.read_text('/src/alpha/big.log',start_line=len(expected)+5,
+                       deadline_seconds=25)
+    check('federated oversize read past the last line is empty',
+          late['chunks'][0]['lines']==[])
+    plain=fed.read_text('/src/beta/gamma.rs',start_line=1,end_line=1,
+                        authorized_roots=['/src/beta'],deadline_seconds=25)
+    check('plain scope historical read unchanged',
+          plain['chunks'][0]['lines'][0]['text']=='beta tail text')
+    check('federated query still works beside oversize scope',
+          len(fed.query('tail')['results'])==1)
+    try:MultiReader(st,tmp,[{'scope':'z','source_root':'/z','source_host':'h',
+                             'oversize':{'snapshot':'s','host':'bad/host'}}],cache_mib=64)
+    except ValueError:check('invalid oversize host rejected at init',True)
+    else:raise AssertionError('bad oversize identity accepted')
+    try:MultiReader(st,tmp,[{'scope':'z','source_root':'/z','source_host':'h',
+                             'oversize':{'snapshot':'s','host':'server-100',
+                                         'pointer_key':'oversize/other/latest.json'}}],
+                    cache_mib=64)
+    except ValueError:check('oversize pointer mismatch rejected at init',True)
+    else:raise AssertionError('pointer mismatch accepted')
+    try:MultiReader(st,tmp,[{'scope':'z','source_root':'/z','source_host':'h',
+                             'oversize':{}}],cache_mib=64)
+    except ValueError:check('oversize needs host and snapshot',True)
+    else:raise AssertionError('empty oversize admission accepted')
 print(json.dumps({'passed':True,'tests':len(checks),'cases':checks},ensure_ascii=False))

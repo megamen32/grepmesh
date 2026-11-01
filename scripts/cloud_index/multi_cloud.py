@@ -10,6 +10,7 @@ import argparse, json, os, time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from cloud_index import CloudStore, Reader, ensure_tmpfs, safe_scope, serve, MIB, HOST, compile_bounded_regex
+from oversize_support import OversizeIndex, oversize_pointer_key
 
 class MultiReader:
     def __init__(self, store, root, scopes, cache_mib=512):
@@ -23,6 +24,7 @@ class MultiReader:
         if quota < 64*MIB:
             raise ValueError('Give each scope at least 64 MiB of bounded cache')
         seen=set()
+        self.oversize=[]
         for entry in scopes:
             scope=safe_scope(entry['scope'])
             source_host=entry['source_host']
@@ -32,7 +34,27 @@ class MultiReader:
                 raise ValueError('Invalid cloud source admission')
             seen.add(scope)
             self.readers.append(Reader(store,root,scope,quota,source_host,source_root))
+            spec=entry.get('oversize')
+            if spec is not None:
+                # Historical bodies above the 1 MiB shard limit live in a
+                # separate per-snapshot oversize index; admissibility is the
+                # scope's own source root, so federated reads stay scoped.
+                try:pointer=oversize_pointer_key(spec['host'],spec['snapshot'])
+                except (KeyError,TypeError,ValueError) as error:
+                    raise ValueError('Invalid oversize admission') from error
+                if spec.get('pointer_key') and spec['pointer_key']!=pointer:
+                    raise ValueError('Oversize pointer mismatch')
+                self.oversize.append({'scope':scope,'source_root':source_root,
+                                      'host':spec['host'],
+                                      'snapshot':spec['snapshot'],
+                                      'pointer_key':pointer,'index':None})
         self.manifest=None
+
+    def _oversize_index(self,entry):
+        """Lazy-load one oversize index; failures stay honest on first use."""
+        if entry['index'] is None:
+            entry['index']=OversizeIndex(self.store,entry['host'],entry['snapshot'])
+        return entry['index']
 
     @property
     def used(self):return sum(x.used for x in self.readers)
@@ -58,6 +80,10 @@ class MultiReader:
             'parts':[part for m in manifests for part in m['parts']],
             'policy':'explicit cloud-scoped text sources only; per-source coverage in locations',
             'generated_at':max(m['generated_at'] for m in manifests),
+            'oversize_entries':[{'scope':e['scope'],'host':e['host'],
+                                 'snapshot':e['snapshot'],
+                                 'pointer_key':e['pointer_key']}
+                                for e in self.oversize],
         }
         return self.manifest
 
@@ -85,6 +111,20 @@ class MultiReader:
                 return reader.read_text(path,start_line,end_line,
                                         authorized_roots=authorized_roots,
                                         deadline_seconds=remaining)
+            except FileNotFoundError:
+                continue
+        # Route miss: oversized historical bodies live outside the search
+        # shards, so consult each scope's lazily-loaded oversize index. A
+        # path stays scoped to the admitting source root; nothing fans out.
+        for entry in self.oversize:
+            root=entry['source_root']
+            if not (path==root or path.startswith(root.rstrip('/')+'/')):continue
+            remaining=deadline_seconds-(time.monotonic()-started)
+            if remaining<=0:raise TimeoutError('Global historical read deadline')
+            try:
+                return self._oversize_index(entry).read_text(
+                    path,start_line,end_line,authorized_roots=authorized_roots,
+                    deadline_seconds=remaining)
             except FileNotFoundError:
                 continue
         raise FileNotFoundError('Historical path is not in searchable cloud scopes')
