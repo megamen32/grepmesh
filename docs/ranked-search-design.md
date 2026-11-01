@@ -37,17 +37,27 @@ The legacy asynchronous/fanout fixture suite is still unaccepted; the isolated
 async fixture expects a running job but receives an immediate response. No ACL
 policy was loosened to make these older fixtures green.
 
+## 2026-11-01 cloud acceptance, separate from ranking API
+The private server-44 eight-scope FTS archive passed 141 SHA-checked shards /
+849721 document bodies, eight read_text, eight explicit denials and eight
+regex checks. The 75 oversized historical bodies (672 verified cold chunks)
+also passed a real cloud read, literal, regex and per-path denial via
+scripts/cloud_index/test_private_historical44_oversize_live.py.
+This is an isolated owner-host check, NOT a signed GPTAdmin ACL transport
+acceptance, production route cutover, live-update parity or reboot recovery.
+Deletion remains forbidden. Runtime/API release remains pending separately.
+
 ---
 
-# Ranked search: bounded first implementation
+# ARCHIVED: 2026-10-28 ranked_search proposal, superseded 2026-11-01
 
 Decision receipt, 2026-10-28. Source inspected on canonical `main`, commit
 `730dee7820264bbe6df6c203afe0b0bc15e4f9e0`. This is a proposed implementation,
 not an installed or benchmarked result.
 
-## Decision
+## Historical proposal (do not implement)
 
-Add a separate `ranked_search` MCP tool backed by the existing SQLite FTS5
+This discarded proposal called for a separate `ranked_search` MCP tool backed by SQLite FTS5
 documents. Keep `search`, `search_text`, their defaults, literal and regex
 semantics, result order, and response rendering unchanged. Do not create a
 second broad index, change OCR placement, or make indexing synchronous.
@@ -144,7 +154,8 @@ same quality floor. Do not autoindex broad roots merely to enable comparison.
 
 Use one explicitly scoped test project with definition, reference, documentation,
 snake/camel identifiers and a denied sibling containing many query terms.
-Run real MCP `ranked_search` with a multiword question and top-k=3; verify the
+For the current one-tool design, run real MCP `search` with default rank=true and
+with rank=false on the same permitted corpus; verify the
 expected definition or document, current exact passage, host/path/line and
 nonempty score. Repeat with the denied sibling added: permitted ranking and
 context must remain unchanged, and no forbidden text/path may be returned.

@@ -37,6 +37,29 @@ The legacy asynchronous/fanout fixture suite is still unaccepted; the isolated
 async fixture expects a running job but receives an immediate response. No ACL
 policy was loosened to make these older fixtures green.
 
+## 2026-11-01 migration continuation / rollback gate
+- **server-44:** independent private 8-scope FTS audit complete:
+  849721 documents, 141 shards, 8 read_text, 8 denials, 8 regex.
+  The immutable 75-document historical oversize archive has 672 verified chunks;
+  durable cloud Reader + oversize integration passed a bounded real read,
+  literal, regex and denied-path test. Private receipt:
+  ~/.local/state/grepmesh-historical44-oversize-acceptance-20261101.json
+  on server-44. safe_for_deletion=false.
+- **server-100:** all 443 archived rolling chunks independently verified;
+  source checkpoint explicitly remains consistent_snapshot=false,
+  safe_for_deletion=false. The private searchable publishing unit
+  grepmesh-native100-private-search-resume-20261101 is independently
+  running; do not duplicate or restart it on stale progress.
+- **Native full-feature release:** locked build from source commit 39db864
+  was started in bounded user unit grepmesh-fullfeat-shadow-39db864 with
+  Cargo default OCR+local-STT features. This is NOT a production deploy;
+  original port 9419 is unchanged.
+- **Still mandatory before SSD deletion:** authenticated GPTAdmin filesystem
+  ACL acceptance (not synthetic owner-host scope checks), preservation of
+  deleted-file historical text, full live update/OCR/regex parity, real
+  read-after-reboot, exact rollback and approved production cutover.
+  Do not stop source indexers or delete their SQLite/WAL/SHM until all pass.
+
 ---
 
 # Ranked search rollout route
