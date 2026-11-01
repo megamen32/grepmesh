@@ -46,37 +46,102 @@ def safe_json(path, payload):
 
 
 class VerifiedImmutableReuseStore(CloudStore):
-    """Reuse only already-verified immutable FTS objects after an interrupted run.
+    """Reuse private immutable shards only after remote size+MD5 verification.
 
-    A matching private remote size+MD5 is mandatory. Missing objects are uploaded
-    and independently verified by the ordinary CloudStore.put implementation.
-    Any cloud error, hash mismatch or unexpected response aborts publication.
-    Mutable manifest/pointer writes retain their original fail-closed semantics.
+    Listing the flat object directory once avoids thousands of redundant
+    per-object Yandex.Disk API calls after a recoverable build interruption.
+    Never treat a failed/partial listing as proof that an object is absent.
+    Unknown objects are still checked individually before any new upload.
     """
     def __init__(self):
         super().__init__()
         self.reused = 0
+        self.reused_from_inventory = 0
+        self.known = self._load_verified_inventory()
+
+    def _load_verified_inventory(self):
+        import re
+        import subprocess
+        command = self.command([
+            "lsjson", self.prefix + "/objects", "--files-only", "--hash"
+        ])
+        try:
+            result = subprocess.run(command, stdin=subprocess.DEVNULL,
+                                    capture_output=True, timeout=90)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("Private cloud object inventory timed out; no writes") from exc
+        if result.returncode or len(result.stdout) > 32 * MIB:
+            raise RuntimeError("Private cloud object inventory unavailable or too large")
+        try:
+            items = json.loads(result.stdout)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise RuntimeError("Invalid private cloud object inventory") from exc
+        if not isinstance(items, list):
+            raise RuntimeError("Private cloud object inventory must be an array")
+        known = {}
+        for item in items:
+            if not isinstance(item, dict):
+                raise RuntimeError("Malformed cloud inventory entry")
+            name = item.get("Name")
+            if not isinstance(name, str):
+                raise RuntimeError("Malformed cloud inventory name")
+            if not re.fullmatch(r"[a-f0-9]{64}\.sqlite\.gz", name):
+                continue
+            md5 = item.get("Hashes", {}).get("md5") if isinstance(item.get("Hashes"), dict) else None
+            size = item.get("Size")
+            if (item.get("Path") != name or item.get("IsDir") is not False
+                    or type(size) is not int or size <= 0
+                    or not isinstance(md5, str)
+                    or not re.fullmatch(r"[a-f0-9]{32}", md5)):
+                raise RuntimeError("Incomplete private cloud object size/MD5 inventory")
+            key = "objects/" + name
+            if key in known:
+                raise RuntimeError("Duplicate object in cloud inventory")
+            known[key] = (size, md5)
+        return known
 
     def put(self, key, data):
         key = valid_key(key)
         if not key.startswith("objects/"):
             return super().put(key, data)
-        import subprocess
-        cmd = self.command(["lsjson", self.prefix + "/" + key, "--stat", "--hash"])
-        result = subprocess.run(cmd, stdin=subprocess.DEVNULL,
-                                capture_output=True, timeout=45)
-        if result.returncode == 0:
-            info = json.loads(result.stdout)
-            expected_md5 = hashlib.md5(data).hexdigest()
-            if (info.get("Size") != len(data)
-                    or info.get("Hashes", {}).get("md5") != expected_md5):
+        expected = (len(data), hashlib.md5(data).hexdigest())
+        remote = self.known.get(key)
+        if remote is not None:
+            if remote != expected:
                 raise RuntimeError("Immutable cloud object collision or corruption")
             self.reused += 1
+            self.reused_from_inventory += 1
             return
-        message = result.stderr.decode("utf-8", "replace").lower()
-        if not ("directory not found" in message or "object not found" in message):
-            raise RuntimeError("Immutable cloud existence check failed; refusing overwrite")
-        return super().put(key, data)
+        import subprocess
+        cmd = self.command(["lsjson", self.prefix + "/" + key,
+                            "--stat", "--hash"])
+        for attempt in range(2):
+            try:
+                result = subprocess.run(cmd, stdin=subprocess.DEVNULL,
+                                        capture_output=True, timeout=45)
+            except subprocess.TimeoutExpired as exc:
+                if attempt:
+                    raise RuntimeError("Cloud object check timed out; refusing overwrite") from exc
+                time.sleep(2)
+                continue
+            if result.returncode == 0:
+                try:
+                    info = json.loads(result.stdout)
+                except ValueError as exc:
+                    raise RuntimeError("Malformed remote cloud object metadata") from exc
+                remote = (info.get("Size"), info.get("Hashes", {}).get("md5"))
+                if remote != expected:
+                    raise RuntimeError("Immutable cloud object collision or corruption")
+                self.known[key] = expected
+                self.reused += 1
+                return
+            message = result.stderr.decode("utf-8", "replace").lower()
+            if not ("directory not found" in message or "object not found" in message):
+                raise RuntimeError("Immutable cloud existence check failed; refusing overwrite")
+            super().put(key, data)
+            self.known[key] = expected  # parent independently verified remote MD5
+            return
+        raise RuntimeError("Cloud object check ended without an authoritative result")
 
 
 class Partition:
