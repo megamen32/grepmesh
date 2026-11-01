@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse, json, os, time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from cloud_index import CloudStore, Reader, ensure_tmpfs, safe_scope, serve, MIB, HOST
+from cloud_index import CloudStore, Reader, ensure_tmpfs, safe_scope, serve, MIB, HOST, compile_bounded_regex
 
 class MultiReader:
     def __init__(self, store, root, scopes, cache_mib=512):
@@ -61,9 +61,39 @@ class MultiReader:
         }
         return self.manifest
 
-    def query(self,query,limit=20,glob=False,case_sensitive=False,roots=None,
-              path_globs=None,deadline_seconds=25,authorized_roots=None):
+    def read_text(self,path,start_line=1,end_line=None,authorized_roots=None,deadline_seconds=25):
+        """Exact historical read. Hash-route the original 8-way archive, never fan out."""
+        if not isinstance(path,str) or not path.startswith('/') or '..' in Path(path).parts:
+            raise ValueError('Absolute historical path required')
         if self.manifest is None:self.refresh()
+        legacy={int(r.scope.rsplit('-',1)[-1]):r for r in self.readers
+                if r.scope.startswith('legacy-server44-') and r.scope.rsplit('-',1)[-1].isdigit()}
+        if len(legacy)==8 and set(legacy)==set(range(8)):
+            import hashlib
+            bucket=hashlib.sha256(path.encode('utf-8')).digest()[0]%8
+            selected=[legacy[bucket]]
+        else:
+            selected=sorted((r for r in self.readers
+                             if path==r.manifest['source_root'] or
+                             path.startswith(r.manifest['source_root'].rstrip('/')+'/')),
+                            key=lambda r:len(r.manifest['source_root']),reverse=True)
+        started=time.monotonic()
+        for reader in selected:
+            remaining=deadline_seconds-(time.monotonic()-started)
+            if remaining<=0:raise TimeoutError('Global historical read deadline')
+            try:
+                return reader.read_text(path,start_line,end_line,
+                                        authorized_roots=authorized_roots,
+                                        deadline_seconds=remaining)
+            except FileNotFoundError:
+                continue
+        raise FileNotFoundError('Historical path is not in searchable cloud scopes')
+
+    def query(self,query,limit=20,glob=False,case_sensitive=False,roots=None,
+              path_globs=None,deadline_seconds=25,authorized_roots=None,regex=False):
+        if self.manifest is None:self.refresh()
+        if regex and compile_bounded_regex(query) is None:
+            raise ValueError('Invalid regular expression: not an empty result')
         limit=max(1,min(int(limit),200))
         selected=[]
         for r in self.readers:
@@ -85,7 +115,7 @@ class MultiReader:
                     query,limit=limit+1,glob=glob,case_sensitive=case_sensitive,
                     roots=None if not roots or any(x in ('local','*',self.scope) for x in roots) else roots,
                     path_globs=path_globs,deadline_seconds=budget,
-                    authorized_roots=authorized_roots)
+                    authorized_roots=authorized_roots,regex=regex)
                 return reader.scope,result
             except Exception as error:
                 return reader.scope,error

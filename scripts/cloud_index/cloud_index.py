@@ -116,6 +116,171 @@ def fts_gram_query(query):
     return ' AND '.join('"' + token.replace('"','""') + '"' for token in tokens[:16])
 
 
+def sre_literal_required(pattern):
+    """A contiguous literal substring required for EVERY match, or None.
+
+    Used only for sound prefiltering: absence of the required literal in a
+    body guarantees the regex cannot match, so skipping that body never loses
+    a result. Returns the longest safe contiguous prefix extracted from the
+    parse tree; optional/ranged/classed elements break the extraction.
+    Anchors like ^ $ \\b are not consumed and end the literal prefix.
+    """
+    try:
+        import sre_parse, sre_constants as sc
+        ast = sre_parse.parse(pattern)
+    except Exception:
+        return None
+    chars = []
+    def walk(seq):
+        nonlocal chars
+        for op, av in seq:
+            if op is sc.LITERAL:
+                chars.append(av); continue
+            if op is sc.MAX_REPEAT:
+                lo, hi, sub = av
+                if lo == hi == 1:
+                    if not walk(sub): return False
+                    continue
+                if lo < 1 or len(sub) != 1 or sub[0][0] is not sc.LITERAL:
+                    return False
+                chars.extend([sub[0][1]] * min(lo, 64)); continue
+            if op is sc.SUBPATTERN:
+                _group, _add, _del, sub = av
+                if not walk(sub): return False
+                continue
+            if op is sc.AT:
+                continue  # anchors assert but do not consume; literal run continues
+            if op in (sc.NOT_LITERAL, sc.ANY, sc.IN, sc.BRANCH,
+                      sc.ASSERT, sc.ASSERT_NOT, sc.CATEGORY,
+                      getattr(sc, 'ATOMIC_GROUP', None),
+                      getattr(sc, 'POSSESSIVE_REPEAT', None)):
+                return False
+            return False
+        return True
+    if not walk(ast):
+        pass  # accumulated contiguous prefix stays; later elements break it
+    literal = ''.join(chr(c) for c in chars[:64])
+    return literal if len(literal) >= 2 else None
+
+
+def compile_bounded_regex(pattern):
+    """Compile once; optional hard-timeout engine for bounded per-call latency.
+
+    (standard re compiled object, hard-bounded compiled object or None).
+    The re object keeps exact re-compatible semantics; the hard object only
+    accelerates interruptibility. Returns None, None for invalid patterns.
+    """
+    try:
+        std = re.compile(pattern)
+    except re.error:
+        return None
+    hard = None
+    try:
+        import regex
+        hard = regex.compile(pattern)
+    except Exception:
+        hard = None
+    return std, hard
+
+
+def regex_can_span_newlines(pattern):
+    """True when the pattern may consume a newline and.match across lines.
+
+    Conservative classification over the parse tree: unknown constructs
+    return True (an extra bounded engine call), so cross-line matching is
+    never silently lost. False positives only cost latency, never results.
+    """
+    try:
+        import sre_parse, sre_constants as sc
+        ast = sre_parse.parse(pattern)
+        flags = re.compile(pattern).flags
+    except Exception:
+        return True
+    repeat_ops=[sc.MAX_REPEAT,sc.MIN_REPEAT]+([sc.POSSESSIVE_REPEAT] if hasattr(sc,'POSSESSIVE_REPEAT') else [])
+    def consumes(seq,flags):
+        for op,av in seq:
+            if op is sc.LITERAL:
+                if av==10:return True
+                continue
+            if op is sc.NOT_LITERAL:
+                return True  # any char except one: newline always admissible
+            if op is sc.ANY:
+                return bool(flags & re.S)
+            if op is sc.IN:
+                for kind,val in av:
+                    if kind is sc.NEGATE:return True
+                    if kind is sc.LITERAL and val==10:return True
+                    if kind is sc.RANGE and val[0]<=10<=val[1]:return True
+                    if kind is sc.CATEGORY and val in (sc.CATEGORY_SPACE,
+                            sc.CATEGORY_NOT_SPACE, sc.CATEGORY_NOT_WORD):return True
+                continue
+            if op in repeat_ops:
+                if consumes(av[2],flags):return True
+                continue
+            if op is getattr(sc,'ATOMIC_GROUP',None):
+                if consumes(av,flags):return True
+                continue
+            if op is sc.SUBPATTERN:
+                _group,add,delet,sub=av
+                if consumes(sub,(flags|add)&~delet):return True
+                continue
+            if op is sc.BRANCH:
+                if any(consumes(sub,flags) for sub in av[1]):return True
+                continue
+            if op in (sc.ASSERT,sc.ASSERT_NOT):
+                if consumes(av[1],flags):return True
+                continue
+            if op is sc.AT:
+                continue
+            if op is sc.GROUPREF:
+                return True
+            return True
+        return False
+    return consumes(ast,flags)
+
+
+def regex_match_positions(compiled, hard, body, deadline_seconds):
+    """First regex match of body as (line_number, column, matched_line_text).
+
+    Per-line scan first (grep parity for ^ $ anchors); if the pattern can
+    match a newline character, also try whole-body string search so (?s)
+    classes and literal \\n are represented honestly. Bounded: each engine
+    call carries the remaining deadline when the hard engine is available;
+    without it, per-line calls stay deadline-checked between lines.
+    Raises TimeoutError when the deadline is exhausted.
+    """
+    def remaining():
+        return deadline_seconds - time.monotonic()
+    if remaining() <= 0:
+        raise TimeoutError('regex deadline')
+    newline_capable = regex_can_span_newlines(compiled.pattern)
+    for number, line in enumerate(body.splitlines(), 1):
+        if remaining() <= 0:
+            raise TimeoutError('regex deadline')
+        m = None
+        if hard is not None:
+            m = hard.search(line, timeout=remaining())
+        else:
+            m = compiled.search(line)
+        if m is not None:
+            return number, m.start(), line
+    if newline_capable is not None:
+        if remaining() <= 0:
+            raise TimeoutError('regex deadline')
+        m = None
+        if hard is not None:
+            m = hard.search(body, timeout=remaining())
+        else:
+            m = compiled.search(body)
+        if m is not None:
+            nl = body.rfind('\n', 0, m.start())
+            line_number = body.count('\n', 0, m.start()) + 1
+            end = body.find('\n', m.start())
+            text = body[nl + 1:end] if end != -1 else body[nl + 1:]
+            return line_number, m.start() - (nl + 1), text
+    return None
+
+
 def bloom_for(texts):
     bits=bytearray(BLOOM_BYTES)
     for text in texts:
@@ -365,9 +530,92 @@ class Reader:
             if n!=part['raw_bytes'] or h.hexdigest()!=ident:raise ValueError('Shard raw checksum mismatch')
             os.replace(temp,path);self.cache[ident]=path;self.used+=n;return path
         finally:temp.unlink(missing_ok=True)
-    def query(self,query,limit=20,glob=False,case_sensitive=False,roots=None,path_globs=None,deadline_seconds=25,authorized_roots=None):
+    def read_text(self,path,start_line=1,end_line=None,authorized_roots=None,deadline_seconds=25):
+        """Read immutable cloud body for an exact historical path, without host filesystem IO.
+
+        A candidate path is authorized before any body shard is downloaded.
+        Historical deleted-file text is deliberately readable from the archive.
+        Missing/corrupt/timeout cases are errors, never authoritative empty text.
+        """
+        if (not isinstance(path,str) or not path.startswith('/') or
+            chr(0) in path or len(path.encode('utf-8'))>4096 or
+            '..' in P(path).parts or os.path.normpath(path)!=path):
+            raise ValueError('A normalized absolute historical path is required')
+        if (not isinstance(start_line,int) or isinstance(start_line,bool) or
+            start_line<1 or start_line>100000000):
+            raise ValueError('Invalid start_line')
+        if end_line is not None and (not isinstance(end_line,int) or
+                isinstance(end_line,bool) or end_line<1 or end_line>100000000):
+            raise ValueError('Invalid end_line')
+        if deadline_seconds<=0 or deadline_seconds>120:
+            raise ValueError('Invalid read deadline')
+        def under(p,root):
+            return p==root or p.startswith(root.rstrip('/')+'/')
+        started=time.monotonic()
+        with self.lock:
+            if not self.manifest:self.refresh()
+            m=self.manifest
+            if not under(path,m['source_root']):
+                raise PermissionError('Path outside admitted source root')
+            if authorized_roots is not None:
+                if (not isinstance(authorized_roots,list) or
+                    not all(isinstance(x,str) and x.startswith('/') and
+                            '..' not in P(x).parts for x in authorized_roots)):
+                    raise PermissionError('Invalid verified filesystem read roots')
+                if not any(under(path,root) for root in authorized_roots):
+                    raise PermissionError('Filesystem ACL denies historical path')
+            candidates=[part for part in m['parts'] if might_match(part['bloom'],path)]
+            for part,downloaded in prefetched_shards(
+                    self.store,candidates,self.cache,started,deadline_seconds,workers=2):
+                if time.monotonic()-started>=deadline_seconds:
+                    raise TimeoutError('Historical cloud read deadline')
+                if isinstance(downloaded,Exception):
+                    raise RuntimeError('Historical cloud shard unavailable') from downloaded
+                shard=self.load(part,packed=downloaded)
+                c=sqlite3.connect('file:'+quote(str(shard))+'?mode=ro&immutable=1',uri=True)
+                c.row_factory=sqlite3.Row
+                try:
+                    row=c.execute('SELECT sha FROM docs WHERE path=?',(path,)).fetchone()
+                    if row is None:continue
+                    payload=c.execute('SELECT compressed FROM bodies WHERE sha=?',
+                                      (row['sha'],)).fetchone()
+                    if payload is None:raise RuntimeError('Historical body missing')
+                    decoder=zlib.decompressobj()
+                    raw=decoder.decompress(payload['compressed'],MAX_DOCUMENT+1)
+                    if (not decoder.eof or len(raw)>MAX_DOCUMENT or
+                            digest(raw)!=row['sha']):
+                        raise RuntimeError('Historical body integrity failure')
+                    body=raw.decode('utf-8')
+                    lines=body.splitlines()
+                    stop=max(start_line,end_line if end_line is not None else len(lines))
+                    selected=[{'line_number':i+1,'text':text}
+                              for i,text in enumerate(lines)
+                              if start_line<=i+1<=stop]
+                    if sum(len(x['text'].encode('utf-8')) for x in selected)>MAX_DOCUMENT:
+                        raise RuntimeError('Historical text range exceeds 1 MiB')
+                    return {'path':path,'source_host':m['source_host'],
+                            'body_sha256':row['sha'],
+                            'start_line':start_line,
+                            'end_line':min(stop,len(lines)) if len(lines)>=start_line else start_line,
+                            'chunks':[{'start_line':start_line,
+                                       'end_line':min(stop,len(lines)) if len(lines)>=start_line else start_line,
+                                       'lines':selected}],
+                            'snapshot_at':m['generated_at']}
+                finally:c.close()
+        raise FileNotFoundError('Historical path is not in the searchable cloud snapshot')
+
+    def query(self,query,limit=20,glob=False,case_sensitive=False,roots=None,path_globs=None,deadline_seconds=25,authorized_roots=None,regex=False):
         if not query or len(query)>2048:raise ValueError('Query must be 1..2048 characters')
         limit=max(1,min(limit,200));hits=[];incomplete=[];started=time.monotonic();reads0=self.store.gets
+        hard=None
+        if regex:
+            compiled=compile_bounded_regex(query)
+            if compiled is None:raise ValueError('Invalid regular expression: not an empty result')
+            std_compiled,hard=compiled
+            # Sound routing/prefilter: a body without the required literal cannot match.
+            gram_source=sre_literal_required(query) or ''
+        else:
+            std_compiled=None;gram_source='' if glob else query
         with self.lock:
             if not self.manifest:self.refresh()
             m=self.manifest
@@ -408,7 +656,7 @@ class Reader:
                     'cloud_fetches':self.store.gets-reads0,
                     'elapsed_ms':round((time.monotonic()-started)*1000,2),
                     'complete_for_policy':m['complete_for_policy']}
-            candidates=[part for part in m['parts'] if glob or might_match(part['bloom'],query)]
+            candidates=[part for part in m['parts'] if glob or might_match(part['bloom'],gram_source.casefold())]
             prefetched=prefetched_shards(self.store,candidates,self.cache,started,deadline_seconds)
             for part,downloaded in prefetched:
                 if time.monotonic()-started>deadline_seconds:incomplete.append('query deadline reached; remaining shards not searched');break
@@ -419,9 +667,9 @@ class Reader:
                     c.row_factory=sqlite3.Row;c.execute('PRAGMA cache_size=-2048');c.execute('PRAGMA temp_store=MEMORY')
                     c.set_progress_handler(lambda: time.monotonic()-started>deadline_seconds,1000)
                     try:
-                        gram_query=fts_gram_query(query) if not glob else ''
+                        gram_query=fts_gram_query(gram_source)
                         if (gram_query and not part.get('expanding_casefold')
-                            and query.casefold()==query.lower()):
+                            and gram_source.casefold()==gram_source.lower()):
                             sql='SELECT d.* FROM terms t JOIN docs d ON d.id=t.rowid WHERE terms MATCH ?'
                             rows=c.execute(sql,(gram_query,))
                         else:rows=c.execute('SELECT * FROM docs')
@@ -438,15 +686,27 @@ class Reader:
                                 blob=c.execute('SELECT compressed FROM bodies WHERE sha=?',(r['sha'],)).fetchone()[0]
                                 dec=zlib.decompressobj();raw=dec.decompress(blob,MAX_DOCUMENT+1)
                                 if not dec.eof or len(raw)>MAX_DOCUMENT or digest(raw)!=r['sha']:raise ValueError('Document checksum mismatch')
-                                body=raw.decode('utf-8');needle=query if case_sensitive else query.casefold()
-                                lines=body.splitlines();matched=None
-                                for number,value in enumerate(lines,1):
-                                    if needle in (value if case_sensitive else value.casefold()):matched=(number,value);break
-                                if matched:line,text=matched
-                                elif needle in (r['path'] if case_sensitive else r['path'].casefold()):line,text=0,'[path match] '+r['path']
-                                elif needle in (body if case_sensitive else body.casefold()):line,text=1,body[:1000]
-                                else:continue
-                            hits.append({'host_id':HOST,'source_host':m['source_host'],'path':r['path'],'line_number':line,'column':0,'context':[],'text':text[:3000],'size':r['size'],'modified_ms':r['mtime_ns']//1000000,'created_ms':None,'body_sha256':r['sha'],'snapshot_at':m['generated_at']})
+                                body=raw.decode('utf-8');line=0;column=0;text=''
+                                if regex:
+                                    found=regex_match_positions(std_compiled,hard,body,time.monotonic()+deadline_seconds)
+                                    if found is None:
+                                        remaining_path=started+deadline_seconds-time.monotonic()
+                                        path_match=(hard.search(r['path'],timeout=remaining_path) if hard is not None and remaining_path>0
+                                                    else std_compiled.search(r['path']) if remaining_path>0 else None)
+                                        if path_match is None:continue
+                                        line,column,text=0,0,'[path match] '+r['path']
+                                    else:
+                                        line,column,text=found
+                                else:
+                                    needle=query if case_sensitive else query.casefold()
+                                    lines=body.splitlines();matched=None
+                                    for number,value in enumerate(lines,1):
+                                        if needle in (value if case_sensitive else value.casefold()):matched=(number,value);break
+                                    if matched:line,column,text=matched[0],0,matched[1]
+                                    elif needle in (r['path'] if case_sensitive else r['path'].casefold()):line,text=0,'[path match] '+r['path']
+                                    elif needle in (body if case_sensitive else body.casefold()):line,text=1,body[:1000]
+                                    else:continue
+                                hits.append({'host_id':HOST,'source_host':m['source_host'],'path':r['path'],'line_number':line,'column':column,'context':[],'text':text[:3000],'size':r['size'],'modified_ms':r['mtime_ns']//1000000,'created_ms':None,'body_sha256':r['sha'],'snapshot_at':m['generated_at']})
                             if len(hits)>=limit+1:break
                     finally:c.close()
                 except Exception as e:incomplete.append(type(e).__name__+': '+str(e)[:180])
@@ -459,14 +719,50 @@ def envelope(args,partial=False,error=None):
     return {'request_id':args.get('request_id') or os.urandom(12).hex(),'origin_host':args.get('origin_host') or HOST,'hop_count':int(args.get('hop_count') or 0),'host_id':HOST,'partial':partial,'truncated':False,'host_status':[{'host_id':HOST,'ok':not partial,'state':'partial' if partial else 'ok','error':error}]}
 
 
+def forwarded_acl_roots(args):
+    """Strictly check delegated metadata; trust requires an authenticated peer.
+
+    This is a transport-bound ACL shape check, NOT cryptographic attestation.
+    Never attach this loopback-only reviewer to an untrusted public route.
+    """
+    hop=int(args.get('hop_count') or 0)
+    if hop==0:
+        if args.get('filesystem_acl') is not None:
+            raise ValueError('Caller-supplied filesystem ACL is not trusted')
+        return None
+    if hop!=1 or not isinstance(args.get('origin_host'),str) or not args['origin_host']:
+        raise PermissionError('Invalid authenticated peer origin')
+    acl=args.get('filesystem_acl')
+    if not isinstance(acl,dict) or acl.get('version')!=1:
+        raise PermissionError('Forwarded text requires a verified GPTAdmin filesystem ACL')
+    if (not isinstance(acl.get('profile_id'),str) or not acl['profile_id'] or
+        not isinstance(acl.get('profile_version'),int) or acl['profile_version']<1 or
+        not isinstance(acl.get('job_id'),str) or not acl['job_id'] or
+        not isinstance(acl.get('target'),str) or not acl['target'] or
+        acl.get('tool')!='mcp_call'):
+        raise PermissionError('Incomplete delegated ACL identity')
+    for field in ('roots_digest','args_sha256'):
+        value=acl.get(field)
+        if not isinstance(value,str) or not re.fullmatch('[0-9a-fA-F]{64}',value):
+            raise PermissionError('Invalid delegated ACL digest')
+    roots=acl.get('read_roots')
+    if (not isinstance(roots,list) or not roots or
+        not all(isinstance(root,str) and root.startswith('/') and
+                '..' not in P(root).parts and os.path.normpath(root)==root
+                for root in roots)):
+        raise PermissionError('No valid delegated read roots')
+    return roots
+
 def tools():
     common={'hosts':{'anyOf':[{'type':'string'},{'type':'array','items':{'type':'string'}}]},'roots':{'type':'array','items':{'type':'string'}},'request_id':{'type':'string'},'origin_host':{'type':'string'},'hop_count':{'type':'integer'},'limit':{'type':'integer'},'max_matches':{'type':'integer'},'mode':{'type':'string'},'path_globs':{'type':'array','items':{'type':'string'}}}
     result=[]
-    for name,desc in [('search','Search text and paths in the declared cloud text corpus.'),('search_text','Native GrepMesh peer alias for literal text search.'),('find_paths','Find paths in the declared cloud text corpus.'),('list_locations','Discover this cloud-backed text corpus.'),('search_status','Cloud coverage and bounded RAM cache status.')]:
+    for name,desc in [('search','Search text and paths in the declared cloud text corpus. Supports literal text and bounded regex; regex latency is bounded and partial coverage is reported honestly when the deadline stops shard scanning.'),('search_text','Native GrepMesh peer alias for literal text search; bounded regex when mode is regex.'),('find_paths','Find paths in the declared cloud text corpus.'),('read_text','Read an exact cloud-snapshot text by path with filesystem ACL.'),('list_locations','Discover this cloud-backed text corpus.'),('search_status','Cloud coverage and bounded RAM cache status.')]:
         props=dict(common)
         if name in ['search','search_text']:props['query']={'type':'string'}
         if name=='find_paths':props.update(query={'type':'string'},pattern={'type':'string'})
-        result.append({'name':name,'description':desc,'inputSchema':{'type':'object','properties':props,'required':['query'] if name in ['search','search_text'] else []},'annotations':{'readOnlyHint':True,'destructiveHint':False}})
+        if name=='read_text':props.update(host={'type':'string'},path={'type':'string'},start_line={'type':'integer','minimum':1},end_line={'type':'integer','minimum':1})
+        required=['host','path'] if name=='read_text' else (['query'] if name in ['search','search_text'] else [])
+        result.append({'name':name,'description':desc,'inputSchema':{'type':'object','properties':props,'required':required},'annotations':{'readOnlyHint':True,'destructiveHint':False}})
     return result
 
 
@@ -495,15 +791,17 @@ def serve(reader,port):
                     elif name=='search_status':
                         local={'host_id':HOST,'root':m['source_root'],'roots':[reader.scope],'backend':'cloud shards / contentless FTS / bounded RAM','file_count':m['documents'],'indexed_files':m['documents'],'index_db_bytes':reader.used,'index_state':'Ready','index_generation':int(m['generated_at']),'index_last_error':None,'index_directory_activity':[]}
                         out={**envelope(args),'local':local,'nodes':[local],'topology':{'freshness':None,'generation':1,'last_refresh_error':None},'persistent_index_bytes':0,'cache_limit_bytes':reader.limit,'cloud_shards':len(m['parts']),'scope':reader.scope,'coverage_policy':m['policy']}
+                    elif name=='read_text':
+                        if args.get('host') not in ('local',HOST):raise ValueError('Wrong cloud read host')
+                        allowed=forwarded_acl_roots(args)
+                        out=reader.read_text(args.get('path'),args.get('start_line',1),args.get('end_line'),authorized_roots=allowed)
+                        out.update(envelope(args))
+                        out['target_host_id']=HOST
                     elif name in ['search','search_text','find_paths']:
-                        if args.get('mode')=='regex':raise ValueError('Regex is not yet supported; not an empty result')
-                        allowed=None
-                        if int(args.get('hop_count') or 0)>0 and name in ['search','search_text']:
-                            acl=args.get('filesystem_acl')
-                            if not isinstance(acl,dict) or acl.get('version')!=1 or not acl.get('profile_id') or not acl.get('read_roots'):raise ValueError('Forwarded text search requires a verified GPTAdmin filesystem ACL')
-                            allowed=acl['read_roots']
-                            if not isinstance(allowed,list) or not all(isinstance(x,str) and P(x).is_absolute() and '..' not in P(x).parts for x in allowed):raise ValueError('Invalid filesystem ACL roots')
-                        out=reader.query(str(args.get('pattern',args.get('query',''))),int(args.get('limit',args.get('max_matches',20))),glob=name=='find_paths',case_sensitive=args.get('mode')=='literal',roots=args.get('roots'),path_globs=args.get('path_globs'),authorized_roots=allowed)
+                        if name=='find_paths' and args.get('mode')=='regex':
+                            raise ValueError('find_paths matches globs only; regex belongs to search')
+                        allowed=forwarded_acl_roots(args) if name in ['search','search_text'] else None
+                        out=reader.query(str(args.get('pattern',args.get('query',''))),int(args.get('limit',args.get('max_matches',20))),glob=name=='find_paths',case_sensitive=args.get('mode')=='literal',roots=args.get('roots'),path_globs=args.get('path_globs'),authorized_roots=allowed,regex=args.get('mode')=='regex')
                         env=envelope(args,out['partial'],'; '.join(out['warnings']) if out['warnings'] else None);env['truncated']=out['truncated'];out.update(env)
                         if name=='find_paths':out['paths']=[{'host':HOST,'path':r['path'],'kind':'file'} for r in out['results']]
                     else:raise ValueError('Unsupported tool')

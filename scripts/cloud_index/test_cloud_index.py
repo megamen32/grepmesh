@@ -2,7 +2,7 @@
 """Deterministic cloud-index correctness tests. Synthetic text only; tmpfs required."""
 import hashlib, importlib.util, io, json, os, pathlib, sqlite3, subprocess, tempfile, time, threading
 from unittest.mock import patch
-from cloud_index import Publisher, Reader, MemoryStore, CloudStore, document, json_bytes, ensure_tmpfs, scan_git, prefetched_shards
+from cloud_index import Publisher, Reader, MemoryStore, CloudStore, document, json_bytes, ensure_tmpfs, scan_git, prefetched_shards, compile_bounded_regex, regex_match_positions, serve
 
 BASE=pathlib.Path('/run/user/1000/grepmesh-cloud-index-tests')
 
@@ -30,6 +30,21 @@ def run():
         r=reader.query('needleONE');ok('literal body retrieval',len(r['results'])==1 and r['results'][0]['line_number']==1 and not r['partial'])
         ok('first query reads cloud',r['cloud_fetches']>0)
         r=reader.query('needleONE');ok('warm query cache hit',r['cloud_fetches']==0)
+        historical=reader.read_text('/fixture/one.md',start_line=1,end_line=2,authorized_roots=['/fixture'])
+        ok('exact historical read without source file',not pathlib.Path('/fixture/one.md').exists() and [x['text'] for x in historical['chunks'][0]['lines']]==['alpha needleONE','second line'])
+        ok('historical read has exact content digest',historical['body_sha256']==hashlib.sha256(docs[0][1].encode()).hexdigest())
+        before_acl_denial=store.gets
+        try:reader.read_text('/fixture/one.md',authorized_roots=['/fixture/two.md'])
+        except PermissionError:ok('historical read respects delegated ACL')
+        else:raise AssertionError('Historical ACL bypass')
+        ok('ACL denied before cloud fetch',store.gets==before_acl_denial)
+        try:reader.read_text('/fixture/../escape.md',authorized_roots=['/fixture'])
+        except ValueError:ok('historical read rejects path traversal')
+        else:raise AssertionError('Historical path traversal')
+
+        try:reader.read_text('/fixture/not-existing.md',authorized_roots=['/fixture'])
+        except FileNotFoundError:ok('missing historical body explicit failure')
+        else:raise AssertionError('Missing historical body falsely completed')
         r=reader.query('строка');ok('Cyrillic text retrieval',len(r['results'])==1 and not r['partial'])
         r=reader.query('alpha needleONE');ok('multi-token exact substring using trigram AND',len(r['results'])==1 and not r['partial'])
         r=reader.query('Кириллица строка');ok('Cyrillic phrase in contentless FTS',len(r['results'])==1 and not r['partial'])
@@ -42,6 +57,62 @@ def run():
         r=fresh.query('*.md',glob=True,limit=20);ok('filename search and case-distinct paths',len(r['results'])==5 and not r['partial'])
         ok('filename glob fetches only compact path index',r['cloud_fetches']==1)
         r=fresh.query('case',case_sensitive=True,limit=20);ok('literal case-sensitive query',len(r['results'])==2)
+        r=fresh.query(r'needle(TWO|ONE)',regex=True,limit=20)
+        ok('regex alternation finds both branch bodies',
+           {x['path'] for x in r['results']}=={'/fixture/two.md','/fixture/one.md'}
+           and all('needle' in x['text'] for x in r['results'])
+           and r['partial']is False and r['results'][0]['column']>0)
+        before_literal_prune=store.gets
+        r=fresh.query(r'ZZZmissing[0-9]*committee',regex=True,limit=20)
+        ok('regex literal routing avoids every cloud shard',not r['results'] and not r['partial'] and store.gets==before_literal_prune)
+        r=fresh.query(r'(?i)CASE UPPER',regex=True,limit=20)
+        ok('regex inline case-insensitive flag',len(r['results'])==1 and r['results'][0]['path']=='/fixture/Case.md')
+        r=fresh.query(r'^case upper',regex=True,limit=20)
+        ok('regex line anchor without multiline matches line start',len(r['results'])==1 and r['results'][0]['column']==0 and r['results'][0]['path']=='/fixture/Case.md')
+        r=fresh.query(r'^upper',regex=True,limit=20)
+        ok('regex line anchor never matches mid-line',not r['results'] and not r['partial'])
+        r=fresh.query(r'owner only',regex=True,limit=20)
+        ok('regex absent pattern returns no hit without error',not r['results'] and not r['partial'])
+        r=reader.query(r'(?i)кириллиц',regex=True,limit=20)
+        ok('regex over unicode body hit',len(r['results'])==1 and not r['partial'])
+        cross=reader.query(r'(?s)needleONE.*?stable',regex=True,limit=20)
+        ok('regex cross-line whole-body scan',len(cross['results'])==1 and cross['results'][0]['line_number']==1)
+        literal_cross=reader.query(r'needleONE\nsecond',regex=True,limit=20)
+        ok('literal newline regex matches across lines',len(literal_cross['results'])==1 and literal_cross['results'][0]['line_number']==1)
+        try:fresh.query('needle(ONE',regex=True,limit=20)
+        except ValueError:ok('invalid regex is an explicit error not an empty success',True)
+        else:raise AssertionError('invalid regex silently empty')
+        r=fresh.query(r'needle[0-9]*ONE',regex=True,limit=20)
+        ok('regex optional class literal prunes to the true hit',len(r['results'])==1 and r['results'][0]['path']=='/fixture/one.md' and not r['partial'])
+        try:
+            t=time.monotonic();std,hard=compile_bounded_regex(r'(?:a+)+b')
+            regex_match_positions(std,hard,'a'*300000+'x',time.monotonic()+0.2)
+            raise AssertionError('catastrophic regex exceeded hard deadline')
+        except TimeoutError:
+            ok('blind backtracking regex bounded under hard deadline',time.monotonic()-t<2.0)
+        socket_=importlib.import_module('socket');urllib=importlib.import_module('urllib.request');urlerr=importlib.import_module('urllib.error')
+        probe=socket_.socket();probe.bind(('127.0.0.1',0));loop_port=probe.getsockname()[1];probe.close()
+        serving=threading.Thread(target=serve,args=(fresh,loop_port),daemon=True);serving.start()
+        ready=False
+        for _ in range(100):
+            try:urllib.urlopen('http://127.0.0.1:%d'%loop_port,timeout=1).read();ready=True;break
+            except urlerr.URLError:time.sleep(0.05)
+        ok('cloud MCP loopback reviewer reachable',ready)
+        def rpc(name,arguments):
+            body={'jsonrpc':'2.0','id':7,'method':'tools/call','params':{'name':name,'arguments':arguments}}
+            out=urllib.urlopen(urllib.Request('http://127.0.0.1:%d'%loop_port,data=json.dumps(body).encode('utf-8'),headers={'Content-Type':'application/json'}),timeout=10).read()
+            return json.loads(out)
+        mcp=rpc('search',{'query':r'needle(TWO|ONE)','mode':'regex','limit':20})
+        inner=json.loads(mcp['result']['content'][0]['text'])
+        ok('regex flows through the MCP envelope',json.loads(mcp['result']['content'][0]['text'])==inner and {x['path'] for x in inner['results']}=={'/fixture/two.md','/fixture/one.md'} and mcp['result']['isError'] is False)
+        mcp=rpc('search',{'query':'needle(ONE','mode':'regex'})
+        ok('invalid regex reaches MCP as an error not results',mcp['result'].get('isError') is True and 'Invalid regular expression' in mcp['result']['content'][0]['text'])
+        mcp=rpc('search',{'query':'needleTWO','mode':'literal'})
+        inner=json.loads(mcp['result']['content'][0]['text'])
+        ok('literal mode unchanged over MCP',len(inner['results'])==1)
+        uio=rpc('find_paths',{'query':'*.md','mode':'regex'})
+        ok('regex on find_paths is already explicit non-empty failure',uio['result'].get('isError') is True and 'find_paths matches globs only' in uio['result']['content'][0]['text'])
+
         r=fresh.query('needleONE',path_globs=['*/two.md']);ok('path restriction before results',not r['results'])
         r=fresh.query('needleONE',authorized_roots=['/fixture/two.md']);ok('forwarded read ACL filters text hits',not r['results'])
         r=fresh.query('needleONE',authorized_roots=[]);ok('empty read ACL never broadens access',not r['results'])
