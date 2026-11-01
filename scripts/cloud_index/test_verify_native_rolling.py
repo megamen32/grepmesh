@@ -107,7 +107,33 @@ def run():
     must_fail(lambda: verify(s,delta))
     s.put(key,json.dumps(dict(child,safe_for_deletion=True)).encode())
     must_fail(lambda: verify(s,delta))
-    print(json.dumps({"passed":True, "checks":14, "all_chunks_replayed":True,
+    # Independent server-44 verifies its own exact source and immutable base.
+    s44, _ = fixture()
+    old_prefix = 'archives/server-100/rolling/'
+    new_prefix = 'archives/server-44/rolling/'
+    remapped = {}
+    for oldkey, raw_value in s44.data.items():
+        newkey = oldkey.replace(old_prefix, new_prefix, 1)
+        if newkey.endswith('/progress.json'):
+            data = json.loads(raw_value)
+            data['source'] = '/home/roomhacker/.cache/grepmesh/server-44-65415a79c0e91f4b.sqlite3'
+            for part in data['chunks']:
+                part['key'] = part['key'].replace(old_prefix, new_prefix, 1)
+            raw_value = json.dumps(data).encode()
+        remapped[newkey] = raw_value
+    s44.data = remapped
+    verified44 = verify(s44, SNAP, host='server-44')
+    assert verified44['host']=='server-44' and verified44['verified_rows']==3
+    must_fail(lambda: verify(s44, SNAP, host='server-100'))
+    must_fail(lambda: verify(s44, SNAP, host='../server-44'))
+    ck44=new_prefix+SNAP+'/progress.json'
+    old44=s44.data[ck44]
+    mismatch=json.loads(old44)
+    mismatch['source']=SOURCE
+    s44.data[ck44]=json.dumps(mismatch).encode()
+    must_fail(lambda: verify(s44, SNAP, host='server-44'))
+    s44.data[ck44]=old44
+    print(json.dumps({"passed":True, "checks":18, "all_chunks_replayed":True,
                       "safe_for_deletion":False}))
 
 

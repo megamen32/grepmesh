@@ -17,7 +17,11 @@ import re
 from cloud_index import CloudStore, digest, json_bytes
 from export_native_rolling import MAX_RECORD
 
-PREFIX = "archives/server-100/rolling"
+# Never accept a caller-selected SQLite path or arbitrary cloud prefix.
+SOURCES = {
+    "server-100": "/home/roomhacker/.cache/grepmesh/server-100-65415a79c0e91f4b.sqlite3",
+    "server-44": "/home/roomhacker/.cache/grepmesh/server-44-65415a79c0e91f4b.sqlite3",
+}
 MAX_CHECKPOINT = 16 * 1024 * 1024
 MAX_PACKED = MAX_RECORD + 1024 * 1024
 
@@ -26,14 +30,16 @@ def fail(message: str):
     raise ValueError(message)
 
 
-def verify(store, snapshot: str, sample_indices=None):
+def verify(store, snapshot: str, sample_indices=None, host='server-100'):
+    if host not in SOURCES:
+        fail('Untrusted source host')
     if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}", snapshot):
         fail("Invalid rolling archive ID")
-    prefix = f"{PREFIX}/{snapshot}"
+    prefix = f"archives/{host}/rolling/{snapshot}"
     state = json.loads(store.get(prefix + "/progress.json", MAX_CHECKPOINT))
     if (state.get("format") != "grepmesh-rolling-text-v1"
         or state.get("snapshot") != snapshot
-        or state.get("source") != "/home/roomhacker/.cache/grepmesh/server-100-65415a79c0e91f4b.sqlite3"):
+        or state.get("source") != SOURCES[host]):
         fail("Unexpected checkpoint identity/source")
     if state.get("consistent_snapshot") is not False or state.get("safe_for_deletion") is not False:
         fail("Provisional checkpoint must categorically deny deletion")
@@ -49,7 +55,7 @@ def verify(store, snapshot: str, sample_indices=None):
             or not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}",parent)
             or state.get("capture_mode") != "provisional_high_rowid_only"):
             fail("Missing or invalid immutable catch-up parent")
-        base = json.loads(store.get(f"{PREFIX}/{parent}/progress.json", MAX_CHECKPOINT))
+        base = json.loads(store.get(f"archives/{host}/rolling/{parent}/progress.json", MAX_CHECKPOINT))
         if (base.get("snapshot")!=parent or base.get("format")!=state["format"]
             or base.get("source")!=state["source"]
             or base.get("upper_rowid")!=lower
@@ -128,6 +134,7 @@ def verify(store, snapshot: str, sample_indices=None):
     return {
         "provisional_checkpoint_verified": True,
         "snapshot": snapshot,
+        "host": host,
         "checkpoint_rows": total_rows,
         "checkpoint_chunks": len(parts),
         "last_rowid": previous,
@@ -149,10 +156,11 @@ def verify(store, snapshot: str, sample_indices=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--snapshot", required=True)
+    ap.add_argument("--host", choices=sorted(SOURCES), default="server-100")
     ap.add_argument("--sample", type=int, action="append", default=None,
                     help="Check specific chunk index; omit to verify all chunks")
     args = ap.parse_args()
-    result = verify(CloudStore(), args.snapshot, args.sample)
+    result = verify(CloudStore(), args.snapshot, args.sample, host=args.host)
     print(json.dumps(result, sort_keys=True))
 
 
