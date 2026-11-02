@@ -756,6 +756,10 @@ def forwarded_acl_roots(args,transport=None):
                 '..' not in P(root).parts and os.path.normpath(root)==root
                 for root in roots)):
         raise PermissionError('No valid delegated read roots')
+    if any(root == '/' or root == '/dev' or root.startswith('/dev/') for root in roots):
+        # Historical source_root='/' never authorizes filesystem read_roots='/'.
+        # Device tree access is forbidden even if a relay signs the payload.
+        raise PermissionError('Unrestricted root or device tree is not a permitted delegated read root')
     return roots
 
 ACL_POLICY_HEADER='X-GrepMesh-Filesystem-Acl'
@@ -765,6 +769,22 @@ ACL_SECRET_ENV='GREPMESH_CLOUD_ACL_SECRET'
 def acl_secret():
     value=os.environ.get(ACL_SECRET_ENV,'').strip()
     return value or None
+
+PRIVATE_REQUIRE_VERIFIED_ACL_ENV='GREPMESH_CLOUD_REQUIRE_VERIFIED_ACL'
+
+def private_acl_required():
+    # Private historical corpora may NEVER serve unsigned local MCP tool calls.
+    # Default off preserves the existing low-risk standalone pilot contract.
+    mode=os.environ.get(PRIVATE_REQUIRE_VERIFIED_ACL_ENV,'0')
+    if mode not in ('0','1'):
+        raise RuntimeError('Invalid private cloud ACL mode')
+    if mode=='1' and (not acl_secret() or len(acl_secret())<32):
+        raise RuntimeError('Private cloud reader requires a strong configured ACL signer')
+    return mode=='1'
+
+def enforce_private_transport_acl(required,method,verified_acl):
+    if required and method=='tools/call' and verified_acl is None:
+        raise PermissionError('Private historical cloud tool call requires a signed filesystem ACL')
 
 def verify_transport_acl(headers,body):
     """Verify a filesystem ACL delivered over an authenticated transport.
@@ -807,6 +827,7 @@ def tools():
 
 
 def serve(reader,port):
+    require_signed_acl=private_acl_required()  # Fail before touching cloud data.
     reader.refresh()
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*args):pass
@@ -822,6 +843,7 @@ def serve(reader,port):
                 # authenticated transport; the tool arguments never carry it.
                 transport_acl=verify_transport_acl(self.headers,raw)
                 req=json.loads(raw);method=req.get('method');par=req.get('params',{})
+                enforce_private_transport_acl(require_signed_acl,method,transport_acl)
                 if method=='initialize':result={'protocolVersion':'2024-11-05','capabilities':{'tools':{}},'serverInfo':{'name':'grepmesh','version':'cloud-index-v1'}}
                 elif method=='notifications/initialized':self.send_response(202);self.end_headers();return
                 elif method=='tools/list':result={'tools':tools()}
