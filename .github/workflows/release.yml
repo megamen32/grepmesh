@@ -64,6 +64,10 @@ jobs:
         with:
           targets: ${{ matrix.rust_target }}
       - uses: Swatinem/rust-cache@v2
+      - name: Repair incomplete sherpa-onnx native cache
+        if: matrix.target != 'macos-x86_64'
+        shell: bash
+        run: python3 scripts/ci-repair-sherpa-cache.py --target "${{ matrix.target }}"
       - name: Focused paired rollout and lossless storage regressions
         if: matrix.target == 'linux-x86_64'
         shell: bash
