@@ -100,14 +100,39 @@ class VerifiedImmutableReuseStore(CloudStore):
             known[key] = (size, md5)
         return known
 
+    def _slow_source_part_get(self, key, limit):
+        """A bounded slower read for large immutable archive parts only.
+
+        CloudStore.get has a 90s deadline, often insufficient for multi-MiB
+        Yandex.Disk reads during transient throttling. The caller checks the
+        complete exact-size/SHA-256 source part before parsing any rows.
+        """
+        import subprocess
+        key = valid_key(key)
+        response = subprocess.run(
+            self.command(["cat", self.prefix + "/" + key, "--head", str(limit + 1)]),
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=240)
+        if response.returncode:
+            raise RuntimeError("Cloud read failed: " + key)
+        if len(response.stdout) > limit:
+            raise ValueError("Cloud object exceeds declared bound")
+        self.gets += 1
+        self.bytes_in += len(response.stdout)
+        return response.stdout
+
     def get(self, key, limit=64 * MIB):
         # All archive parts and immutable manifests are checked by the caller
         # against source SHA-256. A transient remote read error should not
         # discard hours of verified construction progress. Never retry
         # corruption, a forbidden key, a too-large object or a policy failure.
         import subprocess
-        for attempt in range(3):
+        source_part = (key.startswith(PREFIX + "/parts/")
+                       and 0 < limit <= 64 * MIB)
+        attempts = 5 if source_part else 3
+        for attempt in range(attempts):
             try:
+                if source_part and attempt >= 2:
+                    return self._slow_source_part_get(key, limit)
                 return super().get(key, limit)
             except subprocess.TimeoutExpired as exc:
                 failure = exc
@@ -115,8 +140,8 @@ class VerifiedImmutableReuseStore(CloudStore):
                 if not str(exc).startswith("Cloud read failed: "):
                     raise
                 failure = exc
-            if attempt < 2:
-                time.sleep(2 ** attempt)
+            if attempt + 1 < attempts:
+                time.sleep(min(2 ** attempt, 30))
         raise RuntimeError("Immutable cloud source read unavailable after bounded retries") from failure
 
     def put(self, key, data):

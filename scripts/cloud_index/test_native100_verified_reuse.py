@@ -146,6 +146,41 @@ class VerifiedReuseTests(unittest.TestCase):
 
 
 
+    def test_multi_mib_archive_part_switches_to_bounded_slow_read(self):
+        with patch.object(VerifiedImmutableReuseStore, "_load_verified_inventory",
+                          return_value={}):
+            store = VerifiedImmutableReuseStore()
+        from publish_native100_rolling_private import PREFIX
+        key = PREFIX + "/parts/000420-" + "a" * 64 + ".jsonl.gz"
+        exc = subprocess.TimeoutExpired(cmd=["rclone", "cat"], timeout=90)
+        with patch.object(CloudStore, "get", side_effect=[exc, exc]) as fast:
+            with patch.object(store, "command", side_effect=lambda args: args):
+                with patch("subprocess.run", return_value=subprocess.CompletedProcess(
+                        ["cat"], 0, b"archived", b"")) as slow:
+                    with patch("time.sleep"):
+                        self.assertEqual(store.get(key, 8), b"archived")
+        self.assertEqual(fast.call_count, 2)
+        self.assertEqual(slow.call_count, 1)
+        self.assertEqual(slow.call_args.kwargs["timeout"], 240)
+        self.assertEqual(store.bytes_in, len(b"archived"))
+
+    def test_slow_archive_read_rejects_oversize_without_retry(self):
+        with patch.object(VerifiedImmutableReuseStore, "_load_verified_inventory",
+                          return_value={}):
+            store = VerifiedImmutableReuseStore()
+        from publish_native100_rolling_private import PREFIX
+        key = PREFIX + "/parts/000420-" + "a" * 64 + ".jsonl.gz"
+        exc = subprocess.TimeoutExpired(cmd=["rclone", "cat"], timeout=90)
+        with patch.object(CloudStore, "get", side_effect=[exc, exc]):
+            with patch.object(store, "command", side_effect=lambda args: args):
+                with patch("subprocess.run", return_value=subprocess.CompletedProcess(
+                        ["cat"], 0, b"too-long", b"")) as slow:
+                    with patch("time.sleep"):
+                        with self.assertRaisesRegex(ValueError, "declared bound"):
+                            store.get(key, 4)
+        self.assertEqual(slow.call_count, 1)
+        self.assertEqual(store.gets, 0)
+
     def test_post_upload_timeout_reconciles_matching_remote_without_reupload(self):
         with patch.object(VerifiedImmutableReuseStore, "_load_verified_inventory",
                           return_value={}):
