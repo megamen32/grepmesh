@@ -1,0 +1,52 @@
+{
+  "created_at": "2026-11-02T12:12:40+00:00",
+  "details": "Review identified internal chat quotations in an unpublished evidence-only commit for a public repository. The owned unpublished tail was amended to remove the file from publishable history. No push had occurred. Prior runtime/source commits were not rewritten.",
+  "events": [
+    {
+      "action": "register",
+      "actor": "native-board-worker",
+      "at": "2026-11-02T12:12:40+00:00",
+      "changes": {
+        "details": "Review identified internal chat quotations in an unpublished evidence-only commit for a public repository. The owned unpublished tail was amended to remove the file from publishable history. No push had occurred. Prior runtime/source commits were not rewritten.",
+        "source": "independent review of unpublished evidence artifact",
+        "status": "open",
+        "title": "Unpublished proof artifact included private authorization transcript"
+      }
+    },
+    {
+      "action": "resolve",
+      "actor": "native-board-worker",
+      "at": "2026-11-02T12:12:40+00:00",
+      "changes": {
+        "resolution": {
+          "evidence": {
+            "proof_path": "PRIVACY-CHECK.json",
+            "result": "PASS",
+            "sha256": "5e017ce6803da106d59a7e637b4316c1fe156d4dc7587567fbb000dec31a8d70",
+            "test_command": "git log --format= --patch 39db86488ef5553c40627b08825b2f6fb08a971b..2028a94fa54047169ba356deece056260fa2c118; scan private message identifiers and removed authority path; git ls-remote scoped main/task refs"
+          },
+          "kind": "fixed",
+          "reason": "Removed from own unpublished commit itself; no private transcript reaches proposed remote history."
+        },
+        "status": "fixed"
+      }
+    }
+  ],
+  "id": "GM-PROOF-PRIVACY",
+  "owner": "native-board-worker",
+  "reporter": "native-board-worker",
+  "resolution": {
+    "evidence": {
+      "proof_path": "PRIVACY-CHECK.json",
+      "result": "PASS",
+      "sha256": "5e017ce6803da106d59a7e637b4316c1fe156d4dc7587567fbb000dec31a8d70",
+      "test_command": "git log --format= --patch 39db86488ef5553c40627b08825b2f6fb08a971b..2028a94fa54047169ba356deece056260fa2c118; scan private message identifiers and removed authority path; git ls-remote scoped main/task refs"
+    },
+    "kind": "fixed",
+    "reason": "Removed from own unpublished commit itself; no private transcript reaches proposed remote history."
+  },
+  "source": "independent review of unpublished evidence artifact",
+  "status": "fixed",
+  "title": "Unpublished proof artifact included private authorization transcript",
+  "updated_at": "2026-11-02T12:12:40+00:00"
+}

@@ -2,3 +2,5 @@
 {"action": "register", "actor": "native-board-worker", "at": "2026-11-02T12:00:03+00:00", "id": "GM-CANARY-GATEWAY-CONFIG", "sha256": "c6589b0ba11bdf3895f492cd81cc1fcefb96534d7497489193c4bbb9d6aec9b2", "status": "open"}
 {"action": "resolve", "actor": "native-board-worker", "at": "2026-11-02T12:07:58+00:00", "id": "GM-NATIVE100-METADATA-TIMEOUT", "sha256": "f32ccae058fefba6070130e0c8db36d3085ffd91f42ddb4d74ac743f9af2d4d2", "status": "fixed"}
 {"action": "resolve", "actor": "native-board-worker", "at": "2026-11-02T12:07:58+00:00", "id": "GM-CANARY-GATEWAY-CONFIG", "sha256": "5c63c0426b131b978d324693dbbb3a100fcc930e6e09701289bfd7e2537d5ff4", "status": "fixed"}
+{"action": "register", "actor": "native-board-worker", "at": "2026-11-02T12:12:40+00:00", "id": "GM-PROOF-PRIVACY", "sha256": "092dde1147888e1c5b700c7f89f51ee516bb26b7c999f379ac4d5dc5974ae603", "status": "open"}
+{"action": "resolve", "actor": "native-board-worker", "at": "2026-11-02T12:12:40+00:00", "id": "GM-PROOF-PRIVACY", "sha256": "b3742c6e067f970f8b08e4d462d8a7b70b5f84c428743a505547f83e3790f781", "status": "fixed"}
