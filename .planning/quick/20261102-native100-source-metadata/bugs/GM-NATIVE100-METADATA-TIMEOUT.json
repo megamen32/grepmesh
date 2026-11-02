@@ -1,0 +1,52 @@
+{
+  "created_at": "2026-11-02T11:51:31+00:00",
+  "details": "Same builder failed at420/443 after redundant lsjson --stat --hash45s timeout despite verified443-part checkpoint. Preserve exact size/SHA and fail closed on integrity or permission errors.",
+  "events": [
+    {
+      "action": "register",
+      "actor": "native-board-worker",
+      "at": "2026-11-02T11:51:31+00:00",
+      "changes": {
+        "details": "Same builder failed at420/443 after redundant lsjson --stat --hash45s timeout despite verified443-part checkpoint. Preserve exact size/SHA and fail closed on integrity or permission errors.",
+        "source": "builder log2026-11-02T11:27:55Z; card25fd6e97 v10",
+        "status": "open",
+        "title": "Part424 metadata timeout prevents immutable source range recovery"
+      }
+    },
+    {
+      "action": "resolve",
+      "actor": "native-board-worker",
+      "at": "2026-11-02T12:07:58+00:00",
+      "changes": {
+        "resolution": {
+          "evidence": {
+            "proof_path": "grepmesh-native100-source424-metadata-canary-unit-config-20261102.json",
+            "result": "PASS",
+            "sha256": "f364de66b3fd836908b261af95eb7de23ab79a97f419ab3015411ef5aec0da30",
+            "test_command": "GREPMESH_CLOUD_GATEWAY=local GREPMESH_CLOUD_RCLONE=/home/roomhacker/.local/bin/rclone python3 -B /run/user/1000/grepmesh-native100-source424-metadata-canary-unit-config-20261102.py"
+          },
+          "kind": "fixed",
+          "reason": "Source33tests plus independent33+17 review; real part424 exact size/SHA/EOF PASS with actual existing unit config. Prior harness failures retained. Final candidate still pending."
+        },
+        "status": "fixed"
+      }
+    }
+  ],
+  "id": "GM-NATIVE100-METADATA-TIMEOUT",
+  "owner": "native-board-worker",
+  "reporter": "native-board-worker",
+  "resolution": {
+    "evidence": {
+      "proof_path": "grepmesh-native100-source424-metadata-canary-unit-config-20261102.json",
+      "result": "PASS",
+      "sha256": "f364de66b3fd836908b261af95eb7de23ab79a97f419ab3015411ef5aec0da30",
+      "test_command": "GREPMESH_CLOUD_GATEWAY=local GREPMESH_CLOUD_RCLONE=/home/roomhacker/.local/bin/rclone python3 -B /run/user/1000/grepmesh-native100-source424-metadata-canary-unit-config-20261102.py"
+    },
+    "kind": "fixed",
+    "reason": "Source33tests plus independent33+17 review; real part424 exact size/SHA/EOF PASS with actual existing unit config. Prior harness failures retained. Final candidate still pending."
+  },
+  "source": "builder log2026-11-02T11:27:55Z; card25fd6e97 v10",
+  "status": "fixed",
+  "title": "Part424 metadata timeout prevents immutable source range recovery",
+  "updated_at": "2026-11-02T12:07:58+00:00"
+}

@@ -1,1 +1,4 @@
 {"action": "register", "actor": "native-board-worker", "at": "2026-11-02T11:51:31+00:00", "id": "GM-NATIVE100-METADATA-TIMEOUT", "sha256": "ea1d07cf3d9a9ac9585705df5947a371f46c98d4ff9691018a3c4acb044c618f", "status": "open"}
+{"action": "register", "actor": "native-board-worker", "at": "2026-11-02T12:00:03+00:00", "id": "GM-CANARY-GATEWAY-CONFIG", "sha256": "c6589b0ba11bdf3895f492cd81cc1fcefb96534d7497489193c4bbb9d6aec9b2", "status": "open"}
+{"action": "resolve", "actor": "native-board-worker", "at": "2026-11-02T12:07:58+00:00", "id": "GM-NATIVE100-METADATA-TIMEOUT", "sha256": "f32ccae058fefba6070130e0c8db36d3085ffd91f42ddb4d74ac743f9af2d4d2", "status": "fixed"}
+{"action": "resolve", "actor": "native-board-worker", "at": "2026-11-02T12:07:58+00:00", "id": "GM-CANARY-GATEWAY-CONFIG", "sha256": "5c63c0426b131b978d324693dbbb3a100fcc930e6e09701289bfd7e2537d5ff4", "status": "fixed"}

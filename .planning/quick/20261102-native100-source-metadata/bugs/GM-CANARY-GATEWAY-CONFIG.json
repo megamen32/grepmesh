@@ -1,0 +1,52 @@
+{
+  "created_at": "2026-11-02T12:00:03+00:00",
+  "details": "First canary exited before any remote command: GREPMESH_CLOUD_GATEWAY absent. Existing builder nonsecret unit configuration verified local. Corrected canary uses that same configured gateway; no credentials or access changed. Prior failed receipt preserved.",
+  "events": [
+    {
+      "action": "register",
+      "actor": "native-board-worker",
+      "at": "2026-11-02T12:00:03+00:00",
+      "changes": {
+        "details": "First canary exited before any remote command: GREPMESH_CLOUD_GATEWAY absent. Existing builder nonsecret unit configuration verified local. Corrected canary uses that same configured gateway; no credentials or access changed. Prior failed receipt preserved.",
+        "source": "grepmesh-native100-source424-metadata-canary-20261102.json",
+        "status": "open",
+        "title": "Read-only canary lacked existing gateway selector"
+      }
+    },
+    {
+      "action": "resolve",
+      "actor": "native-board-worker",
+      "at": "2026-11-02T12:07:58+00:00",
+      "changes": {
+        "resolution": {
+          "evidence": {
+            "proof_path": "grepmesh-native100-source424-metadata-canary-unit-config-20261102.json",
+            "result": "PASS",
+            "sha256": "f364de66b3fd836908b261af95eb7de23ab79a97f419ab3015411ef5aec0da30",
+            "test_command": "GREPMESH_CLOUD_GATEWAY=local GREPMESH_CLOUD_RCLONE=/home/roomhacker/.local/bin/rclone python3 -B /run/user/1000/grepmesh-native100-source424-metadata-canary-unit-config-20261102.py"
+          },
+          "kind": "fixed",
+          "reason": "Source33tests plus independent33+17 review; real part424 exact size/SHA/EOF PASS with actual existing unit config. Prior harness failures retained. Final candidate still pending."
+        },
+        "status": "fixed"
+      }
+    }
+  ],
+  "id": "GM-CANARY-GATEWAY-CONFIG",
+  "owner": "native-board-worker",
+  "reporter": "native-board-worker",
+  "resolution": {
+    "evidence": {
+      "proof_path": "grepmesh-native100-source424-metadata-canary-unit-config-20261102.json",
+      "result": "PASS",
+      "sha256": "f364de66b3fd836908b261af95eb7de23ab79a97f419ab3015411ef5aec0da30",
+      "test_command": "GREPMESH_CLOUD_GATEWAY=local GREPMESH_CLOUD_RCLONE=/home/roomhacker/.local/bin/rclone python3 -B /run/user/1000/grepmesh-native100-source424-metadata-canary-unit-config-20261102.py"
+    },
+    "kind": "fixed",
+    "reason": "Source33tests plus independent33+17 review; real part424 exact size/SHA/EOF PASS with actual existing unit config. Prior harness failures retained. Final candidate still pending."
+  },
+  "source": "grepmesh-native100-source424-metadata-canary-20261102.json",
+  "status": "fixed",
+  "title": "Read-only canary lacked existing gateway selector",
+  "updated_at": "2026-11-02T12:07:58+00:00"
+}
