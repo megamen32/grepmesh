@@ -1,0 +1,31 @@
+test_part424_metadata_timeout_does_not_block_pinned_range_recovery (test_native100_source_checkpoint.SourceCheckpointRecoveryTests) ... ERROR
+
+======================================================================
+ERROR: test_part424_metadata_timeout_does_not_block_pinned_range_recovery (test_native100_source_checkpoint.SourceCheckpointRecoveryTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/roomhacker/agents-projects/grepmesh-worktrees/native100-source-metadata-20261102/scripts/cloud_index/publish_native100_rolling_private.py", line 122, in _slow_source_part_get
+    stat = subprocess.run(
+  File "/usr/lib/python3.10/unittest/mock.py", line 1114, in __call__
+    return self._mock_call(*args, **kwargs)
+  File "/usr/lib/python3.10/unittest/mock.py", line 1118, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+  File "/usr/lib/python3.10/unittest/mock.py", line 1179, in _execute_mock_call
+    result = effect(*args, **kwargs)
+  File "/home/roomhacker/agents-projects/grepmesh-worktrees/native100-source-metadata-20261102/scripts/cloud_index/test_native100_source_checkpoint.py", line 46, in run
+    raise subprocess.TimeoutExpired(cmd, 45)
+subprocess.TimeoutExpired: Command '['lsjson', 'yadisk:Backups/GrepMesh/cloud-index-v1/archives/server-100/rolling/20261031T233108Z-5732b979/parts/000424-e8e0e469d1b5ef3b9b447be4388c1bfef315224c85094b192ae1b2c23936dc56.jsonl.gz', '--stat', '--hash']' timed out after 45 seconds
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/roomhacker/agents-projects/grepmesh-worktrees/native100-source-metadata-20261102/scripts/cloud_index/test_native100_source_checkpoint.py", line 64, in test_part424_metadata_timeout_does_not_block_pinned_range_recovery
+    self.assertEqual(store._slow_source_part_get(self.key, len(self.body)), self.body)
+  File "/home/roomhacker/agents-projects/grepmesh-worktrees/native100-source-metadata-20261102/scripts/cloud_index/publish_native100_rolling_private.py", line 126, in _slow_source_part_get
+    raise RuntimeError("Immutable source part metadata timed out") from exc
+RuntimeError: Immutable source part metadata timed out
+
+----------------------------------------------------------------------
+Ran 1 test in 0.002s
+
+FAILED (errors=1)

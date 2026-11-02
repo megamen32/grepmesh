@@ -1,0 +1,39 @@
+{"validated": true, "sample_rows": 3, "cold_docs": 1, "invalid_source_pointer_published": false}
+{"archive_snapshot": "20261031T233108Z-5732b979", "cloud_immutable_shards_reused": 0, "consistent_snapshot": false, "elapsed_seconds": 0.0, "event": "provisional_server100_private_search_candidate_published", "historical_source_documents": 4, "indexed_documents": 3, "old_sqlite_deleted": false, "oversize_preserved_in_original_archive_only": 1, "partitions": [{"documents": 0, "manifest": "manifests/rolling100-20261031t233108z-5732b979-00/d1633d03d22777e1cb7492e70972d69aafa5e993d0422fe46928490a3a1694d3.json", "parts": 0, "path_index_sha256": "48f36e89bfc719ddefccc6e5246913572518e247b8eee4161e33c0ee2e2442a7", "scope": "rolling100-20261031t233108z-5732b979-00", "sha256": "d1633d03d22777e1cb7492e70972d69aafa5e993d0422fe46928490a3a1694d3"}, {"documents": 0, "manifest": "manifests/rolling100-20261031t233108z-5732b979-01/441b8f50846814acc8488485d794b2f7b9c29887c829388f71d4d0763c1a3b8b.json", "parts": 0, "path_index_sha256": "48f36e89bfc719ddefccc6e5246913572518e247b8eee4161e33c0ee2e2442a7", "scope": "rolling100-20261031t233108z-5732b979-01", "sha256": "441b8f50846814acc8488485d794b2f7b9c29887c829388f71d4d0763c1a3b8b"}, {"documents": 1, "manifest": "manifests/rolling100-20261031t233108z-5732b979-02/fecde919e41852c05043358fe1917a884885cc217f4278076413ebbce25d3598.json", "parts": 1, "path_index_sha256": "b599bbc0ad11a6b94917d982c177b2841110ae4e79214191cded96bc12eacc4c", "scope": "rolling100-20261031t233108z-5732b979-02", "sha256": "fecde919e41852c05043358fe1917a884885cc217f4278076413ebbce25d3598"}, {"documents": 2, "manifest": "manifests/rolling100-20261031t233108z-5732b979-03/f8beab3822fcc4dd8c3044cb921a1c5bea3cc78332ad4cbed22cf0ee82c8eed1.json", "parts": 1, "path_index_sha256": "fd0ee665a4517ee5d1f1962d7df310d71b48a54a68ac50d2c9a6d41c08812c11", "scope": "rolling100-20261031t233108z-5732b979-03", "sha256": "f8beab3822fcc4dd8c3044cb921a1c5bea3cc78332ad4cbed22cf0ee82c8eed1"}], "production_route_switched": false, "safe_for_deletion": false, "sample_path_sha256": [{"body_sha256": "9ddaaf07bb374945432e2636c0124bf9abd3c780f9d9d13c59c8726c2b274346", "bucket": 2, "path_hash": "1a92f70b7eb134b5bd773b06914747ce937c1d20561d795ed46e24be01b4313c"}, {"body_sha256": "c75dcf306b595dd9cc3062d7abed66d5a9bd1f2221ad9e5a54580631e0674781", "bucket": 3, "path_hash": "83286a067889ba49723ebc3aeca1b5e9fcf6d8d8aa4fceb86d4c27db3ffbd5e6"}], "ssd_reclaimed_bytes": 0, "verified_fs_acl_accepted": false}
+test_duplicate_manifest_key_never_binds (test_native100_source_checkpoint.SourceCheckpointRecoveryTests) ... ok
+test_fast_read_does_not_bypass_pinned_hash (test_native100_source_checkpoint.SourceCheckpointRecoveryTests) ... ok
+test_invalid_manifest_metadata_never_binds (test_native100_source_checkpoint.SourceCheckpointRecoveryTests) ... ok
+test_invalid_receipt_or_changed_checkpoint_never_binds (test_native100_source_checkpoint.SourceCheckpointRecoveryTests) ... ok
+test_part424_metadata_timeout_does_not_block_pinned_range_recovery (test_native100_source_checkpoint.SourceCheckpointRecoveryTests) ... ok
+test_pinned_checkpoint_fast_timeout_uses_verified_ranges (test_native100_source_checkpoint.SourceCheckpointRecoveryTests) ... ok
+test_pinned_recovery_still_rejects_denial_and_missing (test_native100_source_checkpoint.SourceCheckpointRecoveryTests) ... ok
+test_ranges_reject_corrupt_short_and_appended_remote_body (test_native100_source_checkpoint.SourceCheckpointRecoveryTests) ... ok
+test_unbound_key_and_wrong_size_fail_before_any_network (test_native100_source_checkpoint.SourceCheckpointRecoveryTests) ... ok
+test_cloud_errors_not_mistaken_for_absence (test_native100_verified_reuse.VerifiedReuseTests) ... ok
+test_cloud_inventory_parses_only_remote_verified_metadata (test_native100_verified_reuse.VerifiedReuseTests) ... ok
+test_existing_identical_object_skipped_without_write (test_native100_verified_reuse.VerifiedReuseTests) ... ok
+test_inventory_collision_aborts_without_remote_write (test_native100_verified_reuse.VerifiedReuseTests) ... ok
+test_inventory_reuse_without_any_object_probe (test_native100_verified_reuse.VerifiedReuseTests) ... ok
+test_large_archive_recovery_uses_exact_size_and_ranged_reads (test_native100_verified_reuse.VerifiedReuseTests) ... ok
+test_mismatched_remote_refused (test_native100_verified_reuse.VerifiedReuseTests) ... ok
+test_missing_object_uploaded_and_verified (test_native100_verified_reuse.VerifiedReuseTests) ... ok
+test_missing_or_untrusted_cloud_inventory_fails_closed (test_native100_verified_reuse.VerifiedReuseTests) ... ok
+test_post_upload_timeout_fails_closed_on_wrong_remote_md5 (test_native100_verified_reuse.VerifiedReuseTests) ... ok
+test_post_upload_timeout_reconciles_matching_remote_without_reupload (test_native100_verified_reuse.VerifiedReuseTests) ... ok
+test_private_archive_read_corruption_not_retried (test_native100_verified_reuse.VerifiedReuseTests) ... ok
+test_private_archive_read_timeout_fails_closed (test_native100_verified_reuse.VerifiedReuseTests) ... ok
+test_range_chunk_retries_exact_offset_and_preserves_complete_body (test_native100_verified_reuse.VerifiedReuseTests) ... ok
+test_ranged_archive_bounded_timeout_and_denial_fail_closed (test_native100_verified_reuse.VerifiedReuseTests) ... ok
+test_ranged_archive_rejects_bad_metadata_or_hash (test_native100_verified_reuse.VerifiedReuseTests) ... ok
+test_ranged_archive_rejects_short_chunk_without_write (test_native100_verified_reuse.VerifiedReuseTests) ... ok
+test_transient_private_archive_read_retried (test_native100_verified_reuse.VerifiedReuseTests) ... ok
+test_unsafe_object_key_refused_without_remote_call (test_native100_verified_reuse.VerifiedReuseTests) ... ok
+test_archive_corruption_refuses_latest_pointer (test_publish_native100_rolling_private.PrivateRollingTests) ... ok
+test_no_audit_no_write (test_publish_native100_rolling_private.PrivateRollingTests) ... ok
+test_private_index_and_verified_roots (test_publish_native100_rolling_private.PrivateRollingTests) ... ok
+test_untrusted_audit_refuses_everything (test_publish_native100_rolling_private.PrivateRollingTests) ... ok
+
+----------------------------------------------------------------------
+Ran 32 tests in 0.139s
+
+OK

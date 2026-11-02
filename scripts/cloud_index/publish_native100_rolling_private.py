@@ -25,6 +25,7 @@ PARTS = 443
 PARTITIONS = 16
 ROOT = Path("/run/user/1000/grepmesh-native100-private-build")
 AUDIT = Path("/home/roomhacker/.local/state/grepmesh-native100-rolling-coverage-audit.json")
+SOURCE_VERIFICATION = Path("/home/roomhacker/.local/state/grepmesh-native100-rolling-verify-progress.json")
 RECEIPT = Path("/home/roomhacker/.local/state/grepmesh-native100-private-search-candidate.json")
 PROGRESS = Path("/run/user/1000/grepmesh-native100-private-search-build.progress.json")
 POLICY = ("PROVISIONAL archived native FTS history; exact original path and body; "
@@ -58,6 +59,7 @@ class VerifiedImmutableReuseStore(CloudStore):
         self.reused = 0
         self.reused_from_inventory = 0
         self.known = self._load_verified_inventory()
+        self.verified_source_parts = None
 
     def _load_verified_inventory(self):
         import re
@@ -100,15 +102,69 @@ class VerifiedImmutableReuseStore(CloudStore):
             known[key] = (size, md5)
         return known
 
+    def bind_verified_source_checkpoint(self, raw, receipt):
+        """Pin source metadata to the independently completed replay receipt.
+
+        A live metadata request is not needed to rediscover the size/hash of
+        an immutable part already covered by this exact checkpoint digest.
+        Bind atomically, only after the complete checkpoint is validated.
+        """
+        import re
+        if (not isinstance(receipt, dict)
+                or receipt.get("snapshot") != SNAPSHOT
+                or receipt.get("all_chunks_replayed") is not True
+                or type(receipt.get("checkpoint_chunks")) is not int
+                or receipt["checkpoint_chunks"] != PARTS
+                or type(receipt.get("verified_next_index")) is not int
+                or receipt["verified_next_index"] != PARTS
+                or receipt.get("safe_for_deletion") is not False
+                or receipt.get("consistent_snapshot") is not False
+                or digest(raw) != receipt.get("checkpoint_sha256")):
+            raise ValueError("Independent verified source checkpoint mismatch")
+        progress = json.loads(raw)
+        if (not isinstance(progress, dict)
+                or progress.get("finished") is not True
+                or progress.get("safe_for_deletion") is not False
+                or progress.get("consistent_snapshot") is not False
+                or type(progress.get("rows")) is not int
+                or progress["rows"] != ARCHIVED
+                or not isinstance(progress.get("chunks"), list)
+                or len(progress["chunks"]) != PARTS):
+            raise ValueError("Independent verified source checkpoint is incomplete")
+        parts = {}
+        for part in progress["chunks"]:
+            if not isinstance(part, dict):
+                raise ValueError("Invalid pinned source part metadata")
+            key, size, sha = (part.get("key"), part.get("compressed_bytes"),
+                              part.get("sha256"))
+            if (not isinstance(key, str) or not isinstance(sha, str)
+                    or not re.fullmatch(r"[a-f0-9]{64}", sha)
+                    or not re.fullmatch(re.escape(PREFIX) + r"/parts/[0-9]{6}-"
+                                        + re.escape(sha) + r"\.jsonl\.gz", key)
+                    or type(size) is not int or not 0 < size <= 64 * MIB
+                    or key in parts):
+                raise ValueError("Invalid pinned source part metadata")
+            parts[key] = (size, sha)
+        self.verified_source_parts = parts
+        return progress
+
+    def _pinned_source_hash(self, key, limit):
+        if self.verified_source_parts is None:
+            return None
+        metadata = self.verified_source_parts.get(key)
+        if metadata is None or type(limit) is not int or metadata[0] != limit:
+            raise ValueError("Requested object does not match pinned source part")
+        return metadata[1]
+
     def _slow_source_part_get(self, key, limit):
         """Read immutable source parts in bounded HTTP ranges when full cat stalls.
 
         Yandex.Disk's full-object rclone cat can time out after 240 seconds for
         a 12 MiB source part even though 1 MiB ranged requests work. Verify
-        remote declared size/MD5 first, then read non-overlapping byte ranges,
-        validate every response, and accept only the exact reconstructed MD5.
-        The existing caller additionally verifies the part's SHA-256 and row
-        count against the immutable progress.json checkpoint.
+        pinned checkpoint size/SHA first (or remote size/MD5 when unbound).
+        Validate every non-overlapping range; pinned reads request one extra
+        byte on the final range to prove EOF and reject appended content.
+        The caller still verifies source SHA-256 and row accounting.
         No persistent source/scratch writes, ACL changes, or partial returns.
         """
         import re
@@ -118,31 +174,35 @@ class VerifiedImmutableReuseStore(CloudStore):
                 and 0 < limit <= 64 * MIB):
             raise ValueError("Ranged source recovery requires a bounded archive part")
         remote = self.prefix + "/" + key
-        try:
-            stat = subprocess.run(
-                self.command(["lsjson", remote, "--stat", "--hash"]),
-                stdin=subprocess.DEVNULL, capture_output=True, timeout=45)
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError("Immutable source part metadata timed out") from exc
-        if stat.returncode:
-            raise RuntimeError("Immutable source part metadata unavailable")
-        try:
-            info = json.loads(stat.stdout)
-        except ValueError as exc:
-            raise RuntimeError("Malformed immutable source part metadata") from exc
-        if not isinstance(info, dict):
-            raise RuntimeError("Malformed immutable source part metadata")
-        hashes = info.get("Hashes")
-        md5 = hashes.get("md5") if isinstance(hashes, dict) else None
-        if (type(info.get("Size")) is not int or info["Size"] != limit
-                or not isinstance(md5, str)
-                or not re.fullmatch("[a-fA-F0-9]{32}", md5)):
-            raise ValueError("Immutable source part remote size/hash mismatch")
+        sha = self._pinned_source_hash(key, limit)
+        md5 = None
+        if sha is None:
+            try:
+                stat = subprocess.run(
+                    self.command(["lsjson", remote, "--stat", "--hash"]),
+                    stdin=subprocess.DEVNULL, capture_output=True, timeout=45)
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("Immutable source part metadata timed out") from exc
+            if stat.returncode:
+                raise RuntimeError("Immutable source part metadata unavailable")
+            try:
+                info = json.loads(stat.stdout)
+            except ValueError as exc:
+                raise RuntimeError("Malformed immutable source part metadata") from exc
+            if not isinstance(info, dict):
+                raise RuntimeError("Malformed immutable source part metadata")
+            hashes = info.get("Hashes")
+            md5 = hashes.get("md5") if isinstance(hashes, dict) else None
+            if (type(info.get("Size")) is not int or info["Size"] != limit
+                    or not isinstance(md5, str)
+                    or not re.fullmatch("[a-fA-F0-9]{32}", md5)):
+                raise ValueError("Immutable source part remote size/hash mismatch")
 
         deadline = time.monotonic() + 600
         segments = []
         for offset in range(0, limit, MIB):
             amount = min(MIB, limit - offset)
+            read_amount = amount + int(sha is not None and offset + amount == limit)
             for attempt in range(3):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -150,7 +210,7 @@ class VerifiedImmutableReuseStore(CloudStore):
                 try:
                     result = subprocess.run(
                         self.command(["cat", remote, "--offset", str(offset),
-                                      "--count", str(amount)]),
+                                      "--count", str(read_amount)]),
                         stdin=subprocess.DEVNULL, capture_output=True,
                         timeout=min(60, max(1, remaining)))
                 except subprocess.TimeoutExpired:
@@ -171,7 +231,10 @@ class VerifiedImmutableReuseStore(CloudStore):
             else:
                 raise RuntimeError("Immutable source ranged read unavailable after bounded retries")
         body = b"".join(segments)
-        if len(body) != limit or hashlib.md5(body).hexdigest() != md5.lower():
+        if sha is not None:
+            if len(body) != limit or digest(body) != sha:
+                raise ValueError("Immutable source part complete SHA256 mismatch")
+        elif len(body) != limit or hashlib.md5(body).hexdigest() != md5.lower():
             raise ValueError("Immutable source part complete MD5 mismatch")
         self.gets += 1
         self.bytes_in += len(body)
@@ -183,12 +246,16 @@ class VerifiedImmutableReuseStore(CloudStore):
         import subprocess
         source_part = (key.startswith(PREFIX + "/parts/")
                        and 0 < limit <= 64 * MIB)
+        sha = self._pinned_source_hash(key, limit) if source_part else None
         attempts = 3
         for attempt in range(attempts):
             try:
                 if source_part and attempt == 2:
                     return self._slow_source_part_get(key, limit)
-                return super().get(key, limit)
+                body = super().get(key, limit)
+                if sha is not None and (len(body) != limit or digest(body) != sha):
+                    raise ValueError("Immutable source part complete SHA256 mismatch")
+                return body
             except subprocess.TimeoutExpired as exc:
                 failure = exc
             except RuntimeError as exc:
@@ -327,10 +394,12 @@ def run():
             and audit.get("safe_for_deletion") is False
             and audit.get("consistent_snapshot") is False):
         raise RuntimeError("Full independent source audit has not passed")
-    store = (VerifiedImmutableReuseStore()
-             if os.environ.get("GREPMESH_REUSE_VERIFIED_SHARDS") == "1"
-             else CloudStore())
-    progress = json.loads(store.get(PREFIX + "/progress.json", 16 * MIB))
+    reuse = os.environ.get("GREPMESH_REUSE_VERIFIED_SHARDS") == "1"
+    store = VerifiedImmutableReuseStore() if reuse else CloudStore()
+    checkpoint = store.get(PREFIX + "/progress.json", 16 * MIB)
+    progress = (store.bind_verified_source_checkpoint(
+                    checkpoint, json.loads(SOURCE_VERIFICATION.read_text()))
+                if reuse else json.loads(checkpoint))
     if not (progress.get("finished") is True
             and progress.get("safe_for_deletion") is False
             and progress.get("consistent_snapshot") is False

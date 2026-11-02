@@ -108,6 +108,45 @@ class PrivateRollingTests(unittest.TestCase):
             target.run()
         self.assertFalse(self.receipt.exists())
 
+    def test_reuse_run_pins_replayed_manifest_before_building(self):
+        checkpoint_key = target.PREFIX + "/progress.json"
+        checkpoint = json.loads(self.store.get(checkpoint_key))
+        part = checkpoint["chunks"][0]
+        original_key = part["key"]
+        part["key"] = target.PREFIX + "/parts/000000-" + part["sha256"] + ".jsonl.gz"
+        self.store.put(part["key"], self.store.get(original_key))
+        raw = json_bytes(checkpoint)
+        self.store.put(checkpoint_key, raw)
+        verification = self.root / "verified-source.json"
+        verification.write_text(json.dumps({
+            "snapshot": target.SNAPSHOT, "all_chunks_replayed": True,
+            "checkpoint_chunks": 1, "verified_next_index": 1,
+            "checkpoint_sha256": digest(raw), "consistent_snapshot": False,
+            "safe_for_deletion": False,
+        }))
+        with mock.patch.object(target.VerifiedImmutableReuseStore,
+                               "_load_verified_inventory", return_value={}):
+            reuse = target.VerifiedImmutableReuseStore()
+        memory = self.store
+        source_reads = []
+
+        def get(key, limit=64*MIB):
+            if key.startswith(target.PREFIX + "/parts/"):
+                self.assertEqual(reuse.verified_source_parts[key],
+                                 (part["compressed_bytes"], part["sha256"]))
+                source_reads.append(key)
+            return memory.get(key, limit)
+
+        reuse.get = get
+        reuse.put = memory.put
+        with mock.patch.dict("os.environ", {"GREPMESH_REUSE_VERIFIED_SHARDS": "1"}):
+            with mock.patch.object(target, "VerifiedImmutableReuseStore", return_value=reuse):
+                with mock.patch.object(target, "SOURCE_VERIFICATION", verification):
+                    target.run()
+        self.assertEqual(source_reads, [part["key"]])
+        self.assertTrue(self.receipt.exists())
+        self.assertFalse(json.loads(self.receipt.read_text())["safe_for_deletion"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
