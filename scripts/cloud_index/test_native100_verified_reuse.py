@@ -146,39 +146,136 @@ class VerifiedReuseTests(unittest.TestCase):
 
 
 
-    def test_multi_mib_archive_part_switches_to_bounded_slow_read(self):
-        with patch.object(VerifiedImmutableReuseStore, "_load_verified_inventory",
-                          return_value={}):
+    def test_large_archive_recovery_uses_exact_size_and_ranged_reads(self):
+        with patch.object(VerifiedImmutableReuseStore, "_load_verified_inventory", return_value={}):
             store = VerifiedImmutableReuseStore()
         from publish_native100_rolling_private import PREFIX
-        key = PREFIX + "/parts/000420-" + "a" * 64 + ".jsonl.gz"
-        exc = subprocess.TimeoutExpired(cmd=["rclone", "cat"], timeout=90)
-        with patch.object(CloudStore, "get", side_effect=[exc, exc]) as fast:
-            with patch.object(store, "command", side_effect=lambda args: args):
-                with patch("subprocess.run", return_value=subprocess.CompletedProcess(
-                        ["cat"], 0, b"archived", b"")) as slow:
-                    with patch("time.sleep"):
-                        self.assertEqual(store.get(key, 8), b"archived")
-        self.assertEqual(fast.call_count, 2)
-        self.assertEqual(slow.call_count, 1)
-        self.assertEqual(slow.call_args.kwargs["timeout"], 240)
-        self.assertEqual(store.bytes_in, len(b"archived"))
+        key = PREFIX + "/parts/000424-" + "a" * 64 + ".jsonl.gz"
+        blob = b"archived"
+        timed = subprocess.TimeoutExpired(cmd=["rclone", "cat"], timeout=90)
+        metadata = json.dumps({"Size": len(blob), "Hashes": {
+            "md5": hashlib.md5(blob).hexdigest()}}).encode()
+        replies = [
+            subprocess.CompletedProcess(["lsjson"], 0, metadata, b""),
+            subprocess.CompletedProcess(["cat"], 0, blob, b""),
+        ]
 
-    def test_slow_archive_read_rejects_oversize_without_retry(self):
-        with patch.object(VerifiedImmutableReuseStore, "_load_verified_inventory",
-                          return_value={}):
-            store = VerifiedImmutableReuseStore()
-        from publish_native100_rolling_private import PREFIX
-        key = PREFIX + "/parts/000420-" + "a" * 64 + ".jsonl.gz"
-        exc = subprocess.TimeoutExpired(cmd=["rclone", "cat"], timeout=90)
-        with patch.object(CloudStore, "get", side_effect=[exc, exc]):
+        def respond(cmd, **kwargs):
+            return replies.pop(0)
+
+        with patch.object(CloudStore, "get", side_effect=[timed, timed]) as fast:
             with patch.object(store, "command", side_effect=lambda args: args):
-                with patch("subprocess.run", return_value=subprocess.CompletedProcess(
-                        ["cat"], 0, b"too-long", b"")) as slow:
+                with patch("subprocess.run", side_effect=respond) as slow:
                     with patch("time.sleep"):
-                        with self.assertRaisesRegex(ValueError, "declared bound"):
-                            store.get(key, 4)
-        self.assertEqual(slow.call_count, 1)
+                        self.assertEqual(store.get(key, len(blob)), blob)
+        self.assertEqual(fast.call_count, 2)
+        self.assertEqual([call.args[0][0] for call in slow.call_args_list],
+                         ["lsjson", "cat"])
+        self.assertEqual(slow.call_args_list[0].kwargs["timeout"], 45)
+        self.assertLessEqual(slow.call_args_list[1].kwargs["timeout"], 60)
+        self.assertIn("--offset", slow.call_args_list[1].args[0])
+        self.assertIn("--count", slow.call_args_list[1].args[0])
+        self.assertNotIn("--head", slow.call_args_list[1].args[0])
+        self.assertFalse(replies)
+        self.assertEqual(store.gets, 1)
+        self.assertEqual(store.bytes_in, len(blob))
+
+    def test_range_chunk_retries_exact_offset_and_preserves_complete_body(self):
+        from publish_native100_rolling_private import PREFIX, MIB
+        blob = b"X" * MIB + b"Y" * MIB + b"Z" * 31
+        key = PREFIX + "/parts/000424-" + "a" * 64 + ".jsonl.gz"
+        md5 = hashlib.md5(blob).hexdigest()
+        with patch.object(VerifiedImmutableReuseStore, "_load_verified_inventory", return_value={}):
+            store = VerifiedImmutableReuseStore()
+        commands = []
+        flaky = {"once": False}
+
+        def remote(cmd, **kwargs):
+            commands.append(cmd)
+            if cmd[0] == "lsjson":
+                return subprocess.CompletedProcess(cmd, 0,
+                    json.dumps({"Size": len(blob), "Hashes": {"md5": md5}}).encode(), b"")
+            self.assertEqual(cmd[0], "cat")
+            offset = int(cmd[cmd.index("--offset") + 1])
+            count = int(cmd[cmd.index("--count") + 1])
+            self.assertLessEqual(kwargs["timeout"], 60)
+            if offset == MIB and not flaky["once"]:
+                flaky["once"] = True
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=60)
+            return subprocess.CompletedProcess(cmd, 0, blob[offset:offset+count], b"")
+
+        timed = subprocess.TimeoutExpired(["rclone", "cat"], 90)
+        with patch.object(store, "command", side_effect=lambda args: args):
+            with patch.object(CloudStore, "get", side_effect=[timed, timed]):
+                with patch("subprocess.run", side_effect=remote), patch("time.sleep"):
+                    self.assertEqual(store.get(key, len(blob)), blob)
+        self.assertTrue(flaky["once"])
+        self.assertEqual([int(c[c.index("--offset")+1]) for c in commands if c[0] == "cat"],
+                         [0, MIB, MIB, 2*MIB])
+        self.assertEqual(store.bytes_in, len(blob))
+        self.assertEqual(store.gets, 1)
+        self.assertEqual(store.puts, 0)
+
+    def test_ranged_archive_rejects_short_chunk_without_write(self):
+        from publish_native100_rolling_private import PREFIX
+        key = PREFIX + "/parts/000424-" + "a" * 64 + ".jsonl.gz"
+        blob = b"ABCD"
+        with patch.object(VerifiedImmutableReuseStore, "_load_verified_inventory", return_value={}):
+            store = VerifiedImmutableReuseStore()
+        replies = iter([
+            subprocess.CompletedProcess([], 0, self.metadata(blob), b""),
+            subprocess.CompletedProcess([], 0, b"ABC", b"")
+        ])
+        with patch.object(store, "command", side_effect=lambda args: args):
+            with patch("subprocess.run", side_effect=lambda cmd, **kw: next(replies)):
+                with self.assertRaisesRegex(ValueError, "range length mismatch"):
+                    store._slow_source_part_get(key, 4)
+        self.assertEqual(store.gets, 0)
+        self.assertEqual(store.puts, 0)
+
+    def test_ranged_archive_rejects_bad_metadata_or_hash(self):
+        from publish_native100_rolling_private import PREFIX
+        key = PREFIX + "/parts/000424-" + "a" * 64 + ".jsonl.gz"
+        with patch.object(VerifiedImmutableReuseStore, "_load_verified_inventory", return_value={}):
+            store = VerifiedImmutableReuseStore()
+        for info in ({"Size": 3, "Hashes": {"md5": hashlib.md5(b"abc").hexdigest()}},
+                     {"Size": 4, "Hashes": {}}):
+            with self.subTest(info=info):
+                with patch.object(store, "command", side_effect=lambda args: args):
+                    with patch("subprocess.run", return_value=subprocess.CompletedProcess(
+                        [], 0, json.dumps(info).encode(), b"")) as run:
+                        with self.assertRaisesRegex(ValueError, "remote size/hash mismatch"):
+                            store._slow_source_part_get(key, 4)
+                self.assertEqual(run.call_count, 1)
+        with patch.object(store, "command", side_effect=lambda args: args):
+            with patch("subprocess.run", side_effect=[
+                subprocess.CompletedProcess([], 0, self.metadata(b"AAAA"), b""),
+                subprocess.CompletedProcess([], 0, b"BBBB", b""),
+            ]):
+                with self.assertRaisesRegex(ValueError, "complete MD5 mismatch"):
+                    store._slow_source_part_get(key, 4)
+        self.assertEqual(store.gets, 0)
+
+    def test_ranged_archive_bounded_timeout_and_denial_fail_closed(self):
+        from publish_native100_rolling_private import PREFIX
+        key = PREFIX + "/parts/000424-" + "a" * 64 + ".jsonl.gz"
+        with patch.object(VerifiedImmutableReuseStore, "_load_verified_inventory", return_value={}):
+            store = VerifiedImmutableReuseStore()
+        meta = subprocess.CompletedProcess([], 0, self.metadata(b"ABCD"), b"")
+        timed = subprocess.TimeoutExpired(cmd=["rclone", "cat"], timeout=60)
+        with patch.object(store, "command", side_effect=lambda args: args):
+            with patch("subprocess.run", side_effect=[meta, timed, timed, timed]) as call:
+                with patch("time.sleep"):
+                    with self.assertRaisesRegex(RuntimeError, "bounded retries"):
+                        store._slow_source_part_get(key, 4)
+        self.assertEqual(call.call_count, 4)
+        with patch.object(store, "command", side_effect=lambda args: args):
+            with patch("subprocess.run", side_effect=[
+                meta, subprocess.CompletedProcess([], 1, b"", b"HTTP 403 Forbidden")
+            ]) as call:
+                with self.assertRaisesRegex(RuntimeError, "denied or missing"):
+                    store._slow_source_part_get(key, 4)
+        self.assertEqual(call.call_count, 2)
         self.assertEqual(store.gets, 0)
 
     def test_post_upload_timeout_reconciles_matching_remote_without_reupload(self):

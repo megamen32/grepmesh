@@ -101,37 +101,92 @@ class VerifiedImmutableReuseStore(CloudStore):
         return known
 
     def _slow_source_part_get(self, key, limit):
-        """A bounded slower read for large immutable archive parts only.
+        """Read immutable source parts in bounded HTTP ranges when full cat stalls.
 
-        CloudStore.get has a 90s deadline, often insufficient for multi-MiB
-        Yandex.Disk reads during transient throttling. The caller checks the
-        complete exact-size/SHA-256 source part before parsing any rows.
+        Yandex.Disk's full-object rclone cat can time out after 240 seconds for
+        a 12 MiB source part even though 1 MiB ranged requests work. Verify
+        remote declared size/MD5 first, then read non-overlapping byte ranges,
+        validate every response, and accept only the exact reconstructed MD5.
+        The existing caller additionally verifies the part's SHA-256 and row
+        count against the immutable progress.json checkpoint.
+        No persistent source/scratch writes, ACL changes, or partial returns.
         """
+        import re
         import subprocess
         key = valid_key(key)
-        response = subprocess.run(
-            self.command(["cat", self.prefix + "/" + key, "--head", str(limit + 1)]),
-            stdin=subprocess.DEVNULL, capture_output=True, timeout=240)
-        if response.returncode:
-            raise RuntimeError("Cloud read failed: " + key)
-        if len(response.stdout) > limit:
-            raise ValueError("Cloud object exceeds declared bound")
+        if not (key.startswith(PREFIX + "/parts/")
+                and 0 < limit <= 64 * MIB):
+            raise ValueError("Ranged source recovery requires a bounded archive part")
+        remote = self.prefix + "/" + key
+        try:
+            stat = subprocess.run(
+                self.command(["lsjson", remote, "--stat", "--hash"]),
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=45)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("Immutable source part metadata timed out") from exc
+        if stat.returncode:
+            raise RuntimeError("Immutable source part metadata unavailable")
+        try:
+            info = json.loads(stat.stdout)
+        except ValueError as exc:
+            raise RuntimeError("Malformed immutable source part metadata") from exc
+        if not isinstance(info, dict):
+            raise RuntimeError("Malformed immutable source part metadata")
+        hashes = info.get("Hashes")
+        md5 = hashes.get("md5") if isinstance(hashes, dict) else None
+        if (type(info.get("Size")) is not int or info["Size"] != limit
+                or not isinstance(md5, str)
+                or not re.fullmatch("[a-fA-F0-9]{32}", md5)):
+            raise ValueError("Immutable source part remote size/hash mismatch")
+
+        deadline = time.monotonic() + 600
+        segments = []
+        for offset in range(0, limit, MIB):
+            amount = min(MIB, limit - offset)
+            for attempt in range(3):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("Immutable source ranged-read time budget exhausted")
+                try:
+                    result = subprocess.run(
+                        self.command(["cat", remote, "--offset", str(offset),
+                                      "--count", str(amount)]),
+                        stdin=subprocess.DEVNULL, capture_output=True,
+                        timeout=min(60, max(1, remaining)))
+                except subprocess.TimeoutExpired:
+                    result = None
+                if result is not None and result.returncode == 0:
+                    if len(result.stdout) != amount:
+                        raise ValueError("Immutable source part range length mismatch")
+                    segments.append(result.stdout)
+                    break
+                if result is not None:
+                    error = result.stderr.decode("utf-8", "replace").lower()
+                    if any(word in error for word in (
+                            "unauthorized", "permission denied", "forbidden",
+                            "401", "403", "not found", "directory not found")):
+                        raise RuntimeError("Immutable source range denied or missing")
+                if attempt < 2:
+                    time.sleep(min(2 ** attempt, 3))
+            else:
+                raise RuntimeError("Immutable source ranged read unavailable after bounded retries")
+        body = b"".join(segments)
+        if len(body) != limit or hashlib.md5(body).hexdigest() != md5.lower():
+            raise ValueError("Immutable source part complete MD5 mismatch")
         self.gets += 1
-        self.bytes_in += len(response.stdout)
-        return response.stdout
+        self.bytes_in += len(body)
+        return body
 
     def get(self, key, limit=64 * MIB):
-        # All archive parts and immutable manifests are checked by the caller
-        # against source SHA-256. A transient remote read error should not
-        # discard hours of verified construction progress. Never retry
-        # corruption, a forbidden key, a too-large object or a policy failure.
+        # After two bounded fast reads, use single range fallback; never restart
+        # the entire 12 MiB full read three more times or accept partial bytes.
         import subprocess
         source_part = (key.startswith(PREFIX + "/parts/")
                        and 0 < limit <= 64 * MIB)
-        attempts = 5 if source_part else 3
+        attempts = 3
         for attempt in range(attempts):
             try:
-                if source_part and attempt >= 2:
+                if source_part and attempt == 2:
                     return self._slow_source_part_get(key, limit)
                 return super().get(key, limit)
             except subprocess.TimeoutExpired as exc:
@@ -141,7 +196,7 @@ class VerifiedImmutableReuseStore(CloudStore):
                     raise
                 failure = exc
             if attempt + 1 < attempts:
-                time.sleep(min(2 ** attempt, 30))
+                time.sleep(min(2 ** attempt, 3))
         raise RuntimeError("Immutable cloud source read unavailable after bounded retries") from failure
 
     def put(self, key, data):
