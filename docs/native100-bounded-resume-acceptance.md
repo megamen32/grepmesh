@@ -1,0 +1,51 @@
+# Native100 bounded batch resume: isolated source acceptance
+
+Baseline: 05674af96415c2ec350fe254e98bee47d417da83 (parent 094cd648).
+Actual code host: roomhacker-server-100.
+Own worktree: /home/roomhacker/agents-projects/grepmesh-worktrees/native100-bounded-resume-sigkill-20261103.
+This branch neither edits the dirty predecessor worktree nor installs code in any service.
+
+## What changes
+
+The existing publisher gains one opt-in dispatch, GREPMESH_BOUNDED_RESUME_MODE=init|resume, under its ORIGINAL private-build.lock. Default and the prior opt-in v2 flow are unchanged; mixing formats is rejected. Verified source snapshot binding, required source424 cache enforcement for uncommitted parts, the existing CloudStore, principal, cloud destination and all ACL/signing functions remain unchanged.
+
+The v3 builder does NOT retain a corpus-sized Partition.paths list/spool or all shard/Bloom descriptors. It keeps sixteen counters/hashes, bounded document buffers across ALL partitions, ONE small metadata page and small content-addressed references. Metadata pages go directly to the already selected private object store. A source batch remains uncommitted until its original source SHA/length/gzip EOF/row accounting, immutable shard readback, metadata readback, immutable commit readback and private head readback succeed.
+
+Private v3 namespace: private-source-checkpoints/native100/v3/<snapshot>/<exact-source-checkpoint-SHA>/. It is NOT a production scope pointer. All candidate manifests are verified BEFORE ONE private catalog-head.json is published. scopes/*/latest.json, native service names, reader registration and production routes are never changed by v3. Catalog and metadata objects are deterministic/content-addressed, so new-process finalization is idempotent. Orphan immutable objects from an interrupted batch remain intact; no cloud delete exists in this patch.
+
+## Resource bounds
+
+* Original production builder limits are unchanged: MemoryHigh1.5GiB/MemoryMax3GiB, swap0, CPU70%, Tasks64, IOWeight10.
+* Pending document bodies: at most 8 MiB UTF-8 and 512 documents TOTAL across all sixteen partitions. Paths have a 4096-byte bound; each searchable body at most1MiB. These payload bounds are not claims of equal Python RSS.
+* Metadata page: at most256KiB decoded /4096 records; one page retained. At most16384 small page references are admitted. No cumulative metadata file is created in tmpfs.
+* Original source: one SHA-pinned compressed part at a time, <=64MiB; JSONL lines bounded at64MiB before parsing. A larger record fails explicitly without advancing the head, NEVER silently drops text. Real archive compatibility with this admission cap must be measured before rollout; this source test is not that measurement.
+* SQLite: ONE private scratch file, capped at64MiB using max_page_count BEFORE insertion. Shard overflow can split the bounded document buffer; oversized path-index generation fails closed and cannot publish a catalog. There is no spill to SSD. Original maximum500 shards per partition remains enforced.
+* Final manifest: <=16MiB; bounded inventory admission32768 objects, with the inherited CloudStore inventory admission still unchanged. Query transport/network buffers are separate from document payload counters and remain subject to the existing cgroup.
+* After SIGKILL, only an exact reproducible index.sqlite under this module's marked owner-only tmpfs subdirectory can be discarded on the next entry. Unknown files, unsafe inodes, foreign markers, old builder scratch and partial archives are not removed. Workspace scratch returns to its small scope marker at every committed batch.
+
+## Resume and catalog correctness
+
+A fresh process first checks the private head and the full immutable predecessor chain against the pinned source snapshot, exact batch boundaries, limits fingerprint and source-prefix row/last-rowid counts. It streams hash-verified compact metadata to reconstruct logical hashes and confirms committed shards against the existing size/MD5 inventory whose descriptors were SHA-readback-verified at publication. It never fetches original source parts in the committed prefix. Corrupt/torn/missing state, changed inventory, ambiguous absence and concurrent head changes fail closed; there is no fallback to an earlier head or new initialization.
+
+Confirmed batches contain up to ten source parts (last batch may be shorter). An interruption may replay only the uncommitted batch. Immutable partial-batch objects are reconciled by exact content rather than overwritten blindly. A lost head acknowledgement is reconciled by a new process against the actual stored head.
+
+The existing historical420/443 progress is NOT a v3 checkpoint and cannot become one by changing a counter. First real v3 initialization would read from part1; only subsequent confirmed v3 batches become resumable. The source425 transport failure is not magically repaired by this patch.
+
+Final path indexes are generated by streaming cloud metadata, one partition at a time. PRIMARY KEY paths and actual body/path catalog tests detect duplicate/lost records. Finalization currently rescans compact metadata for each partition: this is a bounded-memory/latency tradeoff, NOT a claim of optimized production latency. No source body replay is required for that finalization. Oversized documents remain explicitly accounted as archive-only, as in the prior publisher; this patch does not claim their search/read parity.
+
+## Synthetic acceptance (not production acceptance)
+
+Tests use a private file-backed synthetic object store separated from worker scratch. A parent starts one new Python worker, waits at exact publication barriers, sends actual SIGKILL to ONLY that child PID, verifies returncode=-9, then starts a different PID. It checks exact source read ordinals, every recovered path and full body, immutable-object retention, and catalog identity. Cases: after shard writes, after metadata writes, before head write, after head write/before acknowledgement, after confirmed checkpoint.
+
+Other tests cover torn/corrupt/missing checkpoint objects, cursor/source mismatch, lost write acknowledgement, idempotency, inventory corruption, changed head, SQLite hard quota, unknown/symlink scratch protection, aggregate pending buffers, cross-batch RSS/tmpfs behavior, and the genuine existing publisher entrypoint. A sixty-source-part /thirty-batch scaling fixture distinguishes worker RSS and scratch from the external-cloud simulation directory. Its measurements do not prove real3.2M-row performance or production network behavior.
+
+A synthetic Reader test searches literal/regex text and reads a full body from the generated artifacts, with root filtering and a denied /dev path. It is explicitly NOT a real Hub-signed client test. No fabricated ACL/signature, real secret, real cloud or real archive is used in tests.
+
+## Smallest integration path
+
+1. Review the exact source commit and its test/source SHA receipts; keep all dirty predecessor worktrees unchanged. Do not combine their WIP silently. Keep current unit/drop-ins and rollback receipts untouched.
+2. Separately diagnose the known source425 timeout using only a newly authorized bounded read and existing transport. Do not retry the previously safety-denied partial oversized-archive verification through another route.
+3. After that gate and normal source integration, admit ONE existing-unit private init/resume run under the original lock and cgroup; never a second active builder. Review real source-record/manifest/shard admission limits and peak measurements before public acceptance. This document is not authorization to start it.
+4. Accept a real private catalog with443/443 source parts and exact counts/hashes. Then admit selected immutable segments to the server44 bounded query cache, NOT a complete RAM mirror and not an SSD index.
+5. Keep search/read_text acceptance independent: exact results from100/44, deleted history, oversized75/tail764+47, OCR/STT/regex/live changes; one search with rank=true default and rank=false opt-out, no ranked_search. Real distinct signed-client allow/deny (/dev/null and /), bounded cache incl compressed/decoded/in-flight buffers, actual cold reboot and rollback remain mandatory.
+6. Only then guarded production cutover and disable the existing automation. A source commit or successful synthetic build is not permission to change production pointers, global OAuth or credentials.
