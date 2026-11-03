@@ -1,0 +1,19 @@
+[Unit]
+Description=Isolated GrepMesh historical server44 RAM-only FTS (signed ACL required)
+After=network.target
+ConditionPathExists=/run/user/1000/grepmesh-remote-reader-staged-20261103/store
+ConditionPathExists=/home/roomhacker/.config/grepmesh-private-offload/acl-secret.env
+
+[Service]
+Type=simple
+Environment=GREPMESH_CLOUD_REQUIRE_VERIFIED_ACL=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=/home/roomhacker/.config/grepmesh-private-offload/acl-secret.env
+ExecStart=/usr/bin/python3 -B /run/user/1000/grepmesh-remote-reader-staged-20261103/sealed_offload_reader.py
+Restart=no
+MemoryHigh=1G
+MemoryMax=2G
+MemorySwapMax=0
+TasksMax=64
+Nice=10
+TimeoutStartSec=90

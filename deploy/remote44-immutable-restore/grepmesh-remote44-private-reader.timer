@@ -1,0 +1,12 @@
+[Unit]
+Description=Start private signed GrepMesh RAM reader after immutable restore
+
+[Timer]
+OnBootSec=6min
+OnUnitInactiveSec=30min
+AccuracySec=2min
+Unit=grepmesh-remote44-private-reader.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target
