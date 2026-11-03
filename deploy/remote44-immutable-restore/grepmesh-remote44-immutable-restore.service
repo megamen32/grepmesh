@@ -1,0 +1,23 @@
+[Unit]
+Description=Restore server-44 private GrepMesh immutable RAM mirror after reboot (no production cutover)
+After=network-online.target
+ConditionPathExists=/home/roomhacker/.local/lib/grepmesh-offload/releases/e540528-remote44-20261103/manifest.json
+
+[Service]
+Type=oneshot
+User=roomhacker
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+Environment=GREPMESH_CLOUD_GATEWAY=local
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecCondition=/usr/bin/python3 -B /home/roomhacker/.local/lib/grepmesh-offload/releases/e540528-remote44-20261103/restore_builder_guard.py
+ExecStartPre=/usr/bin/python3 -B /home/roomhacker/.local/lib/grepmesh-offload/releases/e540528-remote44-20261103/stage_remote_sources.py
+ExecStart=/usr/bin/python3 -B /home/roomhacker/.local/lib/grepmesh-offload/releases/e540528-remote44-20261103/restore_immutable_objects.py
+Restart=no
+MemoryHigh=512M
+MemoryMax=1024M
+MemorySwapMax=0
+CPUQuota=100%
+IOWeight=20
+TasksMax=64
+TimeoutStartSec=1800

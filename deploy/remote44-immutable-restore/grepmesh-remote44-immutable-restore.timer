@@ -1,0 +1,12 @@
+[Unit]
+Description=Conditionally restore verified GrepMesh RAM mirror on server-44
+
+[Timer]
+OnBootSec=15min
+OnUnitInactiveSec=1h
+AccuracySec=5min
+Unit=grepmesh-remote44-immutable-restore.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target
