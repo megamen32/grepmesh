@@ -1,10 +1,11 @@
 #!/usr/bin/python3
 """Source-only negative/unit checks. Synthetic policies are never release acceptance."""
 import importlib.util
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-MODULE = "/home/roomhacker/agents-projects/grepmesh-worktrees/remote44-signed-bridge-20261103/scripts/cloud_index/hub_signed_mcp_bridge.py"
+MODULE = Path(__file__).with_name("hub_signed_mcp_bridge.py")
 spec = importlib.util.spec_from_file_location("bridge", MODULE)
 bridge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bridge)
