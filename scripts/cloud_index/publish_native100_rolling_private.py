@@ -82,6 +82,8 @@ class VerifiedImmutableReuseStore(CloudStore):
         if not isinstance(items, list):
             raise RuntimeError("Private cloud object inventory must be an array")
         known = {}
+        first_rows = {}
+        identical_duplicate_rows = 0
         for item in items:
             if not isinstance(item, dict):
                 raise RuntimeError("Malformed cloud inventory entry")
@@ -99,8 +101,17 @@ class VerifiedImmutableReuseStore(CloudStore):
                 raise RuntimeError("Incomplete private cloud object size/MD5 inventory")
             key = "objects/" + name
             if key in known:
-                raise RuntimeError("Duplicate object in cloud inventory")
+                # A repeated listing row is not another immutable object.
+                # Only exact full metadata equality is harmless; mismatched
+                # size/hash/ID/timestamp/extra fields still fail closed.
+                if item != first_rows[key]:
+                    raise RuntimeError("Conflicting duplicate object in cloud inventory")
+                identical_duplicate_rows += 1
+                continue
+            first_rows[key] = item  # bounded references, not a second payload copy
             known[key] = (size, md5)
+        self.inventory_identical_duplicate_rows = identical_duplicate_rows
+        self.inventory_listed_rows = len(items)
         return known
 
     def bind_verified_source_checkpoint(self, raw, receipt):
