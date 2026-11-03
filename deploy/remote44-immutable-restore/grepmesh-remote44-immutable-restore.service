@@ -5,7 +5,8 @@ ConditionPathExists=/home/roomhacker/.local/lib/grepmesh-offload/releases/e54052
 
 [Service]
 Type=oneshot
-User=roomhacker
+# User systemd manager already runs as roomhacker (uid 1000).
+# Do not specify User= here: pre-start group setup failed with 216/GROUP.
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
 Environment=GREPMESH_CLOUD_GATEWAY=local
