@@ -255,13 +255,74 @@ class VerifiedImmutableReuseStore(CloudStore):
         self.bytes_in += len(body)
         return body
 
+    def _read_verified_source_cache(self, key, limit, sha):
+        """Use an existing owner-only tmpfs part iff it matches the pinned snapshot.
+
+        No cache creation, cloud reads, archive mutation or fallback on corrupt
+        bytes. O_NOFOLLOW protects the root, cache directory and part file.
+        """
+        import re
+        import stat
+
+        if not sha or self.verified_source_parts is None:
+            return None
+        if self._pinned_source_hash(key, limit) != sha:
+            raise ValueError("Pinned source cache descriptor mismatch")
+        name = key.rsplit("/", 1)[-1]
+        if not re.fullmatch(r"[0-9]{6}-" + re.escape(sha) + r"\.jsonl\.gz", name):
+            raise ValueError("Invalid pinned source cache filename")
+        dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        root_fd = cache_fd = part_fd = None
+        try:
+            root_fd = os.open(ROOT, dir_flags)
+            cache_fd = os.open("verified-source-cache", dir_flags, dir_fd=root_fd)
+            for handle in (root_fd, cache_fd):
+                meta = os.fstat(handle)
+                if (not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid()
+                        or meta.st_dev != os.stat("/run/user/1000").st_dev
+                        or stat.S_IMODE(meta.st_mode) & 0o077):
+                    raise PermissionError("Unsafe pinned source cache directory")
+            part_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                              dir_fd=cache_fd)
+            meta = os.fstat(part_fd)
+            if (not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid()
+                    or meta.st_dev != os.stat("/run/user/1000").st_dev
+                    or meta.st_nlink != 1 or stat.S_IMODE(meta.st_mode) & 0o077):
+                raise PermissionError("Unsafe pinned source cache part")
+            if meta.st_size != limit:
+                raise ValueError("Pinned source cache size mismatch")
+            with os.fdopen(part_fd, "rb") as handle:
+                part_fd = None
+                data = handle.read(limit + 1)
+            if len(data) != limit or digest(data) != sha:
+                raise ValueError("Pinned source cache SHA256 mismatch")
+        except FileNotFoundError:
+            return None
+        finally:
+            for handle in (part_fd, cache_fd, root_fd):
+                if handle is not None:
+                    os.close(handle)
+        self.gets += 1
+        self.bytes_in += len(data)
+        return data
+
     def get(self, key, limit=64 * MIB):
         # After two bounded fast reads, use single range fallback; never restart
         # the entire 12 MiB full read three more times or accept partial bytes.
         import subprocess
+        import re
         source_part = (key.startswith(PREFIX + "/parts/")
                        and 0 < limit <= 64 * MIB)
         sha = self._pinned_source_hash(key, limit) if source_part else None
+        if source_part:
+            cached = self._read_verified_source_cache(key, limit, sha)
+            if cached is not None:
+                return cached
+            required = os.environ.get("GREPMESH_REQUIRE_CACHED_SOURCE_PART", "")
+            if required and not re.fullmatch(r"[0-9]{6}", required):
+                raise RuntimeError("Invalid required source cache ordinal")
+            if required and key.rsplit("/", 1)[-1].startswith(required + "-"):
+                raise RuntimeError("Required verified source cache missing; no cloud retry")
         attempts = 3
         for attempt in range(attempts):
             try:
@@ -355,12 +416,97 @@ class VerifiedImmutableReuseStore(CloudStore):
         raise RuntimeError("Cloud object check ended without an authoritative result")
 
 
+class PathMetadataSpool:
+    """Ordered path metadata in compressed owner-only tmpfs, not Python tuples.
+
+    No source text or extra search index is created. The original path-index
+    schema, order, SHA256 and row count are preserved. Iteration validates the
+    entire private spool before the caller may commit or publish the index.
+    """
+    MAX_LINE = 65536
+
+    def __init__(self, index, root):
+        import stat
+        root = Path(root)
+        st = root.lstat()
+        runtime = Path('/run/user') / str(os.getuid())
+        if (not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid()
+                or st.st_mode & 0o077 or st.st_dev != runtime.stat().st_dev):
+            raise RuntimeError('Path metadata must stay in owner-only tmpfs')
+        self.path = root / ('path-metadata-%02d-%s.jsonl.gz' % (index, os.urandom(8).hex()))
+        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        self._file = os.fdopen(fd, 'wb')
+        self._gzip = gzip.GzipFile(fileobj=self._file, mode='wb', compresslevel=1, mtime=0)
+        self._count = 0
+        self._logical = hashlib.sha256()
+        self._closed = False
+        self._device = st.st_dev
+
+    @staticmethod
+    def _validate(row):
+        import re
+        if (not isinstance(row, (tuple, list)) or len(row) != 4
+                or not isinstance(row[0], str) or not row[0].startswith('/')
+                or '\x00' in row[0] or '..' in Path(row[0]).parts
+                or type(row[1]) is not int or type(row[2]) is not int
+                or row[1] < 0 or row[2] < 0
+                or not isinstance(row[3], str) or not re.fullmatch('[0-9a-f]{64}', row[3])):
+            raise ValueError('Invalid private path metadata row')
+
+    def append(self, row):
+        if self._closed:
+            raise RuntimeError('Path metadata spool already sealed')
+        self._validate(row)
+        data = json_bytes(row) + b'\n'
+        if len(data) > self.MAX_LINE:
+            raise ValueError('Path metadata row exceeds bound')
+        self._gzip.write(data)
+        self._logical.update(data)
+        self._count += 1
+
+    def close(self):
+        if not self._closed:
+            self._gzip.close()
+            self._file.close()
+            self._closed = True
+
+    def __len__(self):
+        return self._count
+
+    def __iter__(self):
+        import stat
+        self.close()
+        fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as f:
+            st = os.fstat(f.fileno())
+            if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid()
+                    or st.st_nlink != 1 or st.st_mode & 0o077
+                    or st.st_dev != self._device):
+                raise RuntimeError('Unsafe path metadata spool')
+            logical = hashlib.sha256()
+            count = 0
+            with gzip.GzipFile(fileobj=f, mode='rb') as stream:
+                while True:
+                    data = stream.readline(self.MAX_LINE + 1)
+                    if not data:
+                        break
+                    if len(data) > self.MAX_LINE or not data.endswith(b'\n'):
+                        raise ValueError('Path metadata frame exceeds bound')
+                    row = json.loads(data)
+                    self._validate(row)
+                    logical.update(data)
+                    count += 1
+                    yield tuple(row)
+            if count != self._count or logical.digest() != self._logical.digest():
+                raise RuntimeError('Path metadata count or checksum mismatch')
+
+
 class Partition:
     def __init__(self, index, pub):
         self.index = index
         self.publisher = pub
         self.scope = "rolling100-20261031t233108z-5732b979-%02d" % index
-        self.paths = []
+        self.paths = PathMetadataSpool(index, ROOT)
         self.parts = []
         self.docs = []
         self.pending_bytes = 0
@@ -385,6 +531,27 @@ class Partition:
             raise RuntimeError("Shard count overflow; keep unexposed, use more partitions")
         self.docs = []
         self.pending_bytes = 0
+
+
+def preflight_required_source_cache(store, progress):
+    """Check the exact pinned part before replaying earlier archive chunks."""
+    import re
+    required = os.environ.get("GREPMESH_REQUIRE_CACHED_SOURCE_PART", "")
+    if not required:
+        return
+    if not re.fullmatch(r"[0-9]{6}", required):
+        raise ValueError("Invalid required immutable source part ordinal")
+    if not isinstance(store, VerifiedImmutableReuseStore):
+        raise RuntimeError("Required source cache needs verified immutable reuse")
+    matches = [part for part in progress["chunks"]
+               if part["key"].rsplit("/", 1)[-1].startswith(required + "-")]
+    if len(matches) != 1:
+        raise RuntimeError("Required source part is not unique in pinned snapshot")
+    part = matches[0]
+    cached = store._read_verified_source_cache(
+        part["key"], part["compressed_bytes"], part["sha256"])
+    if cached is None:
+        raise RuntimeError("Required verified source cache missing before replay")
 
 
 def run():
@@ -421,6 +588,7 @@ def run():
             and progress.get("rows") == ARCHIVED
             and len(progress["chunks"]) == PARTS):
         raise RuntimeError("Provisional cloud source checkpoint was changed")
+    preflight_required_source_cache(store, progress)
     started = time.monotonic()
     publisher = Publisher(store, ROOT, shard_text_bytes=TARGET_BYTES)
     partitions = [Partition(i, publisher) for i in range(PARTITIONS)]
