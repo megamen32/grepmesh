@@ -1,0 +1,18 @@
+[Unit]
+Description=Private SSH-only loopback tunnel for GrepMesh server44 RAM FTS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -N -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=8 -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o NumberOfPasswordPrompts=0 -L 127.0.0.1:19441:127.0.0.1:19440 roomhacker@192.168.2.5
+Restart=on-failure
+RestartSec=15
+MemoryHigh=96M
+MemoryMax=160M
+MemorySwapMax=0
+TasksMax=16
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target
