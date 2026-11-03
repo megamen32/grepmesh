@@ -181,6 +181,82 @@ def _native_tool_call(name, args, meta=None):
     return _rpc(NATIVE_URL, "tools/call", params)
 
 
+# Both rank modes request the same bounded, ACL-filtered candidate set.
+# Ranking reads returned snippets only: no index, filesystem or extra RPC.
+SEARCH_CANDIDATE_LIMIT = 200
+
+
+def _search_plan(args):
+    rank = args.get('rank', True)
+    if type(rank) is not bool:
+        raise ValueError('rank must be boolean')
+    query = args.get('query')
+    if not isinstance(query, str) or not query or len(query) > 2048:
+        raise ValueError('Query must be 1..2048 characters')
+    requested = args.get('max_matches', args.get('limit', 20))
+    if type(requested) is not int:
+        raise ValueError('Search limit must be integer')
+    return rank, max(1, min(requested, SEARCH_CANDIDATE_LIMIT))
+
+
+def _snippet_score(hit, terms):
+    if not terms:
+        return 0.0
+    context = hit.get('context') or []
+    body = ('\n'.join(line.get('text', '') for line in context)
+            if context else hit.get('text', ''))[:65536].casefold()
+    path = Path(hit['path'])
+    name = (path.parent.name + ' ' + path.name).casefold()
+    body_coverage = sum(term in body for term in terms) / len(terms)
+    path_coverage = sum(term in name for term in terms) / len(terms)
+    definition = bool(re.search(
+        r'(?m)^\s*(?:(?:pub(?:\([^)]*\))?|async|export)\s+)*(?:def|fn|class|function|struct|enum|interface)\s', body))
+    heading = any(line.lstrip().startswith('#') and
+                  any(term in line for term in terms) for line in body.splitlines())
+    return round(min(100.0, 75 * body_coverage + 10 * path_coverage
+                     + 10 * heading + 5 * (definition and body_coverage > 0)), 6)
+
+
+def _rank_authorized_payload(payload, args, rank, requested):
+    results = payload.get('results')
+    if not isinstance(results, list) or len(results) > SEARCH_CANDIDATE_LIMIT:
+        raise RuntimeError('Invalid bounded historical candidate set')
+    for hit in results:
+        if (not isinstance(hit, dict) or not isinstance(hit.get('path'), str)
+                or not isinstance(hit.get('text', ''), str)
+                or type(hit.get('line_number', 0)) is not int
+                or hit.get('line_number', 0) < 0
+                or not isinstance(hit.get('source_host', hit.get('host_id', '')), str)):
+            raise RuntimeError('Malformed historical search hit')
+        context = hit.get('context') or []
+        if (not isinstance(context, list) or any(not isinstance(line, dict)
+                or not isinstance(line.get('text', ''), str) for line in context)):
+            raise RuntimeError('Malformed historical search context')
+    out = copy.deepcopy(payload)
+    candidates = out['results']
+    # Terms affect ordering ONLY. Regex, Unicode, OCR/STT and deleted hits
+    # remain in the candidate set even when their score is zero.
+    terms = list(dict.fromkeys(re.findall(r'[^\W_]+', args['query'].casefold())))[:32]
+    if rank:
+        for hit in candidates:
+            hit['score'] = _snippet_score(hit, terms)
+        candidates.sort(key=lambda hit: (-hit['score'],
+            hit.get('source_host', hit.get('host_id', '')),
+            hit['path'], hit.get('line_number', 0)))
+    else:
+        for hit in candidates:
+            hit.pop('score', None)
+    count = len(candidates)
+    out['results'] = candidates[:requested]
+    out['truncated'] = bool(payload.get('truncated')) or count > requested
+    out['ranking'] = {'enabled': rank, 'candidate_count': count,
+        'candidate_limit': SEARCH_CANDIDATE_LIMIT,
+        'scope': 'authorized_returned_snippets', 'before_top_k': True,
+        'candidate_scan_complete': not bool(payload.get('partial') or
+            payload.get('truncated')) and count < SEARCH_CANDIDATE_LIMIT}
+    return out
+
+
 def call(name, args, meta):
     if not isinstance(args, dict):
         raise ValueError("Arguments must be an object")
@@ -199,7 +275,13 @@ def call(name, args, meta):
     if target == "native":
         return _native_tool_call(name, args, meta)
     acl = _require_acl(meta)
-    result = _remote_signed_call(name, args, acl)
+    remote_args = args
+    if name == 'search':
+        rank, requested = _search_plan(args)
+        remote_args = copy.deepcopy(args)
+        remote_args['limit'] = SEARCH_CANDIDATE_LIMIT
+        remote_args['max_matches'] = SEARCH_CANDIDATE_LIMIT
+    result = _remote_signed_call(name, remote_args, acl)
     if result.get("isError"):
         return result
     # Historical snapshot has deliberately unaccepted live deltas.
@@ -208,6 +290,8 @@ def call(name, args, meta):
     try:
         payload = json.loads(text)
         if isinstance(payload, dict):
+            if name == 'search':
+                payload = _rank_authorized_payload(payload, args, rank, requested)
             payload["partial"] = True
             warnings = payload.get("warnings")
             if isinstance(warnings, list):
