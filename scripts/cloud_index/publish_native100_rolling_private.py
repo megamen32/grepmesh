@@ -200,13 +200,21 @@ class VerifiedImmutableReuseStore(CloudStore):
 
         deadline = time.monotonic() + 600
         segments = []
+        # Retain only a validated part ordinal and fixed failure categories:
+        # raw stderr may contain source names, credentials, or bearer headers.
+        part_ordinal = key.rsplit("/", 1)[-1].split("-", 1)[0]
+        if not re.fullmatch(r"[0-9]{6}", part_ordinal):
+            part_ordinal = "unknown"
         for offset in range(0, limit, MIB):
             amount = min(MIB, limit - offset)
             read_amount = amount + int(sha is not None and offset + amount == limit)
+            last_failure = "unknown"
             for attempt in range(3):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise RuntimeError("Immutable source ranged-read time budget exhausted")
+                    raise RuntimeError(
+                        "Immutable source ranged-read time budget exhausted "
+                        f"(part={part_ordinal}, offset={offset})")
                 try:
                     result = subprocess.run(
                         self.command(["cat", remote, "--offset", str(offset),
@@ -215,6 +223,7 @@ class VerifiedImmutableReuseStore(CloudStore):
                         timeout=min(60, max(1, remaining)))
                 except subprocess.TimeoutExpired:
                     result = None
+                    last_failure = "timeout"
                 if result is not None and result.returncode == 0:
                     if len(result.stdout) != amount:
                         raise ValueError("Immutable source part range length mismatch")
@@ -226,10 +235,16 @@ class VerifiedImmutableReuseStore(CloudStore):
                             "unauthorized", "permission denied", "forbidden",
                             "401", "403", "not found", "directory not found")):
                         raise RuntimeError("Immutable source range denied or missing")
+                    last_failure = ("rate_limited" if any(
+                        word in error for word in ("429", "too many requests",
+                                                   "rate limit"))
+                        else f"exit_{result.returncode}")
                 if attempt < 2:
                     time.sleep(min(2 ** attempt, 3))
             else:
-                raise RuntimeError("Immutable source ranged read unavailable after bounded retries")
+                raise RuntimeError(
+                    "Immutable source ranged read unavailable after bounded retries "
+                    f"(part={part_ordinal}, offset={offset}, last_failure={last_failure})")
         body = b"".join(segments)
         if sha is not None:
             if len(body) != limit or digest(body) != sha:

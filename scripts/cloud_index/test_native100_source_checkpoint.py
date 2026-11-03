@@ -109,6 +109,37 @@ class SourceCheckpointRecoveryTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             self.assertEqual(store.gets, 0)
 
+    def test_pinned_range_timeout_reports_safe_part_offset_without_stderr(self):
+        store = self.store()
+        self.bind(store)
+        timed = subprocess.TimeoutExpired(["remote", "cat"], 60)
+        with patch.object(store, "command", side_effect=lambda args: args):
+            with patch("subprocess.run", side_effect=[timed, timed, timed]) as run:
+                with patch("time.sleep"):
+                    with self.assertRaises(RuntimeError) as caught:
+                        store._slow_source_part_get(self.key, len(self.body))
+        self.assertIn("bounded retries", str(caught.exception))
+        self.assertIn("part=000424, offset=0, last_failure=timeout",
+                      str(caught.exception))
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(store.puts, 0)
+
+    def test_pinned_range_rate_limit_reports_category_not_raw_stderr(self):
+        store = self.store()
+        self.bind(store)
+        marker = b"HTTP 429 bearer=hypothetical-secret-canary"
+        failed = subprocess.CompletedProcess([], 23, b"", marker)
+        with patch.object(store, "command", side_effect=lambda args: args):
+            with patch("subprocess.run", return_value=failed) as run:
+                with patch("time.sleep"):
+                    with self.assertRaises(RuntimeError) as caught:
+                        store._slow_source_part_get(self.key, len(self.body))
+        self.assertIn("part=000424, offset=0, last_failure=rate_limited",
+                      str(caught.exception))
+        self.assertNotIn("hypothetical-secret-canary", str(caught.exception))
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(store.puts, 0)
+
     def test_invalid_receipt_or_changed_checkpoint_never_binds(self):
         raw, receipt = self.checkpoint()
         changes = [{"checkpoint_sha256": "0"*64}, {"snapshot": "other"},
