@@ -168,8 +168,17 @@ def _host_selection(args):
     return "native"
 
 
-def _native_tool_call(name, args):
-    return _rpc(NATIVE_URL, "tools/call", {"name": name, "arguments": args})
+def _native_tool_call(name, args, meta=None):
+    # The native Rust reader enforces delegated read_roots only when it
+    # receives MCP params._meta.  Dropping this while proxying would bypass
+    # the Hub's read scope on local reads (notably the /dev prohibition).
+    params = {"name": name, "arguments": args}
+    if meta is not None:
+        if name not in READ_TOOLS:
+            raise PermissionError("Delegated ACL cannot call non-read GrepMesh tools")
+        _require_acl(meta)
+        params["_meta"] = copy.deepcopy(meta)
+    return _rpc(NATIVE_URL, "tools/call", params)
 
 
 def call(name, args, meta):
@@ -180,13 +189,15 @@ def call(name, args, meta):
     if name in ("ranked_search", "search_text"):
         raise ValueError("Removed tool")
     if name not in READ_TOOLS:
+        if meta is not None:
+            raise PermissionError("Delegated ACL cannot call non-read GrepMesh tools")
         return _native_tool_call(name, args)
     target = _host_selection(args) if name == "search" else (
         "historical44" if args.get("host") == "server-44" else "native")
     if target == "mixed":
         return failure("Full mixed-host RAM FTS is not live-safe; historical parity pending")
     if target == "native":
-        return _native_tool_call(name, args)
+        return _native_tool_call(name, args, meta)
     acl = _require_acl(meta)
     result = _remote_signed_call(name, args, acl)
     if result.get("isError"):

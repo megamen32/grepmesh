@@ -59,6 +59,34 @@ class BridgeUnitTest(unittest.TestCase):
         self.assertFalse(result["isError"])
         local.assert_called_once()
 
+    def test_native_delegated_read_keeps_verified_meta(self):
+        meta={"io.gptadmin/filesystem-acl":synthetic_policy()}
+        params={"host":"local","path":"/home/example"}
+        with patch.object(bridge,"_rpc",return_value={"isError":False}) as rpc:
+            result=bridge.call("read_text",params,meta)
+        self.assertFalse(result["isError"])
+        rpc.assert_called_once_with(bridge.NATIVE_URL,"tools/call",
+                                    {"name":"read_text","arguments":params,"_meta":meta})
+
+    def test_native_delegated_search_keeps_verified_meta(self):
+        meta={"io.gptadmin/filesystem-acl":synthetic_policy()}
+        with patch.object(bridge,"_rpc",return_value={"isError":False}) as rpc:
+            bridge.call("search",{"query":"needle","hosts":["local"]},meta)
+        self.assertIn("_meta",rpc.call_args.args[2])
+
+    def test_acl_cannot_be_dropped_for_non_read_tool(self):
+        meta={"io.gptadmin/filesystem-acl":synthetic_policy()}
+        with patch.object(bridge,"_rpc",side_effect=AssertionError("ACL bypass")):
+            with self.assertRaises(PermissionError):
+                bridge.call("find_paths",{"pattern":"*.txt"},meta)
+
+    def test_invalid_delegated_meta_is_never_forwarded_native(self):
+        bad={"io.gptadmin/filesystem-acl":synthetic_policy()}
+        bad["io.gptadmin/filesystem-acl"]["read_roots"]=["/dev"]
+        with patch.object(bridge,"_rpc",side_effect=AssertionError("ACL bypass")):
+            with self.assertRaises(PermissionError):
+                bridge.call("read_text",{"host":"local","path":"/dev/null"},bad)
+
     def test_mixed_host_not_deployed(self):
         d=bridge.call("search",{"query":"needle","hosts":["local","server-44"]},None)
         self.assertTrue(d["isError"])
