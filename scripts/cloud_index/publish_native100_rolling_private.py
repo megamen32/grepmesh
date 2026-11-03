@@ -416,12 +416,97 @@ class VerifiedImmutableReuseStore(CloudStore):
         raise RuntimeError("Cloud object check ended without an authoritative result")
 
 
+class PathMetadataSpool:
+    """Ordered path metadata in compressed owner-only tmpfs, not Python tuples.
+
+    No source text or extra search index is created. The original path-index
+    schema, order, SHA256 and row count are preserved. Iteration validates the
+    entire private spool before the caller may commit or publish the index.
+    """
+    MAX_LINE = 65536
+
+    def __init__(self, index, root):
+        import stat
+        root = Path(root)
+        st = root.lstat()
+        runtime = Path('/run/user') / str(os.getuid())
+        if (not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid()
+                or st.st_mode & 0o077 or st.st_dev != runtime.stat().st_dev):
+            raise RuntimeError('Path metadata must stay in owner-only tmpfs')
+        self.path = root / ('path-metadata-%02d-%s.jsonl.gz' % (index, os.urandom(8).hex()))
+        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        self._file = os.fdopen(fd, 'wb')
+        self._gzip = gzip.GzipFile(fileobj=self._file, mode='wb', compresslevel=1, mtime=0)
+        self._count = 0
+        self._logical = hashlib.sha256()
+        self._closed = False
+        self._device = st.st_dev
+
+    @staticmethod
+    def _validate(row):
+        import re
+        if (not isinstance(row, (tuple, list)) or len(row) != 4
+                or not isinstance(row[0], str) or not row[0].startswith('/')
+                or '\x00' in row[0] or '..' in Path(row[0]).parts
+                or type(row[1]) is not int or type(row[2]) is not int
+                or row[1] < 0 or row[2] < 0
+                or not isinstance(row[3], str) or not re.fullmatch('[0-9a-f]{64}', row[3])):
+            raise ValueError('Invalid private path metadata row')
+
+    def append(self, row):
+        if self._closed:
+            raise RuntimeError('Path metadata spool already sealed')
+        self._validate(row)
+        data = json_bytes(row) + b'\n'
+        if len(data) > self.MAX_LINE:
+            raise ValueError('Path metadata row exceeds bound')
+        self._gzip.write(data)
+        self._logical.update(data)
+        self._count += 1
+
+    def close(self):
+        if not self._closed:
+            self._gzip.close()
+            self._file.close()
+            self._closed = True
+
+    def __len__(self):
+        return self._count
+
+    def __iter__(self):
+        import stat
+        self.close()
+        fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as f:
+            st = os.fstat(f.fileno())
+            if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid()
+                    or st.st_nlink != 1 or st.st_mode & 0o077
+                    or st.st_dev != self._device):
+                raise RuntimeError('Unsafe path metadata spool')
+            logical = hashlib.sha256()
+            count = 0
+            with gzip.GzipFile(fileobj=f, mode='rb') as stream:
+                while True:
+                    data = stream.readline(self.MAX_LINE + 1)
+                    if not data:
+                        break
+                    if len(data) > self.MAX_LINE or not data.endswith(b'\n'):
+                        raise ValueError('Path metadata frame exceeds bound')
+                    row = json.loads(data)
+                    self._validate(row)
+                    logical.update(data)
+                    count += 1
+                    yield tuple(row)
+            if count != self._count or logical.digest() != self._logical.digest():
+                raise RuntimeError('Path metadata count or checksum mismatch')
+
+
 class Partition:
     def __init__(self, index, pub):
         self.index = index
         self.publisher = pub
         self.scope = "rolling100-20261031t233108z-5732b979-%02d" % index
-        self.paths = []
+        self.paths = PathMetadataSpool(index, ROOT)
         self.parts = []
         self.docs = []
         self.pending_bytes = 0

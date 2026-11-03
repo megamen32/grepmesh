@@ -381,7 +381,7 @@ class Publisher:
                 CREATE TABLE paths(path TEXT PRIMARY KEY NOT NULL,size INTEGER,mtime_ns INTEGER,sha TEXT,path_fold TEXT NOT NULL);
                 CREATE INDEX paths_prefix ON paths(path_fold);''')
             c.executemany('INSERT INTO paths VALUES(?,?,?,?,?)',
-                          [(path,size,mtime,sha,path.casefold()) for path,size,mtime,sha in entries])
+                          ((path,size,mtime,sha,path.casefold()) for path,size,mtime,sha in entries))
             c.commit()
             if c.execute('PRAGMA quick_check').fetchone()[0]!='ok':
                 raise RuntimeError('Path index integrity failed')
