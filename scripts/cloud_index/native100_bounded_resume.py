@@ -22,6 +22,8 @@ from typing import Callable
 from cloud_index import (BLOOM_BYTES, INDEX_LAYOUT, MAX_DOCUMENT, MIB,
                          bloom_for, digest, document, json_bytes, valid_key)
 
+from native100_shard_fill import FilledQueues, PACKING_POLICY, queue_name
+
 FORMAT = 3
 HEX = re.compile(r'[a-f0-9]{64}\Z')
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,90}\Z')
@@ -71,7 +73,7 @@ class Scratch:
         if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
                 or info.st_mode & 0o077 or info.st_dev != runtime.stat().st_dev):
             raise RuntimeError('Bounded scratch requires private tmpfs')
-        self.root=root/'bounded-resume-v3-work'
+        self.root=root/'bounded-resume-v3-fill1-work'
         try:
             self.root.mkdir(mode=0o700); created=True
         except FileExistsError:
@@ -81,7 +83,7 @@ class Scratch:
                 or s.st_mode & 0o077 or s.st_dev != info.st_dev):
             raise RuntimeError('Unsafe bounded scratch directory')
         self.marker=self.root/'scope.json'
-        expected=json_bytes({'format':FORMAT,'source_checkpoint_sha256':source_sha})
+        expected=json_bytes({'format':FORMAT,'source_checkpoint_sha256':source_sha,'packing':PACKING_POLICY})
         if created:
             fd=os.open(self.marker,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
             with os.fdopen(fd,'wb') as f:
@@ -92,24 +94,44 @@ class Scratch:
                 if f.read(1024) != expected:
                     raise RuntimeError('Scratch provenance mismatch; no cleanup')
         entries=list(self.root.iterdir())
-        if any(p.name not in ('scope.json','index.sqlite') for p in entries):
+        allowed={'scope.json','index.sqlite'}|{queue_name(i) for i in range(16)}
+        if any(p.name not in allowed for p in entries):
             raise RuntimeError('Unknown scratch artifact; no cleanup')
+        # Validate EVERY inode first. Never partially clean an unknown directory.
+        for p in entries:
+            fd=self._open_regular(p); os.close(fd)
         self.index=self.root/'index.sqlite'
-        if self.index.exists() or self.index.is_symlink():
-            fd=self._open_regular(self.index); os.close(fd)
-            self.index.unlink()  # ONLY our marked reproducible scratch
+        for p in entries:
+            if p != self.marker:p.unlink()  # only this marked reproducible scratch
+        self.reserved_bytes=0
         self.peak_bytes=self.marker.stat().st_size
 
     @staticmethod
     def _open_regular(path):
         fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        try:Scratch.check_regular_fd(fd)
+        except BaseException:
+            os.close(fd);raise
+        return fd
+
+    @staticmethod
+    def check_regular_fd(fd):
         s=os.fstat(fd)
         if (not stat.S_ISREG(s.st_mode) or s.st_uid != os.getuid()
                 or s.st_mode & 0o077 or s.st_nlink != 1):
-            os.close(fd); raise RuntimeError('Unsafe scratch inode')
-        return fd
+            raise RuntimeError('Unsafe scratch inode')
+
+    def measure_total(self,cap):
+        size=self.index.stat().st_size if self.index.exists() else 0
+        if size+self.reserved_bytes > cap:
+            raise RuntimeError('Combined fill/SQLite scratch exceeds original admission')
+        total=size+self.reserved_bytes+self.marker.stat().st_size
+        self.peak_bytes=max(self.peak_bytes,total)
+        return total
 
     def connect(self,cap):
+        cap=((cap-self.reserved_bytes)//4096)*4096
+        if cap<16384:raise RuntimeError('Insufficient remaining SQLite scratch budget')
         fd=os.open(self.index,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
         os.close(fd); c=sqlite3.connect(self.index)
         c.executescript('PRAGMA page_size=4096; PRAGMA journal_mode=OFF; '
@@ -122,7 +144,7 @@ class Scratch:
     def measure(self,cap):
         size=self.index.stat().st_size
         if size > cap:raise RuntimeError('SQLite scratch exceeds admission')
-        self.peak_bytes=max(self.peak_bytes,size+self.marker.stat().st_size)
+        self.measure_total(cap)
         return size
 
     def discard_index(self):
@@ -283,7 +305,7 @@ class BoundedBuilder:
         if not isinstance(inventory,dict) or len(inventory)>self.limits.max_inventory_objects:
             raise ValueError('Bounded verified immutable inventory required')
         self.scratch=Scratch(root,self.source_sha);self.publisher=BoundedPublisher(self.io,self.scratch,self.limits)
-        self.prefix='private-source-checkpoints/native100/v3/'+snapshot+'/'+self.source_sha
+        self.prefix='private-source-checkpoints/native100/v3-fill1/'+snapshot+'/'+self.source_sha
         self.head_key=self.prefix+'/head.json';self.on_event=on_event or (lambda *a:None)
         self.head_bytes=None;self.commit_ref=None;self.tip=None;self.pages=0;self.cursor=0
         self.records=[];self.record_bytes=0
@@ -291,6 +313,8 @@ class BoundedBuilder:
         self.counts=[0]*16;self.shard_counts=[0]*16;self.logical=[hashlib.sha256() for _ in range(16)]
         self.rows=0;self.oversize=0;self.raw_body_bytes=0;self.last_rowid=0
         self.peak_pending_bytes=0;self.peak_pending_count=0;self.peak_metadata_bytes=0
+        self.fill=FilledQueues(self.scratch,self.limits)
+        self.fill_flushes={'full':0,'bytes':0,'pressure':0,'batch_tail':0}
 
     def _state(self):
         return {'rows':self.rows,'oversize':self.oversize,'raw_body_bytes':self.raw_body_bytes,
@@ -378,11 +402,13 @@ class BoundedBuilder:
         return actual,logical
 
     def _commit_body(self,cursor):
-        return {'format':FORMAT,'source':self.source_sha,'snapshot':self.snapshot,'limits':asdict(self.limits),
+        return {'format':FORMAT,'source':self.source_sha,'snapshot':self.snapshot,'limits':asdict(self.limits),'packing':PACKING_POLICY,
                 'cursor':cursor,'previous':self.commit_ref,'journal':self.tip,'pages':self.pages,'state':self._state(),
                 'consistent_snapshot':False,'safe_for_deletion':False}
 
     def _publish_head(self,cursor):
+        if self.pending_count or self.fill.used or any(self.fill.counts):
+            raise RuntimeError('Cannot checkpoint unflushed fill queues')
         body=json_bytes(self._commit_body(cursor))
         ref=self.io.immutable(self.prefix+'/commits/'+digest(body)+'.json',body)
         new=json_bytes({'format':FORMAT,'source':self.source_sha,'cursor':cursor,'commit':ref})
@@ -413,6 +439,7 @@ class BoundedBuilder:
             commit=json.loads(self.io.checked(ref,self.prefix+'/commits/',65536))
             if (not isinstance(commit,dict) or commit.get('format')!=FORMAT or commit.get('source')!=self.source_sha
                     or commit.get('snapshot')!=self.snapshot or commit.get('limits')!=asdict(self.limits)
+                    or commit.get('packing')!=PACKING_POLICY
                     or commit.get('cursor')!=cursor or commit.get('consistent_snapshot') is not False
                     or commit.get('safe_for_deletion') is not False or not _integer(commit.get('pages'),0,self.limits.max_pages)):
                 raise ValueError('Checkpoint identity/batch boundary mismatch')
@@ -440,25 +467,43 @@ class BoundedBuilder:
         self.last_rowid=actual['last_rowid'];self.cursor=head['cursor'];self.head_bytes=raw;self.commit_ref=head['commit']
         return self.cursor
 
-    def _flush_docs(self,pid):
-        docs=self.pending[pid]
-        if not docs:return
-        for d in self.publisher.shard(docs):
-            self._shard_valid(d);self.shard_counts[pid]+=1
-            if self.shard_counts[pid]>self.limits.max_shards_per_partition:
-                raise ValueError('Partition needs a separately reviewed split')
-            self._append(['shard',pid,d])
-        self.pending_count-=len(docs);self.pending[pid]=[];self.pending_sizes[pid]=0
-
-    def _add_doc(self,pid,path,body,size):
-        while (sum(self.pending_sizes)+size>self.limits.pending_body_bytes
-               or self.pending_count>=self.limits.pending_documents):
-            candidate=max(range(16),key=lambda i:(bool(self.pending[i]),self.pending_sizes[i]))
-            if not self.pending[candidate]:raise ValueError('Single document exceeds pending budget')
-            self._flush_docs(candidate)
-        self.pending[pid].append(document(path,body,0,0));self.pending_sizes[pid]+=size;self.pending_count+=1
+    def _flush_docs(self,pid,reason='batch_tail'):
+        if not self.fill.counts[pid]:return
+        docs=self.fill.take(pid)  # at most the unchanged global Python batch caps
+        self.pending[pid]=docs
+        self.pending_sizes[pid]=sum(len(d['body'].encode('utf8')) for d in docs)
+        self.pending_count=len(docs)
         self.peak_pending_bytes=max(self.peak_pending_bytes,sum(self.pending_sizes))
         self.peak_pending_count=max(self.peak_pending_count,self.pending_count)
+        self.fill_flushes[reason]+=1
+        self.on_event('before_filled_shard',{'cursor':self.cursor})
+        try:
+            for d in self.publisher.shard(docs):
+                self._shard_valid(d);self.shard_counts[pid]+=1
+                if self.shard_counts[pid]>self.limits.max_shards_per_partition:
+                    raise ValueError('Partition needs a separately reviewed split')
+                self._append(['shard',pid,d])
+        finally:
+            self.pending_count=0;self.pending[pid]=[];self.pending_sizes[pid]=0
+
+    def _add_doc(self,pid,path,body,size):
+        if (self.pending_count or type(size) is not int or size<0
+                or size>self.limits.pending_body_bytes):
+            raise ValueError('Single document exceeds unchanged pending budget')
+        if self.fill.needs_flush(pid,size):
+            self._flush_docs(pid,'bytes')
+        frame=self.fill.encode(document(path,body,0,0))
+        if len(frame)>self.fill.cap:
+            # A single encoded record larger than the staging quarter is
+            # processed directly after draining queues; never raise a budget.
+            for i in range(16):self._flush_docs(i,'pressure')
+            raise ValueError('Fill record exceeds bounded staging admission')
+        while self.fill.used+len(frame)>self.fill.cap:
+            self._flush_docs(self.fill.fullest(),'pressure')
+        self.fill.append(pid,frame,size)
+        self.on_event('after_spool_append',{'cursor':self.cursor})
+        if self.fill.counts[pid]==self.limits.pending_documents:
+            self._flush_docs(pid,'full')
 
     def _part(self,index):
         part=self.parts[index];packed=self.store.get(part['key'],part['compressed_bytes'])
@@ -513,7 +558,7 @@ class BoundedBuilder:
         indexes stream cloud metadata one partition at a time into one capped
         SQLite scratch. Extra metadata scans trade latency for bounded memory.
         """
-        if self.cursor!=len(self.parts) or self.pending_count or self.records:
+        if self.cursor!=len(self.parts) or self.pending_count or self.records or self.fill.used:
             raise RuntimeError('Incomplete batch state cannot publish a catalog')
         refs=self._references();self._verify_records(refs,self._state());candidates=[]
         for pid in range(16):
@@ -555,4 +600,6 @@ class BoundedBuilder:
             'source_rows':self.rows,'indexed_documents':sum(self.counts),'oversize_archive_only':self.oversize,
             'peak_pending_body_bytes':self.peak_pending_bytes,'peak_pending_documents':self.peak_pending_count,
             'peak_metadata_payload_bytes':self.peak_metadata_bytes,'peak_tmpfs_scratch_bytes':self.scratch.peak_bytes,
+            'packing':PACKING_POLICY,'peak_fill_tmpfs_bytes':self.fill.peak_bytes,
+            'fill_flushes':dict(self.fill_flushes),
             'consistent_snapshot':False,'safe_for_deletion':False,'production_route_switched':False,'verified_fs_acl_accepted':False}

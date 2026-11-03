@@ -105,6 +105,9 @@ class ActualSigkillResumeTests(unittest.TestCase):
     def test_sigkill_after_head_write_before_ack_reconciles_without_replay(self):self.prove('after_head_write',4)
     def test_sigkill_after_confirmed_checkpoint_skips_confirmed_batches(self):self.prove('after_checkpoint',4)
 
+    def test_sigkill_with_uncommitted_fill_queue(self):self.prove('after_spool_append',4)
+    def test_sigkill_between_queue_and_shard(self):self.prove('before_filled_shard',4)
+
     def test_new_process_finalization_is_idempotent(self):
         a=self.run_child('init');b=self.run_child('resume')
         self.assertNotEqual(a['pid'],b['pid']);self.assertEqual(b['source_reads'],[])
