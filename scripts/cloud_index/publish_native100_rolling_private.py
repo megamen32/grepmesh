@@ -17,6 +17,7 @@ import time
 from cloud_index import (CloudStore, Publisher, digest, json_bytes,
                          document, ensure_tmpfs, INDEX_LAYOUT,
                          MAX_DOCUMENT, MAX_MANIFEST, MIB, valid_key)
+from native100_part_checkpoint import BatchSpool, DurableLedger
 
 SNAPSHOT = "20261031T233108Z-5732b979"
 PREFIX = "archives/server-100/rolling/" + SNAPSHOT
@@ -505,6 +506,7 @@ class Partition:
     def __init__(self, index, pub):
         self.index = index
         self.publisher = pub
+        self.batch_recorder = None
         self.scope = "rolling100-20261031t233108z-5732b979-%02d" % index
         self.paths = PathMetadataSpool(index, ROOT)
         self.parts = []
@@ -516,6 +518,8 @@ class Partition:
     def add(self, path, body):
         doc = document(path, body, 0, 0)
         self.paths.append((path, 0, 0, doc["sha256"]))
+        if self.batch_recorder is not None:
+            self.batch_recorder.append(self.index, path, 0, 0, doc["sha256"])
         self.docs.append(doc)
         self.pending_bytes += len(body.encode("utf-8"))
         self.count += 1
@@ -562,7 +566,15 @@ def run():
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as exc:
+        os.close(lock_fd)
         raise RuntimeError("Private FTS build already running; refusing duplicate") from exc
+    try:
+        return _run_locked()
+    finally:
+        os.close(lock_fd)
+
+
+def _run_locked():
     if RECEIPT.exists():
         raise RuntimeError("Existing private search receipt must be inspected; no duplicate run")
     if not AUDIT.is_file():
@@ -592,12 +604,37 @@ def run():
     started = time.monotonic()
     publisher = Publisher(store, ROOT, shard_text_bytes=TARGET_BYTES)
     partitions = [Partition(i, publisher) for i in range(PARTITIONS)]
+    # Off by default, opt-in only under the already reviewed source, cloud
+    # destination, exclusive builder lease and exact restored checkpoint.
+    durable_mode = os.environ.get("GREPMESH_DURABLE_BUILD_MODE", "")
+    if durable_mode not in ("", "init", "resume"):
+        raise ValueError("Unknown durable checkpoint mode")
+    if durable_mode and not reuse:
+        raise RuntimeError("Durable checkpoint requires pinned verified reuse")
+    ledger = (DurableLedger(store, digest(checkpoint), SNAPSHOT, PARTITIONS)
+              if durable_mode else None)
     count = 0
     oversize = 0
     raw_body_bytes = 0
     last_rowid = 0
     first_samples = {}
+    start_part = 0
+    if durable_mode == "init":
+        ledger.init()  # require authoritative absence, never infer from error
+    elif durable_mode == "resume":
+        restored = ledger.restore(partitions)
+        start_part = restored["parts_done"]
+        count = restored["source_rows"]
+        oversize = restored["oversize"]
+        raw_body_bytes = restored["raw_body_bytes"]
+        last_rowid = restored["last_rowid"]
+        first_samples = {int(k):v for k,v in restored.get("first_samples",{}).items()}
+    batch = BatchSpool(ROOT, PARTITIONS) if ledger and start_part < PARTS else None
+    for partition in partitions:
+        partition.batch_recorder = batch
     for idx, part in enumerate(progress["chunks"]):
+        if idx < start_part:
+            continue  # only a fully verified remote checkpoint can skip parts
         packed = store.get(part["key"], part["compressed_bytes"])
         if len(packed) != part["compressed_bytes"] or digest(packed) != part["sha256"]:
             raise RuntimeError("Source archive part failed SHA256")
@@ -630,7 +667,26 @@ def run():
         if part_count != part["rows"] or last_rowid != part["last_rowid"]:
             raise RuntimeError("Archive source row accounting changed")
         if (idx + 1) % 10 == 0 or idx + 1 == PARTS:
+            if ledger is not None:
+                for partition in partitions:
+                    partition.flush()  # no pending docs in a committed batch
+                durable_state = {
+                    "parts_done": idx+1, "source_rows": count,
+                    "oversize": oversize, "raw_body_bytes": raw_body_bytes,
+                    "last_rowid": last_rowid, "first_samples": first_samples,
+                    "partitions": [
+                        {"count":p.count, "logical_sha256":p.logical.hexdigest(),
+                         "parts":p.parts} for p in partitions
+                    ],
+                    "consistent_snapshot": False, "safe_for_deletion": False,
+                }
+                ledger.commit(batch, durable_state)
+                batch = BatchSpool(ROOT, PARTITIONS) if idx+1 < PARTS else None
+                for partition in partitions:
+                    partition.batch_recorder = batch
             safe_json(PROGRESS, {
+                **({"durable_committed_source_parts":ledger.state["parts_done"]}
+                   if ledger else {}),
                 "source_parts_read": idx + 1,
                 "source_rows_read": count,
                 "searchable_documents": sum(p.count for p in partitions),
