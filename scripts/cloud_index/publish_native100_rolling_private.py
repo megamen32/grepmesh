@@ -600,6 +600,31 @@ def _run_locked():
             and progress.get("rows") == ARCHIVED
             and len(progress["chunks"]) == PARTS):
         raise RuntimeError("Provisional cloud source checkpoint was changed")
+    bounded_mode = os.environ.get("GREPMESH_BOUNDED_RESUME_MODE", "")
+    if bounded_mode:
+        if bounded_mode not in ("init", "resume") or not reuse:
+            raise ValueError("Bounded resume requires explicit mode and verified reuse")
+        if os.environ.get("GREPMESH_DURABLE_BUILD_MODE", ""):
+            raise ValueError("Cannot combine checkpoint formats")
+        from native100_bounded_resume import BoundedBuilder
+        engine = BoundedBuilder(store, ROOT, SNAPSHOT, checkpoint, progress, audit)
+        def preflight_uncommitted(cursor):
+            required = os.environ.get("GREPMESH_REQUIRE_CACHED_SOURCE_PART", "")
+            if required:
+                import re
+                if not re.fullmatch(r"[0-9]{6}", required):
+                    raise ValueError("Invalid required source part ordinal")
+                matches = [i for i, part in enumerate(progress["chunks"])
+                           if part["key"].rsplit("/", 1)[-1].startswith(required + "-")]
+                if len(matches) != 1:
+                    raise ValueError("Required part absent from pinned snapshot")
+                if matches[0] >= cursor:
+                    preflight_required_source_cache(store, progress)
+        engine.build(bounded_mode, before_source=preflight_uncommitted)
+        summary = engine.finalize()
+        safe_json(RECEIPT, summary)
+        print(json.dumps(summary, sort_keys=True), flush=True)
+        return summary
     preflight_required_source_cache(store, progress)
     started = time.monotonic()
     publisher = Publisher(store, ROOT, shard_text_bytes=TARGET_BYTES)
