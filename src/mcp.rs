@@ -313,7 +313,10 @@ fn compact_search_results(mut hits: Vec<SearchHit>) -> Vec<CompactSearchResult> 
     let mut ranges = Vec::<CompactSearchRange>::new();
     for hit in hits {
         let mut lines = hit.context;
-        if lines.is_empty() && hit.line_number != 0 {
+        // A path-only hit has line_number=0 and no context.  Omitting it
+        // silently drops historical deleted-file/path matches from compact
+        // MCP output, even though verbose search returns that same hit.
+        if lines.is_empty() {
             lines.push(crate::backend::MatchLine {
                 line_number: hit.line_number,
                 text: hit.text,
@@ -2032,6 +2035,59 @@ mod rank_optout_tests {
         assert_eq!(out[0].loc, "16-17");
         assert_eq!(out[0].data, "line 16\nline 17");
         assert_eq!(out[1].path, "/a.txt");
+    }
+
+    #[test]
+    fn compact_preserves_path_only_deleted_history_hit_when_unranked() {
+        // A result may match its path even when its body was deleted.
+        let mut historical = fixture("/not-mounted/deleted-history.txt", None);
+        historical.line_number = 0;
+        historical.text = "[path match] /not-mounted/deleted-history.txt".into();
+        historical.context.clear();
+        let mut hits = vec![historical, fixture("/z.txt", None)];
+        apply_rank_policy("deleted", &SearchMode::Literal, false, &mut hits);
+        let rendered = compact_search_results(hits);
+        assert_eq!(rendered.len(), 2);
+        assert_eq!(rendered[0].path, "/not-mounted/deleted-history.txt");
+        assert_eq!(rendered[0].loc, "0");
+        assert_eq!(rendered[0].data, "[path match] /not-mounted/deleted-history.txt");
+        assert_eq!(rendered[1].path, "/z.txt");
+    }
+
+    #[test]
+    fn compact_preserves_ranked_path_only_and_empty_body_matches() {
+        let mut path_only = fixture("/not-mounted/scan.pdf", Some(8.0));
+        path_only.line_number = 0;
+        path_only.text = "[path match] /not-mounted/scan.pdf".into();
+        path_only.context.clear();
+        let mut empty_body = fixture("/not-mounted/empty.txt", Some(1.0));
+        empty_body.line_number = 0;
+        empty_body.text.clear();
+        empty_body.context.clear();
+        let compact = compact_search_results(vec![empty_body, path_only]);
+        assert_eq!(compact.len(), 2);
+        assert_eq!(compact[0].path, "/not-mounted/scan.pdf");
+        assert_eq!(compact[0].loc, "0");
+        assert_eq!(compact[0].data, "[path match] /not-mounted/scan.pdf");
+        assert_eq!(compact[1].path, "/not-mounted/empty.txt");
+        assert_eq!(compact[1].loc, "0");
+        assert_eq!(compact[1].data, "");
+    }
+
+    #[test]
+    fn compact_preserves_path_only_and_body_hit_on_one_file() {
+        let mut path_only = fixture("/archived/document.rs", None);
+        path_only.line_number = 0;
+        path_only.text = "[path match] /archived/document.rs".into();
+        path_only.context.clear();
+        let mut body = fixture("/archived/document.rs", None);
+        body.line_number = 1;
+        body.text = "needle on line one".into();
+        body.context.clear();
+        let compact = compact_search_results(vec![path_only, body]);
+        assert_eq!(compact.len(), 1);
+        assert_eq!(compact[0].loc, "0-1");
+        assert_eq!(compact[0].data, "[path match] /archived/document.rs\nneedle on line one");
     }
 
     #[test]
