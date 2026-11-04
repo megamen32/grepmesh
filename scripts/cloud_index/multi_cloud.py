@@ -186,11 +186,22 @@ class MultiReader:
                             found=index.first_match(record,deadline,
                                 needle=needle,case_sensitive=case_sensitive)
                         if found is None:
-                            probe=needle
-                            python_path=path if case_sensitive else path.casefold()
-                            if probe and probe in python_path:
-                                line,column,text=0,0,'[path match] '+path
-                            else:continue
+                            if regex:
+                                # The oversized path obeys the same regex
+                                # and deadline as ordinary FTS path matches.
+                                remaining=deadline-time.monotonic()
+                                if remaining<=0:
+                                    raise TimeoutError('Oversize regex path deadline')
+                                std_pattern,hard_pattern=compiled
+                                path_match=(hard_pattern.search(path,timeout=remaining)
+                                            if hard_pattern is not None
+                                            else std_pattern.search(path))
+                                if path_match is None:continue
+                            else:
+                                probe=needle
+                                python_path=path if case_sensitive else path.casefold()
+                                if not (probe and probe in python_path):continue
+                            line,column,text=0,0,'[path match] '+path
                         else:
                             line,column,text=found
                     hits.append({'host_id':HOST,'source_host':entry['source_host'],
