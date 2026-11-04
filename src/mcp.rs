@@ -286,13 +286,29 @@ struct CompactSearchRange {
     lines: BTreeMap<usize, String>,
 }
 
+/// Rank only when opted in. Opting out does not reorder backend matches.
+fn apply_rank_policy(query: &str, mode: &SearchMode, rank: bool, hits: &mut Vec<SearchHit>) {
+    if rank {
+        rank_search_hits(query, mode, hits);
+    } else {
+        // A peer's scores must not leak into an explicitly unranked response.
+        for hit in hits {
+            hit.score = None;
+        }
+    }
+}
+
 fn compact_search_results(mut hits: Vec<SearchHit>) -> Vec<CompactSearchResult> {
-    hits.sort_by(|a, b| {
-        a.host_id
-            .cmp(&b.host_id)
-            .then(a.path.cmp(&b.path))
-            .then(a.line_number.cmp(&b.line_number))
-    });
+    // Ranked hits may be grouped by source range before restoring relevance.
+    // Unranked hits have no scores and must retain backend encounter order.
+    if hits.iter().any(|hit| hit.score.is_some()) {
+        hits.sort_by(|a, b| {
+            a.host_id
+                .cmp(&b.host_id)
+                .then(a.path.cmp(&b.path))
+                .then(a.line_number.cmp(&b.line_number))
+        });
+    }
 
     let mut ranges = Vec::<CompactSearchRange>::new();
     for hit in hits {
@@ -321,6 +337,7 @@ fn compact_search_results(mut hits: Vec<SearchHit>) -> Vec<CompactSearchResult> 
                 (Some(a), Some(b)) => Some(a.max(b)),
                 (a, b) => a.or(b),
             };
+            previous.start_line = previous.start_line.min(start_line);
             previous.end_line = previous.end_line.max(end_line);
             for line in lines {
                 previous.lines.entry(line.line_number).or_insert(line.text);
@@ -591,17 +608,7 @@ impl MeshService {
                 overall_timeout,
             )
             .await?;
-        if rank {
-            rank_search_hits(&query, &mode, &mut results);
-        } else {
-            // Do not accidentally inherit a peer's scores when ranking is disabled.
-            for hit in &mut results { hit.score = None; }
-            results.sort_by(|a, b| {
-                a.host_id.cmp(&b.host_id)
-                    .then(a.path.cmp(&b.path))
-                    .then(a.line_number.cmp(&b.line_number))
-            });
-        }
+        apply_rank_policy(&query, &mode, rank, &mut results);
         results = dedup_hits(results, |item| {
             (item.host_id.clone(), item.path.clone(), item.line_number)
         });
@@ -1920,9 +1927,9 @@ mod tests {
         assert_eq!(
             rendered["results"],
             serde_json::json!([
+                {"host": "B", "path": "/same.rs", "data": "line 204\nline 205\nline 206\nline 207", "loc": "204-207"},
                 {"path": "/other.rs", "data": "only line", "loc": "9"},
-                {"host": "A", "path": "/same.rs", "data": "line 16\nline 17", "loc": "16-17"},
-                {"host": "B", "path": "/same.rs", "data": "line 204\nline 205\nline 206\nline 207", "loc": "204-207"}
+                {"host": "A", "path": "/same.rs", "data": "line 16\nline 17", "loc": "16-17"}
             ])
         );
         assert!(rendered.get("matches").is_none());
@@ -1998,9 +2005,35 @@ mod rank_optout_tests {
         let ranked=compact_search_results(vec![fixture("/a.txt",Some(1.0)),fixture("/z.txt",Some(9.0))]);
         assert_eq!(ranked[0].path,"/z.txt");
         let exact=compact_search_results(vec![fixture("/z.txt",None),fixture("/a.txt",None)]);
-        assert_eq!(exact[0].path,"/a.txt");
+        assert_eq!(exact[0].path,"/z.txt");
+        assert_eq!(exact[1].path,"/a.txt");
         assert!(serde_json::to_value(&exact[0]).unwrap().get("score").is_none());
     }
+    #[test]
+    fn rank_false_preserves_backend_order_and_clears_peer_scores() {
+        let mut hits = vec![fixture("/z.txt", Some(1.0)), fixture("/a.txt", Some(99.0))];
+        apply_rank_policy("needle", &SearchMode::Literal, false, &mut hits);
+        assert_eq!(hits.iter().map(|h| h.path.as_str()).collect::<Vec<_>>(),
+                   vec!["/z.txt", "/a.txt"]);
+        assert!(hits.iter().all(|h| h.score.is_none()));
+    }
+
+    #[test]
+    fn compact_unranked_merges_reverse_line_order_without_resorting_paths() {
+        let mut line17 = fixture("/z.txt", None);
+        line17.line_number = 17;
+        line17.text = "line 17".into();
+        let mut line16 = fixture("/z.txt", None);
+        line16.line_number = 16;
+        line16.text = "line 16".into();
+        let out = compact_search_results(vec![line17, line16, fixture("/a.txt", None)]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].path, "/z.txt");
+        assert_eq!(out[0].loc, "16-17");
+        assert_eq!(out[0].data, "line 16\nline 17");
+        assert_eq!(out[1].path, "/a.txt");
+    }
+
     #[test]
     fn rank_does_not_drop_missing_files_ocr_regex_or_short_queries() {
         for (query,mode) in [("needle",SearchMode::Literal),("needle.*",SearchMode::Regex),("x",SearchMode::Literal)] {
