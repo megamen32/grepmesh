@@ -435,7 +435,7 @@ class Publisher:
         return manifest
 
 
-def prefetched_shards(store, parts, cached, started, deadline_seconds, workers=6):
+def prefetched_shards(store, parts, cached, started, deadline_seconds, workers=6, limiter=None):
     """Fetch a bounded lookahead of cloud blobs concurrently, preserving order.
 
     Only compressed bytes are fetched by workers. A single owning query thread
@@ -450,6 +450,21 @@ def prefetched_shards(store, parts, cached, started, deadline_seconds, workers=6
     max_queued = max(1,min(workers, len(parts)))
     pool = ThreadPoolExecutor(max_workers=max_queued,
                               thread_name_prefix='grepmesh-cloud-get')
+    def bounded_get(key, size):
+        if limiter is None:
+            return store.get(key, size)
+        remaining = deadline_seconds - (time.monotonic() - started)
+        if remaining <= 0 or not limiter.acquire(timeout=remaining):
+            raise TimeoutError('Shared cloud fetch admission deadline')
+        try:
+            # A query may expire while waiting for an earlier timed-out
+            # query's rclone subprocess. Never start a stale cloud fetch.
+            if time.monotonic() - started >= deadline_seconds:
+                raise TimeoutError('Shared cloud fetch deadline')
+            return store.get(key, size)
+        finally:
+            limiter.release()
+
     def submit_one():
         try:
             part = next(remaining)
@@ -458,7 +473,7 @@ def prefetched_shards(store, parts, cached, started, deadline_seconds, workers=6
         if part['sha256'] in cached:
             queue.append((part, None))
         else:
-            future = pool.submit(store.get, part['key'], part['packed_bytes'])
+            future = pool.submit(bounded_get, part['key'], part['packed_bytes'])
             queue.append((part, future))
     try:
         for _ in range(max_queued):
@@ -499,6 +514,9 @@ class SharedShardCache:
             raise ValueError('Shared cache requires at least 64 MiB')
         self.limit=limit
         self.lock=threading.RLock()
+        # Shared across all Reader queries, including old timed-out workers.
+        # The rclone subprocess can outlive the query deadline (up to 90s).
+        self.fetch_slots=threading.BoundedSemaphore(2)
         self.entries=collections.OrderedDict()
         self.used=0
 
@@ -735,7 +753,9 @@ class Reader:
             # Preserve the original six-way lookahead for legacy readers.
             cloud_workers=2 if self.shared_cache is not None else 6
             prefetched=prefetched_shards(self.store,candidates,self.cache,started,
-                                         deadline_seconds,workers=cloud_workers)
+                                         deadline_seconds,workers=cloud_workers,
+                                         limiter=self.shared_cache.fetch_slots
+                                         if self.shared_cache is not None else None)
             for part,downloaded in prefetched:
                 if time.monotonic()-started>deadline_seconds:incomplete.append('query deadline reached; remaining shards not searched');break
                 try:

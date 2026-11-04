@@ -211,6 +211,65 @@ class SharedCacheMixedSources(unittest.TestCase):
         # The regex budget cannot restart after downloading a slow shard.
         self.assertLessEqual(seen[0][1], began + 1.04)
 
+    def test_timed_out_shared_queries_cap_old_inflight_cloud_fetches(self):
+        import threading
+        import time
+        from unittest.mock import patch
+        pub = Publisher(self.store, self.root, 64 * 1024)
+        shared = SharedShardCache(128 * MIB)
+        readers = []
+        for i in range(3):
+            scope = 'timeout-sequence-%d' % i
+            pub.publish(scope, make_stream('server-44', [
+                ('/private/history/timeout-%d.txt' % i,
+                 'backpressure needle %d' % i)]))
+            reader = Reader(self.store, self.root, scope, 128 * MIB,
+                            allowed_host='server-44', allowed_root='/',
+                            shared_cache=shared)
+            reader.refresh()
+            readers.append(reader)
+        shard_keys = {part['key'] for r in readers
+                      for part in r.manifest['parts']}
+        original = self.store.get
+        release = threading.Event()
+        mu = threading.Lock()
+        active = [0]
+        peak = [0]
+
+        def blocked_get(key, limit):
+            if key not in shard_keys:
+                return original(key, limit)
+            with mu:
+                active[0] += 1
+                peak[0] = max(peak[0], active[0])
+            try:
+                # Mimics existing cloud rclone get (90s) outliving a query
+                # with a much shorter deadline, without any real network.
+                release.wait(timeout=1.5)
+                return original(key, limit)
+            finally:
+                with mu:
+                    active[0] -= 1
+
+        try:
+            with patch.object(self.store, 'get', side_effect=blocked_get):
+                for reader in readers:
+                    result = reader.query('backpressure needle',
+                                          authorized_roots=['/private'],
+                                          deadline_seconds=0.07)
+                    self.assertTrue(result['partial'], result)
+                self.assertLessEqual(peak[0], 2,
+                                     'Expired queries started too many cloud fetches')
+        finally:
+            release.set()
+            for _ in range(180):
+                with mu:
+                    if active[0] == 0:
+                        break
+                time.sleep(0.01)
+            for reader in readers:
+                reader.clear()
+
     def test_cloud_prefetch_scheduler_does_not_submit_more_than_worker_limit(self):
         import cloud_index
         import time
