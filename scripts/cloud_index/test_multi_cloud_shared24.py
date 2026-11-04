@@ -137,6 +137,46 @@ class SharedCacheMixedSources(unittest.TestCase):
         self.assertEqual(shared.used, 0)
         self.assertFalse(shared.entries)
 
+    def test_shared_query_prefetch_caps_compressed_lookahead_and_preserves_legacy(self):
+        import cloud_index
+        from unittest.mock import patch
+        publisher = Publisher(self.store, self.root, 64 * 1024)
+        publisher.publish('one-lookup', make_stream('server-44', [
+            ('/private/history/synthetic-needle.txt',
+             'historical synthetic prefetch concurrency fixture')]))
+        shared = SharedShardCache(64 * MIB)
+        reader = Reader(self.store, self.root, 'one-lookup', 64 * MIB,
+                        allowed_host='server-44', allowed_root='/',
+                        shared_cache=shared)
+        reader.refresh()
+        seen = []
+        original = cloud_index.prefetched_shards
+
+        def record_prefetch(*args, **kwargs):
+            seen.append(kwargs.get('workers', 6))
+            yield from original(*args, **kwargs)
+
+        with patch.object(cloud_index, 'prefetched_shards', record_prefetch):
+            result = reader.query('prefetch concurrency fixture',
+                                  authorized_roots=['/private'])
+        self.assertEqual(len(result['results']), 1)
+        self.assertEqual(seen, [2])
+        self.assertLessEqual(shared.used, 64 * MIB)
+
+        standalone_root = self.root / 'standalone'
+        standalone_root.mkdir()
+        standalone = Reader(self.store, standalone_root, 'one-lookup', 64 * MIB,
+                            allowed_host='server-44', allowed_root='/')
+        standalone.refresh()
+        with patch.object(cloud_index, 'prefetched_shards', record_prefetch):
+            old_result = standalone.query('prefetch concurrency fixture',
+                                          authorized_roots=['/private'])
+        self.assertEqual(len(old_result['results']), 1)
+        self.assertEqual(seen, [2, 6])
+        standalone.clear()
+        reader.clear()
+        self.assertEqual(shared.used, 0)
+
     def test_legacy_small_scope_cache_keeps_existing_disjoint_quotas(self):
         # No manifests are fetched: only the constructor cache topology.
         scopes = [

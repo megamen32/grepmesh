@@ -723,7 +723,13 @@ class Reader:
                     'elapsed_ms':round((time.monotonic()-started)*1000,2),
                     'complete_for_policy':m['complete_for_policy']}
             candidates=[part for part in m['parts'] if glob or might_match(part['bloom'],gram_source.casefold())]
-            prefetched=prefetched_shards(self.store,candidates,self.cache,started,deadline_seconds)
+            # Mixed 24-scope query readers share a 512-MiB decoded-shard LRU;
+            # bound concurrent compressed cloud payloads separately. A shard
+            # can be up to 64 MiB, so at most two are in flight (<=128 MiB).
+            # Preserve the original six-way lookahead for legacy readers.
+            cloud_workers=2 if self.shared_cache is not None else 6
+            prefetched=prefetched_shards(self.store,candidates,self.cache,started,
+                                         deadline_seconds,workers=cloud_workers)
             for part,downloaded in prefetched:
                 if time.monotonic()-started>deadline_seconds:incomplete.append('query deadline reached; remaining shards not searched');break
                 try:
