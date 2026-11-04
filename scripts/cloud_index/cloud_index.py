@@ -465,23 +465,23 @@ def prefetched_shards(store, parts, cached, started, deadline_seconds, workers=6
             submit_one()
         while queue:
             part, future = queue.popleft()
-            if (time.monotonic()-started < deadline_seconds and
-                len(queue) < max_queued-1):
-                # Including the popped current future, at most max_queued
-                # compressed requests may be outstanding.
-                submit_one()
             if future is None:
-                yield part, None
-                continue
-            budget = deadline_seconds - (time.monotonic()-started)
-            if budget <= 0:
-                yield part, TimeoutError('cloud shard deadline')
-                continue
-            try:
-                payload = future.result(timeout=budget)
-            except Exception as error:
-                payload = error
+                payload = None
+            else:
+                budget = deadline_seconds - (time.monotonic()-started)
+                if budget <= 0:
+                    payload = TimeoutError('cloud shard deadline')
+                else:
+                    try:
+                        payload = future.result(timeout=budget)
+                    except Exception as error:
+                        payload = error
             yield part, payload
+            # Refill only AFTER the caller consumes this result. This keeps
+            # the queued plus current futures within max_queued and still
+            # advances through every part when workers=1.
+            if time.monotonic()-started < deadline_seconds:
+                submit_one()
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
 

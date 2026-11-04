@@ -208,15 +208,20 @@ class SharedCacheMixedSources(unittest.TestCase):
         parts = [{'sha256': '%064x' % i,
                   'key': 'synthetic-%d' % i, 'packed_bytes': 20}
                  for i in range(7)]
-        with patch.object(cloud_index, 'ThreadPoolExecutor', TrackingExecutor):
-            rows = list(cloud_index.prefetched_shards(
-                FakeStore(), parts, {}, time.monotonic(), 5, workers=2))
-        self.assertEqual(len(rows), 7)
-        self.assertEqual(rows[0][1], b'synthetic-0')
-        executor = TrackingExecutor.instances[-1]
-        self.assertEqual(executor.max_workers, 2)
-        self.assertEqual(executor.peak, 2)
-        self.assertEqual(executor.pending, 0)
+        # A workers=1 reader must keep advancing after its first result:
+        # the former scheduler silently stopped after one fetched part.
+        for workers in (1, 2, 3):
+            with self.subTest(workers=workers):
+                with patch.object(cloud_index, 'ThreadPoolExecutor', TrackingExecutor):
+                    rows = list(cloud_index.prefetched_shards(
+                        FakeStore(), parts, {}, time.monotonic(), 5, workers=workers))
+                self.assertEqual(len(rows), len(parts))
+                self.assertEqual([value for _, value in rows],
+                                 [b'synthetic-%d' % i for i in range(7)])
+                executor = TrackingExecutor.instances[-1]
+                self.assertEqual(executor.max_workers, workers)
+                self.assertLessEqual(executor.peak, workers)
+                self.assertEqual(executor.pending, 0)
 
     def test_legacy_small_scope_cache_keeps_existing_disjoint_quotas(self):
         # No manifests are fetched: only the constructor cache topology.
