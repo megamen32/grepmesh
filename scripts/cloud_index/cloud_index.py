@@ -766,7 +766,7 @@ class Reader:
                                 if not dec.eof or len(raw)>MAX_DOCUMENT or digest(raw)!=r['sha']:raise ValueError('Document checksum mismatch')
                                 body=raw.decode('utf-8');line=0;column=0;text=''
                                 if regex:
-                                    found=regex_match_positions(std_compiled,hard,body,time.monotonic()+deadline_seconds)
+                                    found=regex_match_positions(std_compiled,hard,body,started+deadline_seconds)
                                     if found is None:
                                         remaining_path=started+deadline_seconds-time.monotonic()
                                         path_match=(hard.search(r['path'],timeout=remaining_path) if hard is not None and remaining_path>0

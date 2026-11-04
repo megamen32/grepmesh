@@ -177,6 +177,40 @@ class SharedCacheMixedSources(unittest.TestCase):
         reader.clear()
         self.assertEqual(shared.used, 0)
 
+    def test_regex_absolute_deadline_is_shared_across_cloud_fetch(self):
+        import cloud_index
+        import time
+        from unittest.mock import patch
+        pub = Publisher(self.store, self.root, 64 * 1024)
+        pub.publish('slow-regex', make_stream('server-44', [
+            ('/private/history/slow-regex.txt', 'needle middle pattern')]))
+        reader = Reader(self.store, self.root, 'slow-regex', 64 * MIB,
+                        allowed_host='server-44', allowed_root='/')
+        reader.refresh()
+        real_get = self.store.get
+        real_regex = cloud_index.regex_match_positions
+        seen = []
+
+        def delayed_get(*args, **kwargs):
+            time.sleep(0.12)
+            return real_get(*args, **kwargs)
+
+        def record_regex(compiled, hard, body, absolute_deadline):
+            seen.append((time.monotonic(), absolute_deadline))
+            return real_regex(compiled, hard, body, absolute_deadline)
+
+        began = time.monotonic()
+        with patch.object(self.store, 'get', side_effect=delayed_get), patch.object(
+                cloud_index, 'regex_match_positions', side_effect=record_regex):
+            result = reader.query('needle.*pattern', regex=True,
+                                  authorized_roots=['/private'], deadline_seconds=1.0)
+        self.assertFalse(result['partial'], result['warnings'])
+        self.assertEqual(len(result['results']), 1)
+        self.assertEqual(len(seen), 1)
+        self.assertGreaterEqual(seen[0][0] - began, 0.11)
+        # The regex budget cannot restart after downloading a slow shard.
+        self.assertLessEqual(seen[0][1], began + 1.04)
+
     def test_cloud_prefetch_scheduler_does_not_submit_more_than_worker_limit(self):
         import cloud_index
         import time
