@@ -1,0 +1,109 @@
+# GrepMesh private RAM reader: signed transport integration gate
+
+**Status: NO_GO for production.** Source-only protocol reconciliation, 2026-11-04.
+This document is not an authorization to install, reconfigure, restart, reboot,
+read private data, extract a signer key, or retry a denied tool call.
+
+## Grounded interfaces
+
+The native GrepMesh entry point has one MCP `search`, `rank=true` by default,
+`rank=false` without relevance reordering, and `read_text`. The full-feature
+OCR+local-STT candidate from commit `6f2ceda6efb84765fd05a24a5ae547b7bd6d2b2b`
+was compiled and passed seven independent **synthetic-only** loopback MCP checks.
+Its build is not production and its synthetic acceptance says nothing about
+historical cloud corpus routing or delegated signed ACL.
+
+1. `src/server.rs::apply_filesystem_acl_metadata` accepts GPTAdmin-delegated ACL
+   metadata into native tool arguments, and requires a verified ACL for a peer
+   hop. It deliberately does **not** read or create signer credentials.
+2. `src/mcp.rs::search_across` forwards `filesystem_acl` in JSON arguments
+   to `search_text` on remote peers. `src/mcp.rs` forwards the same JSON
+   argument to remote `read_text`. Standard direct peer transport,
+   GPTAdmin-proxy fallback, and `GptAdminClient::call_relay` all receive those
+   arguments. There is no special private RAM reader adapter in these calls.
+3. `src/gptadmin.rs::send_relay_call` POSTs `tools/call` to its configured
+   Hub relay with JSON arguments and the existing bearer credential; the
+   visible client code does not itself generate private-reader HMAC headers.
+   Whether an authorized Hub component provides a signer-bound translation
+   remains **unproven** from the inspected source.
+4. `scripts/cloud_index/cloud_index.py::forwarded_acl_roots` explicitly
+   rejects a non-null `filesystem_acl` supplied in tool arguments. A forwarded
+   read requires `hop_count=1`, the originating host, and a verified policy.
+   Its `verify_transport_acl` requires a signer-validated HMAC policy over
+   the **actual HTTP request bytes**. This cannot be replaced with JSON
+   metadata, an unsigned local query, or fabricated `_meta`.
+5. `deploy/remote44-immutable-restore/sealed_offload_reader.py` runs this
+   private cloud reader on 44 loopback port 19440 with strict signer-required
+   mode. Existing server100 tunnel 19441 forwards to it; the previously
+   observed unsigned GET health 200/849721 documents is *not* an authorized
+   `search`/`read_text` result. The service is in RAM and must stay so.
+
+**Compatibility gap:** Forwarding native JSON arguments unchanged to the private
+reader will not satisfy its signer-verified ACL contract. Do not conclude that
+the Hub already transforms and signs such requests without an authorized,
+auditable receipt. Do not add any application-side signer secret, HMAC copying,
+user-supplied `filesystem_acl`, broader OAuth, alternate identity, or direct
+unauthenticated fallback to make a test pass.
+
+## Required existing-authority integration
+
+The **existing** authorized GPTAdmin signer/relay owner must establish and
+document whether it already offers a supported `mcp_call` route to the private
+reader that satisfies all of the following:
+
+- Accepts only an actual authenticated client request under the existing
+  dedicated private FTS profile. The relay verifies the originating job,
+  profile, revision, tool, request body, and allowed filesystem read roots.
+- In its trusted boundary, strips internal `filesystem_acl` from any
+  caller-controlled tool argument, and forwards only the authorized, bounded
+  parameters to the private reader. The receiver's signer checks must cover
+  **exactly the forwarded bytes** and the narrowed read policy.
+- Passes the existing policy to the reader through the **already supported**
+  authenticated transport, never by giving the Rust MCP, browser, client,
+  or a synthetic fixture the signing key. No new signer implementation or
+  changes to ACL/identity, permissions, environment, keys, or global OAuth.
+- Preserves `request_id` and legitimate `origin_host`/`hop_count`
+  provenance, cancellation/timeout and no unintended retry of unknown
+  tool calls. A missing/invalid signature and missing verified client identity
+  must fail closed *before* fetching a private cloud document.
+- Returns a response the native `SearchResponse<SearchHit>` and
+  `ReadResponse` can decode. No reinterpretation of partial coverage as
+  an authoritative empty answer; preserve host/status, exact path, line0
+  path-only hits, OCR/STT and deleted-file history provenance.
+- Keeps RAM/shard and resource caps, no persistent SQLite on 44, no full
+  corpus copy onto 100, no second builder/service or parallel index.
+
+If no existing supported relay implements this contract, **stop at NO_GO**,
+obtain an independently reviewed integration design and its proper approval.
+Do **not** implement a parallel signing/security boundary in GrepMesh.
+
+## Required production acceptance (not yet performed)
+
+Through the genuine pre-existing authorized private client, and only after
+normal permissions are in place, require positive signed literal, regex and
+exact `read_text` across historical 44 and completed 16-way 100, including
+deleted/oversized and OCR/STT samples; negative out-of-scope `/dev/null`
+and `/`, unsigned/forged caller ACL and altered-request replay; parity of
+`rank=true` / `rank=false` hit membership with only ordering different;
+honest timeout/partial states; measured bounded RAM/cache and no disk index.
+
+Independently still require successful original 16-way profiler admission and
+complete immutable FTS manifest, scoped maintenance approval for the actual
+shared server44 cold reboot, verified 165-object RAM restoration, and tested
+rollback under the same existing trusted deployment operator. Existing
+`deploy/mvp-paired-cutover.sh` and `deploy/mvp-deploy.sh` are **not** suitable:
+their checked-in configs use persistent `remote_index_store` on 44 and their
+scripts mutate root-owned system configuration/services.
+
+## Verifiable source anchors
+
+- `src/mcp.rs`: `search_across` peer `filesystem_acl` argument,
+  remote `read_text` argument, `call_remote` direct/relay branches.
+- `src/server.rs`: `apply_filesystem_acl_metadata`.
+- `src/gptadmin.rs`: `send_relay_call`.
+- `scripts/cloud_index/cloud_index.py`: `forwarded_acl_roots`,
+  `verify_transport_acl`, `serve`.
+- `deploy/remote44-immutable-restore/sealed_offload_reader.py`: signer gate.
+
+**Gate status:** NO_GO; no real signed ACL E2E, complete 100 FTS, scoped cold
+reboot or production cutover. Preserve the working reader and old runtime.
