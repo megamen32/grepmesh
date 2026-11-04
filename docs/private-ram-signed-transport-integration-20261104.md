@@ -38,6 +38,49 @@ historical cloud corpus routing or delegated signed ACL.
    observed unsigned GET health 200/849721 documents is *not* an authorized
    `search`/`read_text` result. The service is in RAM and must stay so.
 
+## Verified existing GPTAdmin Hub queue ACL (source-only; not installed-runtime proof)
+
+A bounded read-only inspection on 2026-11-04 of the separate, existing GPTAdmin
+source tree (no coordination ledger, runtime credentials or authorization data)
+established an actual existing trust boundary; no change to that repository was
+made. Relevant exact source files and SHA-256:
+
+- \`go-hub/internal/hub/filesystem_acl.go\` SHA
+  \`2d383ee94776a52a6ad7961459f18d6f93f0c7af7e4c9df8a759b55ac42027b8\`:
+  \`filesystemACLForRequest\` binds ACL policy to the authenticated profile ID,
+  version, roots digest and exact tool-argument SHA; \`validateFilesystemACLJobLocked\`
+  checks job ID, executor target and current profile revision. ACL is held in
+  a **Hub-owned queue envelope**, outside MCP tool arguments (lines 13-15).
+- \`go-hub/internal/hub/server.go\` SHA
+  \`b65fee452e702aa666717ee2151be7836e54af4be2fad4f8b34dadc5a4a67bc1\`:
+  \`shellQueueFilesystemACLCheck\` (lines 3722-3766) permits a fresh policy
+  only to the authenticated, matching, *running* executor job. The queue
+  dispatcher (around lines 5153-5165 and 6115-6119) binds it as a job
+  attribute and requires an approved executor with \`filesystem_acl_version>=1\`.
+- \`go-shellmcp/internal/hub/client.go\` SHA
+  \`abdb2c6c61a80d024938ccebdc098bdb05cd11959c2fc93eecc381d475cb1555\`:
+  the executor receives the ACL in the authenticated queue (lines 172-187)
+  and can revalidate via \`CheckFilesystemACL\` POST
+  \`/queue/{name}/acl-check\` (lines 316-332).
+
+A filename-limited search across the existing GPTAdmin source tree for the
+exact private-reader headers \`X-GrepMesh-Filesystem-Acl\` and
+\`X-GrepMesh-Acl-Signature\`, or the signer configuration name
+\`GREPMESH_CLOUD_ACL_SECRET\`, found **no source implementation**. This is a
+limited finding about the inspected checkout, not proof of an installed
+runtime's capabilities or permission to read its secrets.
+
+**Precise remaining link:** a properly authorized existing executor/relay
+must take the Hub-verified job ACL *within the trusted execution boundary*,
+narrow the policy, omit client-supplied ACL from the forwarded JSON tool
+arguments, and produce the **already established** signed HTTP transport
+accepted by the private reader. There is no evidence that the checked source
+does this today. It must not be built as a second signer in the ordinary
+GrepMesh client, nor implemented by forging policy/HMAC headers or changing
+identity, ownership, grants, secrets or ACL policy. The owning GPTAdmin
+integration must confirm an existing approved capability or obtain a separate
+review for the security-boundary change before implementation or deployment.
+
 **Compatibility gap:** Forwarding native JSON arguments unchanged to the private
 reader will not satisfy its signer-verified ACL contract. Do not conclude that
 the Hub already transforms and signs such requests without an authorized,
