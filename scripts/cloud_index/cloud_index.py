@@ -481,11 +481,62 @@ def prefetched_shards(store, parts, cached, started, deadline_seconds, workers=6
         pool.shutdown(wait=False, cancel_futures=True)
 
 
+class SharedShardCache:
+    """One aggregate tmpfs shard LRU across multiple independently admitted scopes.
+
+    Every participating Reader uses this one RLock for cache access and any
+    eviction. No change to the original standalone Reader cache path.
+    The cache includes decoded SQLite shard files, not the transient compressed
+    request bodies; those remain subject to caller memory/cgroup bounds.
+    """
+    def __init__(self,limit):
+        if not isinstance(limit,int) or limit < 64*MIB:
+            raise ValueError('Shared cache requires at least 64 MiB')
+        self.limit=limit
+        self.lock=threading.RLock()
+        self.entries=collections.OrderedDict()
+        self.used=0
+
+    def touch(self,reader,ident):
+        key=(reader.scope,ident)
+        if key not in self.entries:
+            raise RuntimeError('Shared shard cache record missing')
+        self.entries.move_to_end(key)
+
+    def admit(self,size):
+        if size>self.limit:raise ValueError('Shard exceeds shared RAM cache limit')
+        while self.used+size>self.limit and self.entries:
+            (scope,ident),(reader,path,length)=self.entries.popitem(last=False)
+            known=reader.cache.pop(ident,None)
+            if known!=path:
+                raise RuntimeError('Shared cache accounting mismatch')
+            reader.used-=length
+            self.used-=length
+            path.unlink(missing_ok=True)
+        if self.used+size>self.limit:
+            raise RuntimeError('Cannot admit shard inside shared RAM cache limit')
+
+    def commit(self,reader,ident,path,size):
+        key=(reader.scope,ident)
+        if key in self.entries or self.used+size>self.limit:
+            raise RuntimeError('Shared RAM cache commit would exceed limit')
+        self.entries[key]=(reader,path,size)
+        self.used+=size
+
+    def forget(self,reader):
+        for key,(owner,_,length) in list(self.entries.items()):
+            if owner is reader:
+                del self.entries[key]
+                self.used-=length
+
+
 class Reader:
-    def __init__(self,store,root,scope,cache_bytes=512*MIB,allowed_host=None,allowed_root=None):
+    def __init__(self,store,root,scope,cache_bytes=512*MIB,allowed_host=None,allowed_root=None,shared_cache=None):
         self.store=store;self.root=P(root);self.scope=safe_scope(scope);self.limit=cache_bytes
         self.allowed_host=allowed_host;self.allowed_root=allowed_root;self.manifest=None
-        self.cache=collections.OrderedDict();self.used=0;self.lock=threading.RLock()
+        self.shared_cache=shared_cache
+        self.cache=collections.OrderedDict();self.used=0
+        self.lock=shared_cache.lock if shared_cache is not None else threading.RLock()
         self.directory=self.root/('cache-'+scope);self.directory.mkdir(mode=0o700,parents=True,exist_ok=True)
         for old in self.directory.glob('*.sqlite'):old.unlink()  # own reconstructible RAM cache only
     def refresh(self):
@@ -507,15 +558,24 @@ class Reader:
         self.manifest=m;return m
     def clear(self):
         with self.lock:
+            if self.shared_cache is not None:self.shared_cache.forget(self)
             for path in self.cache.values():path.unlink(missing_ok=True)
             self.cache.clear();self.used=0
     def load(self,part,packed=None):
+        with self.lock:
+            return self._load_locked(part,packed)
+    def _load_locked(self,part,packed):
         ident=part['sha256']
         if ident in self.cache:
-            path=self.cache.pop(ident);self.cache[ident]=path;return path
+            path=self.cache.pop(ident);self.cache[ident]=path
+            if self.shared_cache is not None:self.shared_cache.touch(self,ident)
+            return path
         if part['raw_bytes']>self.limit:raise ValueError('Shard exceeds RAM cache admission limit')
-        while self.used+part['raw_bytes']>self.limit and self.cache:
-            _,old=self.cache.popitem(last=False);self.used-=old.stat().st_size;old.unlink()
+        if self.shared_cache is not None:
+            self.shared_cache.admit(part['raw_bytes'])
+        else:
+            while self.used+part['raw_bytes']>self.limit and self.cache:
+                _,old=self.cache.popitem(last=False);self.used-=old.stat().st_size;old.unlink()
         if packed is None:packed=self.store.get(part['key'],part['packed_bytes'])
         if len(packed)!=part['packed_bytes'] or digest(packed)!=part['packed_sha256']:raise ValueError('Cloud shard checksum mismatch')
         path=self.directory/(ident+'.sqlite');temp=path.with_suffix('.partial');h=hashlib.sha256();n=0
@@ -528,9 +588,13 @@ class Reader:
                     if n>part['raw_bytes']:raise ValueError('Decompressed shard exceeds bound')
                     h.update(b);dst.write(b)
             if n!=part['raw_bytes'] or h.hexdigest()!=ident:raise ValueError('Shard raw checksum mismatch')
-            os.replace(temp,path);self.cache[ident]=path;self.used+=n;return path
+            os.replace(temp,path)
+            self.cache[ident]=path;self.used+=n
+            if self.shared_cache is not None:
+                self.shared_cache.commit(self,ident,path,n)
+            return path
         finally:temp.unlink(missing_ok=True)
-    def read_text(self,path,start_line=1,end_line=None,authorized_roots=None,deadline_seconds=25):
+    def read_text(self,path,start_line=1,end_line=None,authorized_roots=None,deadline_seconds=25,source_host=None):
         """Read immutable cloud body for an exact historical path, without host filesystem IO.
 
         A candidate path is authorized before any body shard is downloaded.
@@ -555,6 +619,8 @@ class Reader:
         with self.lock:
             if not self.manifest:self.refresh()
             m=self.manifest
+            if source_host is not None and source_host != m['source_host']:
+                raise FileNotFoundError('Historical source host mismatch')
             if not under(path,m['source_root']):
                 raise PermissionError('Path outside admitted source root')
             if authorized_roots is not None:
@@ -820,7 +886,7 @@ def tools():
         props=dict(common)
         if name in ['search','search_text']:props['query']={'type':'string'}
         if name=='find_paths':props.update(query={'type':'string'},pattern={'type':'string'})
-        if name=='read_text':props.update(host={'type':'string'},path={'type':'string'},start_line={'type':'integer','minimum':1},end_line={'type':'integer','minimum':1})
+        if name=='read_text':props.update(host={'type':'string'},path={'type':'string'},source_host={'type':'string'},start_line={'type':'integer','minimum':1},end_line={'type':'integer','minimum':1})
         required=['host','path'] if name=='read_text' else (['query'] if name in ['search','search_text'] else [])
         result.append({'name':name,'description':desc,'inputSchema':{'type':'object','properties':props,'required':required},'annotations':{'readOnlyHint':True,'destructiveHint':False}})
     return result
@@ -860,7 +926,7 @@ def serve(reader,port):
                     elif name=='read_text':
                         if args.get('host') not in ('local',HOST):raise ValueError('Wrong cloud read host')
                         allowed=forwarded_acl_roots(args,transport_acl)
-                        out=reader.read_text(args.get('path'),args.get('start_line',1),args.get('end_line'),authorized_roots=allowed)
+                        out=reader.read_text(args.get('path'),args.get('start_line',1),args.get('end_line'),authorized_roots=allowed,source_host=args.get('source_host'))
                         out.update(envelope(args))
                         out['target_host_id']=HOST
                     elif name in ['search','search_text','find_paths']:

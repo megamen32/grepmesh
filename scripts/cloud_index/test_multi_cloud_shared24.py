@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Synthetic isolated mixed 16+8 RAM-reader routing and shared-cache checks.
+
+No real source corpus, private cloud, credential, production service or profiler.
+"""
+import collections
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import tempfile
+import unittest
+
+from cloud_index import (MemoryStore, Publisher, Reader, SharedShardCache,
+                         MIB, document, ensure_tmpfs, json_bytes)
+from multi_cloud import MultiReader
+
+
+def make_stream(host, paths):
+    rows = [{'kind': 'begin', 'format': 1, 'source_host': host,
+             'source_root': '/', 'policy': 'synthetic private history fixture'}]
+    digest = hashlib.sha256()
+    for path, body in sorted(paths):
+        d = document(path, body)
+        rows.append(d)
+        digest.update(json_bytes([d['path'], d['sha256']]))
+    rows.append({'kind': 'end', 'count': len(paths),
+                 'logical_sha256': digest.hexdigest(), 'skipped': {},
+                 'complete_for_policy': True})
+    return io.StringIO(''.join(json.dumps(row) + '\n' for row in rows))
+
+
+def find_bucket_path(host, bucket, modulus):
+    for i in range(300):
+        path = '/private/history/%s/item-%02d-%d.txt' % (host, bucket, i)
+        if hashlib.sha256(path.encode()).digest()[0] % modulus == bucket:
+            return path
+    raise AssertionError('No deterministic synthetic bucket fixture')
+
+
+class SharedCacheMixedSources(unittest.TestCase):
+    def setUp(self):
+        self.user_root = Path('/run/user') / str(os.getuid())
+        ensure_tmpfs(self.user_root)
+        self.directory = tempfile.TemporaryDirectory(
+            prefix='grepmesh-mixed24-source-only-', dir=self.user_root)
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.store = MemoryStore()
+
+    def test_24_private_scopes_one_aggregate_cache_and_two_host_route(self):
+        publisher = Publisher(self.store, self.root, 64 * 1024)
+        scopes = []
+        unique = {}
+        collision = '/private/history/collision.txt'
+        for host, count, prefix in [
+            ('server-100', 16, 'rolling100-20261031t233108z-5732b979-'),
+            ('server-44', 8, 'legacy-server44-')]:
+            collision_bucket = hashlib.sha256(collision.encode()).digest()[0] % count
+            for bucket in range(count):
+                path = find_bucket_path(host, bucket, count)
+                text = 'private marker %s %s' % (host, bucket)
+                unique[(host, bucket)] = (path, text)
+                paths = [(path, text)]
+                if bucket == collision_bucket:
+                    paths.append((collision, 'collision distinct body '+host))
+                scope = prefix + '%02d' % bucket
+                publisher.publish(scope, make_stream(host, paths))
+                scopes.append({'scope': scope, 'source_host': host, 'source_root': '/'})
+        self.assertEqual(len(scopes), 24)
+        federation = MultiReader(self.store, self.root, scopes, cache_mib=512)
+        self.assertIsNotNone(federation.shared_cache)
+        federation.refresh()
+        self.assertEqual(federation.manifest['documents'], 26)
+        self.assertLessEqual(federation.used, 512 * MIB)
+        for host, bucket in [('server-100', 0), ('server-100', 15),
+                              ('server-44', 0), ('server-44', 7)]:
+            path, body = unique[(host, bucket)]
+            result = federation.read_text(path, 1, 1, authorized_roots=['/private'])
+            self.assertEqual(result['source_host'], host)
+            self.assertEqual(result['chunks'][0]['lines'][0]['text'], body)
+            qualified = federation.read_text(path, 1, 1,
+                                            authorized_roots=['/private'],
+                                            source_host=host)
+            self.assertEqual(qualified['chunks'][0]['lines'][0]['text'], body)
+        for host in ('server-100', 'server-44'):
+            result = federation.read_text(collision, 1, 1,
+                                          authorized_roots=['/private'],
+                                          source_host=host)
+            self.assertEqual(result['chunks'][0]['lines'][0]['text'],
+                             'collision distinct body '+host)
+        with self.assertRaisesRegex(ValueError, 'Ambiguous historical path'):
+            federation.read_text(collision, 1, 1, authorized_roots=['/private'])
+        with self.assertRaises(ValueError):
+            federation.read_text(collision, 1, 1, source_host='unknown-host')
+        with self.assertRaises(PermissionError):
+            federation.read_text(collision, 1, 1,
+                                 authorized_roots=['/dev'], source_host='server-44')
+        found = federation.query('private marker', limit=64,
+                                  authorized_roots=['/private'], deadline_seconds=25)
+        self.assertFalse(found['partial'], found['warnings'])
+        self.assertEqual(len(found['results']), 24)
+        self.assertEqual({h['source_host'] for h in found['results']},
+                         {'server-100', 'server-44'})
+        self.assertLessEqual(federation.used, 512 * MIB)
+
+    def test_shared_cache_eviction_and_clear_keep_aggregate_accounting(self):
+        shared = SharedShardCache(64 * MIB)
+        left = Reader(self.store, self.root, 'synthetic-left', 64 * MIB,
+                      shared_cache=shared)
+        right = Reader(self.store, self.root, 'synthetic-right', 64 * MIB,
+                       shared_cache=shared)
+        def install(owner, label):
+            ident = hashlib.sha256(label.encode()).hexdigest()
+            size = 20 * MIB
+            shared.admit(size)
+            path = owner.directory / (ident + '.sqlite')
+            with path.open('xb') as f:
+                f.truncate(size)  # sparse tmpfs test file, no bulk data writes
+            owner.cache[ident] = path
+            owner.used += size
+            shared.commit(owner, ident, path, size)
+            self.assertLessEqual(shared.used, 64 * MIB)
+            return ident, path
+        first, first_path = install(left, 'first')
+        install(right, 'second')
+        install(left, 'third')
+        install(right, 'fourth')
+        self.assertNotIn(first, left.cache)
+        self.assertFalse(first_path.exists())
+        self.assertEqual(shared.used, 60 * MIB)
+        self.assertEqual(shared.used, left.used + right.used)
+        right.clear()
+        self.assertEqual(shared.used, left.used)
+        left.clear()
+        self.assertEqual(shared.used, 0)
+        self.assertFalse(shared.entries)
+
+    def test_legacy_small_scope_cache_keeps_existing_disjoint_quotas(self):
+        # No manifests are fetched: only the constructor cache topology.
+        scopes = [
+            {'scope': 'old-one', 'source_host': 'server-44', 'source_root': '/a'},
+            {'scope': 'old-two', 'source_host': 'server-44', 'source_root': '/b'}]
+        reader = MultiReader(self.store, self.root, scopes, cache_mib=128)
+        self.assertIsNone(reader.shared_cache)
+        self.assertEqual([r.limit for r in reader.readers], [64*MIB, 64*MIB])
+
+
+if __name__ == '__main__':
+    unittest.main()

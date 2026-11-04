@@ -9,21 +9,26 @@ from __future__ import annotations
 import argparse, fnmatch, json, os, time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from cloud_index import CloudStore, Reader, ensure_tmpfs, safe_scope, serve, MIB, HOST, \
+from cloud_index import CloudStore, Reader, SharedShardCache, ensure_tmpfs, safe_scope, serve, MIB, HOST, \
     compile_bounded_regex, regex_match_positions
 from oversize_support import OversizeIndex, oversize_pointer_key
 
 class MultiReader:
     def __init__(self, store, root, scopes, cache_mib=512):
-        if not 1 <= len(scopes) <= 16:
-            raise ValueError('An explicit list of 1..16 scopes is required')
+        if not 1 <= len(scopes) <= 24:
+            raise ValueError('An explicit list of 1..24 scopes is required')
         self.store=store
         self.scope='cloud-text-federation'
         self.readers=[]
         self.limit=cache_mib*MIB
         quota=self.limit//len(scopes)
+        # Preserve existing disjoint quotas for the historical 8-scope reader.
+        # For 16+8 combined scopes, use a single shared 512-MiB-or-less
+        # decoded-shard LRU, not 24 independent 64-MiB allocations.
+        self.shared_cache=None
         if quota < 64*MIB:
-            raise ValueError('Give each scope at least 64 MiB of bounded cache')
+            self.shared_cache=SharedShardCache(self.limit)
+            quota=self.limit
         seen=set()
         self.oversize=[]
         for entry in scopes:
@@ -34,7 +39,8 @@ class MultiReader:
             if not source_host or not Path(source_root).is_absolute() or '..' in Path(source_root).parts:
                 raise ValueError('Invalid cloud source admission')
             seen.add(scope)
-            self.readers.append(Reader(store,root,scope,quota,source_host,source_root))
+            self.readers.append(Reader(store,root,scope,quota,source_host,source_root,
+                                       shared_cache=self.shared_cache))
             spec=entry.get('oversize')
             if spec is not None:
                 # Historical bodies above the 1 MiB shard limit live in a
@@ -59,7 +65,8 @@ class MultiReader:
         return entry['index']
 
     @property
-    def used(self):return sum(x.used for x in self.readers)
+    def used(self):
+        return self.shared_cache.used if self.shared_cache is not None else sum(x.used for x in self.readers)
 
     @property
     def locations(self):
@@ -89,8 +96,8 @@ class MultiReader:
         }
         return self.manifest
 
-    def read_text(self,path,start_line=1,end_line=None,authorized_roots=None,deadline_seconds=25):
-        """Exact historical read. Hash-route the original 8-way archive, never fan out."""
+    def read_text(self,path,start_line=1,end_line=None,authorized_roots=None,deadline_seconds=25,source_host=None):
+        """Exact source-host-qualified history read, probing at most 2 known hash buckets."""
         if not isinstance(path,str) or not path.startswith('/') or '..' in Path(path).parts:
             raise ValueError('Absolute historical path required')
         if self.manifest is None:self.refresh()
@@ -102,33 +109,45 @@ class MultiReader:
                  and r.scope.rsplit('-',1)[-1].isdigit()}
         legacy={int(r.scope.rsplit('-',1)[-1]):r for r in self.readers
                 if r.scope.startswith('legacy-server44-') and r.scope.rsplit('-',1)[-1].isdigit()}
+        if source_host is not None:
+            if not isinstance(source_host,str) or source_host not in {
+                    r.allowed_host for r in self.readers}:
+                raise ValueError('Source host is not an admitted historical host')
+        selected=[]
+        import hashlib
+        first_byte=hashlib.sha256(path.encode('utf-8')).digest()[0]
         if len(rolling)==16 and set(rolling)==set(range(16)):
-            import hashlib
-            bucket=hashlib.sha256(path.encode('utf-8')).digest()[0]%16
-            selected=[rolling[bucket]]
-        elif len(legacy)==8 and set(legacy)==set(range(8)):
-            import hashlib
-            bucket=hashlib.sha256(path.encode('utf-8')).digest()[0]%8
-            selected=[legacy[bucket]]
-        else:
+            selected.append(rolling[first_byte%16])
+        if len(legacy)==8 and set(legacy)==set(range(8)):
+            selected.append(legacy[first_byte%8])
+        if not selected:
             selected=sorted((r for r in self.readers
                              if path==r.manifest['source_root'] or
                              path.startswith(r.manifest['source_root'].rstrip('/')+'/')),
                             key=lambda r:len(r.manifest['source_root']),reverse=True)
+        if source_host is not None:
+            selected=[r for r in selected if r.allowed_host==source_host]
         started=time.monotonic()
+        found=None
         for reader in selected:
             remaining=deadline_seconds-(time.monotonic()-started)
             if remaining<=0:raise TimeoutError('Global historical read deadline')
             try:
-                return reader.read_text(path,start_line,end_line,
-                                        authorized_roots=authorized_roots,
-                                        deadline_seconds=remaining)
+                hit=reader.read_text(path,start_line,end_line,
+                                     authorized_roots=authorized_roots,
+                                     deadline_seconds=remaining,
+                                     source_host=source_host)
             except FileNotFoundError:
                 continue
+            if found is not None:
+                raise ValueError('Ambiguous historical path across hosts: source_host required')
+            found=hit
+        if found is not None:return found
         # Route miss: oversized historical bodies live outside the search
         # shards, so consult each scope's lazily-loaded oversize index. A
         # path stays scoped to the admitting source root; nothing fans out.
         for entry in self.oversize:
+            if source_host is not None and entry['source_host']!=source_host:continue
             root=entry['source_root']
             if not (path==root or path.startswith(root.rstrip('/')+'/')):continue
             remaining=deadline_seconds-(time.monotonic()-started)
