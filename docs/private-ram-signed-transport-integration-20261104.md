@@ -120,11 +120,11 @@ If no existing supported relay implements this contract, **stop at NO_GO**,
 obtain an independently reviewed integration design and its proper approval.
 Do **not** implement a parallel signing/security boundary in GrepMesh.
 
-## Additional mandatory blocker: mixed 16-way + 8-way under 512 MiB
+## Mixed 16-way + 8-way: source-only cache/routing mitigation, not production
 
-The checked-in scripts/cloud_index/multi_cloud.py currently cannot serve
-both the 16 independent native100 rolling partitions and the eight historical
-server44 partitions as **one MultiReader**:
+At prior source commit ec6edd4, the original MultiReader could not serve
+the 16 independent native100 rolling partitions and eight historical server44
+partitions together. The concrete failure conditions were:
 
 - The constructor enforces 1 <= len(scopes) <= 16, while the combined
   corpus requires **24** scopes. This is a hard constructor failure.
@@ -142,19 +142,35 @@ server44 partitions as **one MultiReader**:
   private shard hits but is not preserved as a field of the native Rust
   SearchHit, so the public MCP route cannot prove host-qualified parity.
 
-**Do not work around this by increasing reader limits, doubling independent
-512-MiB caches, or treating path strings as globally unique.** A reviewed
-target design needs *one aggregate* 512-MiB-or-smaller globally accounted
-shard cache (including bounded in-flight buffers), an admission policy for
-24 manifests and lazy path indexes, source-host-qualified exact read routing,
-and explicit ambiguity denial rather than an arbitrary host preference.
-The original 8-scope RAM reader must keep functioning unchanged meanwhile.
+**Source-only correction committed and pushed as 4ec6bc9 (2026-11-04):**
+cloud_index.py now offers SharedShardCache with a shared decoded-SQLite shard
+LRU; multi_cloud.py admits 24 explicit scopes against one shared cache budget,
+preserves the original <=8 disjoint-quota behavior, and checks both hash
+families for exact path reads. An optional source_host selector narrows reads,
+and a duplicate absolute path found on both sources fails closed as ambiguous
+without an explicit selector. No new signer, root grant, production configuration,
+resident 44 reader or private cloud archive was modified.
 
-Required future acceptance includes a bounded synthetic mixed 24-scope
-fixture, duplicate same-path files on two source hosts with distinct hashes,
-an ACL negative for the wrong source, explicit partial/timeout reporting,
-complete host-specific 8-way and 16-way text/regex/read_text coverage, and
-actual process/cgroup accounting under a total 512-MiB cache cap.
+Independent synthetic check: 3/3 new mixed24 tests PASS under one 768-MiB
+cgroup; previous 43 federated checks, 5 rolling16 ACL checks, 6 oversized-regex
+tests also PASS (57 total). This is **NOT full cache acceptance**: transient
+compressed/decoded in-flight peaks, actual 24-manifest sizes, query latency,
+real signed per-host authorization and cgroup pressure have not been measured
+against the real corpus. Only the decoded SQLite cache accounting is shared
+in this source patch. The existing 8-scope production reader is unchanged.
+
+**Still NO_GO:** Do not increase reader limits, duplicate separate 512-MiB
+caches, or assume path strings uniquely identify source hosts. Host selection
+is a caller parameter, not an authorization grant; a real delegated signed
+policy must establish permitted host *and* root scopes before mixing corpora.
+Native Rust SearchHit still lacks source_host provenance and its public read_text
+does not yet carry qualified source selection. The separate signed transport
+bridge and original full production acceptance gates remain mandatory.
+
+Additional live acceptance is still required for full private 24-scope
+configuration, duplicate-path host authorization, partial/timeout coverage,
+per-host OCR/STT and deleted-file parity, and total RAM/cgroup and in-flight
+buffer accounting under the agreed budgets.
 These tests do not replace the already required genuine signed-client ACL,
 full native100 FTS/metadata acceptance or real postboot rollback. The
 original profiler and independent preflight test launches were explicitly
