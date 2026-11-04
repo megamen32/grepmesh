@@ -446,7 +446,9 @@ def prefetched_shards(store, parts, cached, started, deadline_seconds, workers=6
         return
     queue = collections.deque()
     remaining = iter(parts)
-    pool = ThreadPoolExecutor(max_workers=min(workers, len(parts)),
+    # The popped current future counts against this queue's RAM headroom.
+    max_queued = max(1,min(workers, len(parts)))
+    pool = ThreadPoolExecutor(max_workers=max_queued,
                               thread_name_prefix='grepmesh-cloud-get')
     def submit_one():
         try:
@@ -459,11 +461,14 @@ def prefetched_shards(store, parts, cached, started, deadline_seconds, workers=6
             future = pool.submit(store.get, part['key'], part['packed_bytes'])
             queue.append((part, future))
     try:
-        for _ in range(min(workers, len(parts))):
+        for _ in range(max_queued):
             submit_one()
         while queue:
             part, future = queue.popleft()
-            if time.monotonic()-started < deadline_seconds:
+            if (time.monotonic()-started < deadline_seconds and
+                len(queue) < max_queued-1):
+                # Including the popped current future, at most max_queued
+                # compressed requests may be outstanding.
                 submit_one()
             if future is None:
                 yield part, None
@@ -725,7 +730,8 @@ class Reader:
             candidates=[part for part in m['parts'] if glob or might_match(part['bloom'],gram_source.casefold())]
             # Mixed 24-scope query readers share a 512-MiB decoded-shard LRU;
             # bound concurrent compressed cloud payloads separately. A shard
-            # can be up to 64 MiB, so at most two are in flight (<=128 MiB).
+            # can be up to 64 MiB; both pending futures plus queued payloads
+            # remain bounded by this lookahead budget.
             # Preserve the original six-way lookahead for legacy readers.
             cloud_workers=2 if self.shared_cache is not None else 6
             prefetched=prefetched_shards(self.store,candidates,self.cache,started,

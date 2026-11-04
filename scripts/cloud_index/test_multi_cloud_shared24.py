@@ -177,6 +177,47 @@ class SharedCacheMixedSources(unittest.TestCase):
         reader.clear()
         self.assertEqual(shared.used, 0)
 
+    def test_cloud_prefetch_scheduler_does_not_submit_more_than_worker_limit(self):
+        import cloud_index
+        import time
+        from unittest.mock import patch
+
+        class TrackingExecutor:
+            instances = []
+            def __init__(self, max_workers, thread_name_prefix=None):
+                self.max_workers = max_workers
+                self.pending = 0
+                self.peak = 0
+                self.instances.append(self)
+            def submit(self, fn, *args):
+                self.pending += 1
+                self.peak = max(self.peak, self.pending)
+                owner = self
+                class Future:
+                    def result(self, timeout=None):
+                        owner.pending -= 1
+                        return fn(*args)
+                return Future()
+            def shutdown(self, wait=False, cancel_futures=False):
+                pass
+
+        class FakeStore:
+            def get(self, key, maximum):
+                return key.encode('ascii')
+
+        parts = [{'sha256': '%064x' % i,
+                  'key': 'synthetic-%d' % i, 'packed_bytes': 20}
+                 for i in range(7)]
+        with patch.object(cloud_index, 'ThreadPoolExecutor', TrackingExecutor):
+            rows = list(cloud_index.prefetched_shards(
+                FakeStore(), parts, {}, time.monotonic(), 5, workers=2))
+        self.assertEqual(len(rows), 7)
+        self.assertEqual(rows[0][1], b'synthetic-0')
+        executor = TrackingExecutor.instances[-1]
+        self.assertEqual(executor.max_workers, 2)
+        self.assertEqual(executor.peak, 2)
+        self.assertEqual(executor.pending, 0)
+
     def test_legacy_small_scope_cache_keeps_existing_disjoint_quotas(self):
         # No manifests are fetched: only the constructor cache topology.
         scopes = [
