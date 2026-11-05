@@ -4,6 +4,67 @@
 This document is not an authorization to install, reconfigure, restart, reboot,
 read private data, extract a signer key, or retry a denied tool call.
 
+## Production build provenance and remaining release gates (2026-11-05 UTC)
+
+**New executable is installed; complete private 100+44 signed release is NOT accepted.**
+Read-only evidence on server100 on 2026-11-05 03:09 UTC:
+the new system grepmesh-mcp service PID 1926441 runs root-owned
+/opt/grepmesh-custom/grepmesh-mcp (67,497,152 bytes), mtime 01:48:33 UTC,
+SHA256 7dc25dffcc1459865c9189aae217f9737ec10a747002c041c391b68379ac3063.
+The old installed SHA256 was
+32f9ccef3950ea3f194bc476efe4f8823e34a904f478b1687b2786f0d3cefe0d.
+The separately vetted full OCR/STT synthetic candidate SHA256 was
+9dbbedd62331b447e2139e3c5c14aae78a143b608b1a512e64bf9ae7e4560fee.
+Hashes DIFFER: candidate tests must NOT be attributed to current production.
+No adjacent commit/build/test receipt was found in /opt/grepmesh-custom;
+deployment owner and provenance of installed SHA are unverified.
+
+Production tool SCHEMAS show search with rank boolean default true and
+read_text present (without a source_host qualifier). One restricted
+GPTAdmin.ro attempted search was denied HTTP 403 by the read-only WRAPPER,
+not the GrepMesh backend. Do not retry this denied operation through another
+tool, profile, identity or direct shell. No signed-client E2E acceptance exists.
+Previous source-only reader regressions now pass 61/61 at own branch
+02c4c29a108973272777ccd2a32708f238ca46bf, including 24 mixed
+scopes, global bound on in-flight cloud downloads and unified regex deadline.
+They do NOT establish correctness of the unrelated installed executable.
+
+Existing historical44 private reader health through already-configured tunnel
+on 2026-11-05 03:11 UTC returned 200/ready with 849,721 documents,
+415,621,120/536,870,912 bytes decoded-cache use and zero persistent-index
+bytes. No full 100+44 real corpus acceptance or real postboot proof.
+
+Native100 FTS builder was still not running (last exit code1, 2026-11-03
+13:15:39 UTC). Its existing append-only log recorded timeout on immutable
+archive part 000425 after bounded attempts. Pinned local source-cache metadata
+shows parts 000424 and 000425, the latter staged after the failed run;
+this is NOT completed 16-scope FTS replay. Previously denied profiler and
+independent release-guard test operations remain forbidden, including
+rerouting via a different executor.
+
+**Concrete operator acceptance receipts required, in order:**
+1. Installed binary owner: exact installed SHA, source commit, reproducible
+   build/features, install time, prior binary/rollback and signed release
+   acceptance; never infer provenance from schema shape or file mtime.
+2. Authorized original FTS owner: accepted profiler test and single existing
+   builder continuation, all 443 immutable parts, complete corpus and 16
+   numeric scope manifests, memory measured; do not clone/force-run builder.
+3. Existing GPTAdmin trusted signer owner: contract for authenticated
+   Hub-owned filesystem ACL to signed HMAC HTTP request bytes, positive
+   and negative real-client search/read_text, host/root isolation and
+   tampered/unsigned-request rejection; do not invent grants or headers.
+4. Shared server44 operator: approved tenant-impact cold reboot window,
+   restored 165 immutable RAM-only objects, postboot signed client parity
+   and measured rollback, no persistent SQLite FTS.
+5. Release owner: architecture-native atomic cutover and rollback receipts
+   with real search rank/no-rank, read_text, OCR/STT, deleted/oversized
+   documents, full corpus coverage and truthful partial/deadline behavior.
+
+**Decision remains NO_GO for accepted full private corpus cutover.**
+Keep the running installed production and existing protected reader intact.
+This document does not authorize privileged changes, secret access,
+a second builder or any previously denied operation.
+
 ## Grounded interfaces
 
 The native GrepMesh entry point has one MCP `search`, `rank=true` by default,
@@ -153,7 +214,7 @@ resident 44 reader or private cloud archive was modified.
 
 Independent synthetic check: 3/3 new mixed24 tests PASS under one 768-MiB
 cgroup; previous 43 federated checks, 5 rolling16 ACL checks, 6 oversized-regex
-tests also PASS (57 total). This is **NOT full cache acceptance**: transient
+tests also PASS (57 at original checkpoint; 61 later source-only). This is **NOT full cache acceptance**: transient
 compressed/decoded in-flight peaks, actual 24-manifest sizes, query latency,
 real signed per-host authorization and cgroup pressure have not been measured
 against the real corpus. Only the decoded SQLite cache accounting is shared
@@ -204,5 +265,6 @@ scripts mutate root-owned system configuration/services.
   `verify_transport_acl`, `serve`.
 - `deploy/remote44-immutable-restore/sealed_offload_reader.py`: signer gate.
 
-**Gate status:** NO_GO; no real signed ACL E2E, complete 100 FTS, scoped cold
-reboot or production cutover. Preserve the working reader and old runtime.
+**Gate status:** NO_GO for accepted signed 100+44 production despite a
+changed installed server100 executable. No complete 100 FTS, authenticated
+client E2E, or scoped cold reboot receipt. Preserve current running runtime.
