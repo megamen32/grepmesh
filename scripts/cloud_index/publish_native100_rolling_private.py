@@ -17,6 +17,7 @@ import time
 from cloud_index import (CloudStore, Publisher, digest, json_bytes,
                          document, ensure_tmpfs, INDEX_LAYOUT,
                          MAX_DOCUMENT, MAX_MANIFEST, MIB, valid_key)
+from native100_part_checkpoint import BatchSpool, DurableLedger
 
 SNAPSHOT = "20261031T233108Z-5732b979"
 PREFIX = "archives/server-100/rolling/" + SNAPSHOT
@@ -81,6 +82,8 @@ class VerifiedImmutableReuseStore(CloudStore):
         if not isinstance(items, list):
             raise RuntimeError("Private cloud object inventory must be an array")
         known = {}
+        first_rows = {}
+        identical_duplicate_rows = 0
         for item in items:
             if not isinstance(item, dict):
                 raise RuntimeError("Malformed cloud inventory entry")
@@ -98,8 +101,17 @@ class VerifiedImmutableReuseStore(CloudStore):
                 raise RuntimeError("Incomplete private cloud object size/MD5 inventory")
             key = "objects/" + name
             if key in known:
-                raise RuntimeError("Duplicate object in cloud inventory")
+                # A repeated listing row is not another immutable object.
+                # Only exact full metadata equality is harmless; mismatched
+                # size/hash/ID/timestamp/extra fields still fail closed.
+                if item != first_rows[key]:
+                    raise RuntimeError("Conflicting duplicate object in cloud inventory")
+                identical_duplicate_rows += 1
+                continue
+            first_rows[key] = item  # bounded references, not a second payload copy
             known[key] = (size, md5)
+        self.inventory_identical_duplicate_rows = identical_duplicate_rows
+        self.inventory_listed_rows = len(items)
         return known
 
     def bind_verified_source_checkpoint(self, raw, receipt):
@@ -255,13 +267,74 @@ class VerifiedImmutableReuseStore(CloudStore):
         self.bytes_in += len(body)
         return body
 
+    def _read_verified_source_cache(self, key, limit, sha):
+        """Use an existing owner-only tmpfs part iff it matches the pinned snapshot.
+
+        No cache creation, cloud reads, archive mutation or fallback on corrupt
+        bytes. O_NOFOLLOW protects the root, cache directory and part file.
+        """
+        import re
+        import stat
+
+        if not sha or self.verified_source_parts is None:
+            return None
+        if self._pinned_source_hash(key, limit) != sha:
+            raise ValueError("Pinned source cache descriptor mismatch")
+        name = key.rsplit("/", 1)[-1]
+        if not re.fullmatch(r"[0-9]{6}-" + re.escape(sha) + r"\.jsonl\.gz", name):
+            raise ValueError("Invalid pinned source cache filename")
+        dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        root_fd = cache_fd = part_fd = None
+        try:
+            root_fd = os.open(ROOT, dir_flags)
+            cache_fd = os.open("verified-source-cache", dir_flags, dir_fd=root_fd)
+            for handle in (root_fd, cache_fd):
+                meta = os.fstat(handle)
+                if (not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid()
+                        or meta.st_dev != os.stat("/run/user/1000").st_dev
+                        or stat.S_IMODE(meta.st_mode) & 0o077):
+                    raise PermissionError("Unsafe pinned source cache directory")
+            part_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                              dir_fd=cache_fd)
+            meta = os.fstat(part_fd)
+            if (not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid()
+                    or meta.st_dev != os.stat("/run/user/1000").st_dev
+                    or meta.st_nlink != 1 or stat.S_IMODE(meta.st_mode) & 0o077):
+                raise PermissionError("Unsafe pinned source cache part")
+            if meta.st_size != limit:
+                raise ValueError("Pinned source cache size mismatch")
+            with os.fdopen(part_fd, "rb") as handle:
+                part_fd = None
+                data = handle.read(limit + 1)
+            if len(data) != limit or digest(data) != sha:
+                raise ValueError("Pinned source cache SHA256 mismatch")
+        except FileNotFoundError:
+            return None
+        finally:
+            for handle in (part_fd, cache_fd, root_fd):
+                if handle is not None:
+                    os.close(handle)
+        self.gets += 1
+        self.bytes_in += len(data)
+        return data
+
     def get(self, key, limit=64 * MIB):
         # After two bounded fast reads, use single range fallback; never restart
         # the entire 12 MiB full read three more times or accept partial bytes.
         import subprocess
+        import re
         source_part = (key.startswith(PREFIX + "/parts/")
                        and 0 < limit <= 64 * MIB)
         sha = self._pinned_source_hash(key, limit) if source_part else None
+        if source_part:
+            cached = self._read_verified_source_cache(key, limit, sha)
+            if cached is not None:
+                return cached
+            required = os.environ.get("GREPMESH_REQUIRE_CACHED_SOURCE_PART", "")
+            if required and not re.fullmatch(r"[0-9]{6}", required):
+                raise RuntimeError("Invalid required source cache ordinal")
+            if required and key.rsplit("/", 1)[-1].startswith(required + "-"):
+                raise RuntimeError("Required verified source cache missing; no cloud retry")
         attempts = 3
         for attempt in range(attempts):
             try:
@@ -355,12 +428,98 @@ class VerifiedImmutableReuseStore(CloudStore):
         raise RuntimeError("Cloud object check ended without an authoritative result")
 
 
+class PathMetadataSpool:
+    """Ordered path metadata in compressed owner-only tmpfs, not Python tuples.
+
+    No source text or extra search index is created. The original path-index
+    schema, order, SHA256 and row count are preserved. Iteration validates the
+    entire private spool before the caller may commit or publish the index.
+    """
+    MAX_LINE = 65536
+
+    def __init__(self, index, root):
+        import stat
+        root = Path(root)
+        st = root.lstat()
+        runtime = Path('/run/user') / str(os.getuid())
+        if (not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid()
+                or st.st_mode & 0o077 or st.st_dev != runtime.stat().st_dev):
+            raise RuntimeError('Path metadata must stay in owner-only tmpfs')
+        self.path = root / ('path-metadata-%02d-%s.jsonl.gz' % (index, os.urandom(8).hex()))
+        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        self._file = os.fdopen(fd, 'wb')
+        self._gzip = gzip.GzipFile(fileobj=self._file, mode='wb', compresslevel=1, mtime=0)
+        self._count = 0
+        self._logical = hashlib.sha256()
+        self._closed = False
+        self._device = st.st_dev
+
+    @staticmethod
+    def _validate(row):
+        import re
+        if (not isinstance(row, (tuple, list)) or len(row) != 4
+                or not isinstance(row[0], str) or not row[0].startswith('/')
+                or '\x00' in row[0] or '..' in Path(row[0]).parts
+                or type(row[1]) is not int or type(row[2]) is not int
+                or row[1] < 0 or row[2] < 0
+                or not isinstance(row[3], str) or not re.fullmatch('[0-9a-f]{64}', row[3])):
+            raise ValueError('Invalid private path metadata row')
+
+    def append(self, row):
+        if self._closed:
+            raise RuntimeError('Path metadata spool already sealed')
+        self._validate(row)
+        data = json_bytes(row) + b'\n'
+        if len(data) > self.MAX_LINE:
+            raise ValueError('Path metadata row exceeds bound')
+        self._gzip.write(data)
+        self._logical.update(data)
+        self._count += 1
+
+    def close(self):
+        if not self._closed:
+            self._gzip.close()
+            self._file.close()
+            self._closed = True
+
+    def __len__(self):
+        return self._count
+
+    def __iter__(self):
+        import stat
+        self.close()
+        fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as f:
+            st = os.fstat(f.fileno())
+            if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid()
+                    or st.st_nlink != 1 or st.st_mode & 0o077
+                    or st.st_dev != self._device):
+                raise RuntimeError('Unsafe path metadata spool')
+            logical = hashlib.sha256()
+            count = 0
+            with gzip.GzipFile(fileobj=f, mode='rb') as stream:
+                while True:
+                    data = stream.readline(self.MAX_LINE + 1)
+                    if not data:
+                        break
+                    if len(data) > self.MAX_LINE or not data.endswith(b'\n'):
+                        raise ValueError('Path metadata frame exceeds bound')
+                    row = json.loads(data)
+                    self._validate(row)
+                    logical.update(data)
+                    count += 1
+                    yield tuple(row)
+            if count != self._count or logical.digest() != self._logical.digest():
+                raise RuntimeError('Path metadata count or checksum mismatch')
+
+
 class Partition:
     def __init__(self, index, pub):
         self.index = index
         self.publisher = pub
+        self.batch_recorder = None
         self.scope = "rolling100-20261031t233108z-5732b979-%02d" % index
-        self.paths = []
+        self.paths = PathMetadataSpool(index, ROOT)
         self.parts = []
         self.docs = []
         self.pending_bytes = 0
@@ -370,6 +529,8 @@ class Partition:
     def add(self, path, body):
         doc = document(path, body, 0, 0)
         self.paths.append((path, 0, 0, doc["sha256"]))
+        if self.batch_recorder is not None:
+            self.batch_recorder.append(self.index, path, 0, 0, doc["sha256"])
         self.docs.append(doc)
         self.pending_bytes += len(body.encode("utf-8"))
         self.count += 1
@@ -387,6 +548,27 @@ class Partition:
         self.pending_bytes = 0
 
 
+def preflight_required_source_cache(store, progress):
+    """Check the exact pinned part before replaying earlier archive chunks."""
+    import re
+    required = os.environ.get("GREPMESH_REQUIRE_CACHED_SOURCE_PART", "")
+    if not required:
+        return
+    if not re.fullmatch(r"[0-9]{6}", required):
+        raise ValueError("Invalid required immutable source part ordinal")
+    if not isinstance(store, VerifiedImmutableReuseStore):
+        raise RuntimeError("Required source cache needs verified immutable reuse")
+    matches = [part for part in progress["chunks"]
+               if part["key"].rsplit("/", 1)[-1].startswith(required + "-")]
+    if len(matches) != 1:
+        raise RuntimeError("Required source part is not unique in pinned snapshot")
+    part = matches[0]
+    cached = store._read_verified_source_cache(
+        part["key"], part["compressed_bytes"], part["sha256"])
+    if cached is None:
+        raise RuntimeError("Required verified source cache missing before replay")
+
+
 def run():
     os.umask(0o077)
     ensure_tmpfs(ROOT)
@@ -395,7 +577,15 @@ def run():
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as exc:
+        os.close(lock_fd)
         raise RuntimeError("Private FTS build already running; refusing duplicate") from exc
+    try:
+        return _run_locked()
+    finally:
+        os.close(lock_fd)
+
+
+def _run_locked():
     if RECEIPT.exists():
         raise RuntimeError("Existing private search receipt must be inspected; no duplicate run")
     if not AUDIT.is_file():
@@ -421,15 +611,66 @@ def run():
             and progress.get("rows") == ARCHIVED
             and len(progress["chunks"]) == PARTS):
         raise RuntimeError("Provisional cloud source checkpoint was changed")
+    bounded_mode = os.environ.get("GREPMESH_BOUNDED_RESUME_MODE", "")
+    if bounded_mode:
+        if bounded_mode not in ("init", "resume") or not reuse:
+            raise ValueError("Bounded resume requires explicit mode and verified reuse")
+        if os.environ.get("GREPMESH_DURABLE_BUILD_MODE", ""):
+            raise ValueError("Cannot combine checkpoint formats")
+        from native100_bounded_resume import BoundedBuilder
+        engine = BoundedBuilder(store, ROOT, SNAPSHOT, checkpoint, progress, audit)
+        def preflight_uncommitted(cursor):
+            required = os.environ.get("GREPMESH_REQUIRE_CACHED_SOURCE_PART", "")
+            if required:
+                import re
+                if not re.fullmatch(r"[0-9]{6}", required):
+                    raise ValueError("Invalid required source part ordinal")
+                matches = [i for i, part in enumerate(progress["chunks"])
+                           if part["key"].rsplit("/", 1)[-1].startswith(required + "-")]
+                if len(matches) != 1:
+                    raise ValueError("Required part absent from pinned snapshot")
+                if matches[0] >= cursor:
+                    preflight_required_source_cache(store, progress)
+        engine.build(bounded_mode, before_source=preflight_uncommitted)
+        summary = engine.finalize()
+        safe_json(RECEIPT, summary)
+        print(json.dumps(summary, sort_keys=True), flush=True)
+        return summary
+    preflight_required_source_cache(store, progress)
     started = time.monotonic()
     publisher = Publisher(store, ROOT, shard_text_bytes=TARGET_BYTES)
     partitions = [Partition(i, publisher) for i in range(PARTITIONS)]
+    # Off by default, opt-in only under the already reviewed source, cloud
+    # destination, exclusive builder lease and exact restored checkpoint.
+    durable_mode = os.environ.get("GREPMESH_DURABLE_BUILD_MODE", "")
+    if durable_mode not in ("", "init", "resume"):
+        raise ValueError("Unknown durable checkpoint mode")
+    if durable_mode and not reuse:
+        raise RuntimeError("Durable checkpoint requires pinned verified reuse")
+    ledger = (DurableLedger(store, digest(checkpoint), SNAPSHOT, PARTITIONS)
+              if durable_mode else None)
     count = 0
     oversize = 0
     raw_body_bytes = 0
     last_rowid = 0
     first_samples = {}
+    start_part = 0
+    if durable_mode == "init":
+        ledger.init()  # require authoritative absence, never infer from error
+    elif durable_mode == "resume":
+        restored = ledger.restore(partitions)
+        start_part = restored["parts_done"]
+        count = restored["source_rows"]
+        oversize = restored["oversize"]
+        raw_body_bytes = restored["raw_body_bytes"]
+        last_rowid = restored["last_rowid"]
+        first_samples = {int(k):v for k,v in restored.get("first_samples",{}).items()}
+    batch = BatchSpool(ROOT, PARTITIONS) if ledger and start_part < PARTS else None
+    for partition in partitions:
+        partition.batch_recorder = batch
     for idx, part in enumerate(progress["chunks"]):
+        if idx < start_part:
+            continue  # only a fully verified remote checkpoint can skip parts
         packed = store.get(part["key"], part["compressed_bytes"])
         if len(packed) != part["compressed_bytes"] or digest(packed) != part["sha256"]:
             raise RuntimeError("Source archive part failed SHA256")
@@ -462,7 +703,26 @@ def run():
         if part_count != part["rows"] or last_rowid != part["last_rowid"]:
             raise RuntimeError("Archive source row accounting changed")
         if (idx + 1) % 10 == 0 or idx + 1 == PARTS:
+            if ledger is not None:
+                for partition in partitions:
+                    partition.flush()  # no pending docs in a committed batch
+                durable_state = {
+                    "parts_done": idx+1, "source_rows": count,
+                    "oversize": oversize, "raw_body_bytes": raw_body_bytes,
+                    "last_rowid": last_rowid, "first_samples": first_samples,
+                    "partitions": [
+                        {"count":p.count, "logical_sha256":p.logical.hexdigest(),
+                         "parts":p.parts} for p in partitions
+                    ],
+                    "consistent_snapshot": False, "safe_for_deletion": False,
+                }
+                ledger.commit(batch, durable_state)
+                batch = BatchSpool(ROOT, PARTITIONS) if idx+1 < PARTS else None
+                for partition in partitions:
+                    partition.batch_recorder = batch
             safe_json(PROGRESS, {
+                **({"durable_committed_source_parts":ledger.state["parts_done"]}
+                   if ledger else {}),
                 "source_parts_read": idx + 1,
                 "source_rows_read": count,
                 "searchable_documents": sum(p.count for p in partitions),
