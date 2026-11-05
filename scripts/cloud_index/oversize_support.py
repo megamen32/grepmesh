@@ -17,7 +17,7 @@ that share one line number on read, so no line is fabricated, split or
 lost. ``ends_mid_line`` means "the next chunk continues this logical line".
 """
 from __future__ import annotations
-import bisect, hashlib, json, os, re, threading, time, zlib
+import base64, bisect, hashlib, json, os, re, threading, time, zlib
 from pathlib import Path as P
 from cloud_index import MAX_DOCUMENT, MIB, valid_key, json_bytes, digest, \
     regex_match_positions, regex_can_span_newlines
@@ -338,7 +338,8 @@ class OversizeIndex:
         if self.by_path is None:self.refresh()
         return self.manifest,self.by_path
     def read_text(self,path,start_line=1,end_line=None,authorized_roots=None,
-                  deadline_seconds=25):
+                  deadline_seconds=25,byte_offset=None,byte_limit=None,
+                  expected_body_sha256=None):
         """Read lines of one oversized historical body from immutable chunks.
 
         Same auth, deadline and response shape as the 1 MiB shard reader.
@@ -356,6 +357,35 @@ class OversizeIndex:
             if record is None:
                 raise FileNotFoundError('Historical path is not in the oversize index')
             chunks=record['chunks'];line_count=record['line_count']
+            if byte_offset is not None or byte_limit is not None or expected_body_sha256 is not None:
+                if start_line != 1 or end_line is not None:
+                    raise ValueError('Byte and line ranges cannot be combined')
+                if type(byte_offset) is not int or not 0 <= byte_offset <= record['size_bytes']:
+                    raise ValueError('Invalid historical byte offset')
+                if byte_limit is None:byte_limit=256*1024
+                if type(byte_limit) is not int or not 1 <= byte_limit <= 256*1024:
+                    raise ValueError('Invalid historical byte limit')
+                if byte_offset and expected_body_sha256 is None:
+                    raise ValueError('Continuation requires expected body SHA-256')
+                if expected_body_sha256 is not None and expected_body_sha256 != record['body_sha256']:
+                    raise ValueError('Historical body SHA-256 changed')
+                if byte_offset == record['size_bytes']:
+                    raw=b''
+                else:
+                    k=bisect.bisect_right([c['start_byte'] for c in chunks],byte_offset)-1
+                    if time.monotonic()-started>=deadline_seconds:
+                        raise TimeoutError('Historical oversize read deadline')
+                    chunk=chunks[k]
+                    data=self._load_chunk(chunk).encode('utf-8')
+                    local=byte_offset-chunk['start_byte']
+                    raw=data[local:local+byte_limit]
+                next_offset=byte_offset+len(raw)
+                return {'path':path,'source_host':self.host,
+                        'body_sha256':record['body_sha256'],
+                        'size_bytes':record['size_bytes'],'byte_offset':byte_offset,
+                        'next_byte_offset':next_offset,'eof':next_offset==record['size_bytes'],
+                        'data_base64':base64.b64encode(raw).decode('ascii'),
+                        'part_sha256':digest(raw),'snapshot_at':manifest.get('generated_at')}
             if start_line>line_count:
                 return self._empty_result(path,start_line)
             stop=max(start_line,end_line if end_line is not None else line_count)

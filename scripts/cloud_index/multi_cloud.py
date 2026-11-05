@@ -89,7 +89,8 @@ class MultiReader:
         }
         return self.manifest
 
-    def read_text(self,path,start_line=1,end_line=None,authorized_roots=None,deadline_seconds=25):
+    def read_text(self,path,start_line=1,end_line=None,authorized_roots=None,deadline_seconds=25,
+                  byte_offset=None,byte_limit=None,expected_body_sha256=None):
         """Exact historical read. Hash-route the original 8-way archive, never fan out."""
         if not isinstance(path,str) or not path.startswith('/') or '..' in Path(path).parts:
             raise ValueError('Absolute historical path required')
@@ -120,9 +121,12 @@ class MultiReader:
             remaining=deadline_seconds-(time.monotonic()-started)
             if remaining<=0:raise TimeoutError('Global historical read deadline')
             try:
-                return reader.read_text(path,start_line,end_line,
+                result=reader.read_text(path,start_line,end_line,
                                         authorized_roots=authorized_roots,
                                         deadline_seconds=remaining)
+                if byte_offset is not None or byte_limit is not None or expected_body_sha256 is not None:
+                    raise ValueError('Byte ranges are available only for oversized documents')
+                return result
             except FileNotFoundError:
                 continue
         # Route miss: oversized historical bodies live outside the search
@@ -136,7 +140,8 @@ class MultiReader:
             try:
                 return self._oversize_index(entry).read_text(
                     path,start_line,end_line,authorized_roots=authorized_roots,
-                    deadline_seconds=remaining)
+                    deadline_seconds=remaining,byte_offset=byte_offset,
+                    byte_limit=byte_limit,expected_body_sha256=expected_body_sha256)
             except FileNotFoundError:
                 continue
         raise FileNotFoundError('Historical path is not in searchable cloud scopes')

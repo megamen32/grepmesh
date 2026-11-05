@@ -820,7 +820,7 @@ def tools():
         props=dict(common)
         if name in ['search','search_text']:props['query']={'type':'string'}
         if name=='find_paths':props.update(query={'type':'string'},pattern={'type':'string'})
-        if name=='read_text':props.update(host={'type':'string'},path={'type':'string'},start_line={'type':'integer','minimum':1},end_line={'type':'integer','minimum':1})
+        if name=='read_text':props.update(host={'type':'string'},path={'type':'string'},start_line={'type':'integer','minimum':1},end_line={'type':'integer','minimum':1},byte_offset={'type':'integer','minimum':0,'description':'Oversize document byte offset; returns base64 bytes and next offset.'},byte_limit={'type':'integer','minimum':1,'maximum':262144},expected_body_sha256={'type':'string','description':'Required for nonzero byte_offset; pins continuation to the same body.'})
         required=['host','path'] if name=='read_text' else (['query'] if name in ['search','search_text'] else [])
         result.append({'name':name,'description':desc,'inputSchema':{'type':'object','properties':props,'required':required},'annotations':{'readOnlyHint':True,'destructiveHint':False}})
     return result
@@ -860,7 +860,8 @@ def serve(reader,port):
                     elif name=='read_text':
                         if args.get('host') not in ('local',HOST):raise ValueError('Wrong cloud read host')
                         allowed=forwarded_acl_roots(args,transport_acl)
-                        out=reader.read_text(args.get('path'),args.get('start_line',1),args.get('end_line'),authorized_roots=allowed)
+                        byte_args={k:args[k] for k in ('byte_offset','byte_limit','expected_body_sha256') if k in args}
+                        out=reader.read_text(args.get('path'),args.get('start_line',1),args.get('end_line'),authorized_roots=allowed,**byte_args)
                         out.update(envelope(args))
                         out['target_host_id']=HOST
                     elif name in ['search','search_text','find_paths']:
