@@ -63,6 +63,20 @@ class InventoryDuplicateTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(RuntimeError):
                 self.parse([a, b])
 
+    def test_checked_upload_reuses_matching_inventory_and_rejects_collision(self):
+        data = b'known object'
+        row = self.row()
+        row['Size'] = len(data)
+        row['Hashes']['md5'] = hashlib.md5(data).hexdigest()
+        store = self.parse([row])
+        key = 'objects/' + row['Name']
+        store.put_immutable_object(key, data)
+        self.assertEqual(store.reused_from_inventory, 1)
+        with self.assertRaisesRegex(RuntimeError, 'collision'):
+            store.put_immutable_object(key, b'different bytes')
+        with self.assertRaises(ValueError):
+            store.put_immutable_object('other/key', data)
+
     def test_listing_error_or_torn_json_cannot_be_deduplicated_into_success(self):
         for raw, rc in [(b'[]', 1), (b'[', 0), (b'{}', 0), (b'null', 0)]:
             with self.subTest(rc=rc, raw=raw), self.assertRaises(RuntimeError):
