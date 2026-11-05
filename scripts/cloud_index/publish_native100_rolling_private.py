@@ -354,6 +354,12 @@ class VerifiedImmutableReuseStore(CloudStore):
                 time.sleep(min(2 ** attempt, 3))
         raise RuntimeError("Immutable cloud source read unavailable after bounded retries") from failure
 
+    def put_immutable_object(self, key, data):
+        key = valid_key(key)
+        if not key.startswith("objects/"):
+            raise ValueError("Immutable object upload requires objects/ key")
+        return self.put(key, data)
+
     def put(self, key, data):
         key = valid_key(key)
         if not key.startswith("objects/"):

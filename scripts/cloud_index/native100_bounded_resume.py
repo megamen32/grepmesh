@@ -174,7 +174,12 @@ class ObjectIO:
 
     def immutable(self,key,body):
         valid_key(key)
-        if self.exists(key):
+        put_immutable = getattr(self.store, 'put_immutable_object', None)
+        if key.startswith('objects/') and callable(put_immutable):
+            # This store already checks both the verified inventory and remote
+            # existence before writing; do not repeat the same remote stat.
+            put_immutable(key, body)
+        elif self.exists(key):
             if self.store.get(key,len(body)) != body:
                 raise RuntimeError('Immutable object collision; refusing overwrite')
         else:
