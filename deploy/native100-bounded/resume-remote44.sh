@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Resume only after the current builder has stopped; private checkpoint only.
 set -euo pipefail
-base=/home/roomhacker/.local/lib/grepmesh-native100-bounded-ad91dd1
-run=/run/user/1000/grepmesh-native100-bounded-l04-v2
+case "${GREPMESH_BOUNDED_RELEASE:-baseline}" in
+  baseline) base=/home/roomhacker/.local/lib/grepmesh-native100-bounded-ad91dd1; run=/run/user/1000/grepmesh-native100-bounded-l04-v2 ;;
+  optimized) base=/home/roomhacker/.local/lib/grepmesh-native100-bounded-632d940; run=/run/user/1000/grepmesh-native100-bounded-l04-v3 ;;
+  *) echo 'Unknown bounded builder release' >&2; exit 1 ;;
+esac
 if systemctl --user list-units --type=service --state=active --no-legend 'grepmesh-native100-bounded-l04-*.service' | grep -q .; then
   echo 'The existing builder is still active; refusing duplicate.' >&2
   exit 1
