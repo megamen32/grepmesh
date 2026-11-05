@@ -534,6 +534,16 @@ impl GptAdminTopologyClient {
                 failed_registry_probes = ?probe_failures,
                 "GPTAdmin GrepMesh child registry probes failed"
             );
+            // A registry snapshot with failed probes is incomplete. Returning
+            // its successful subset as a fresh provider result would make
+            // callers treat missing routes as absent and could refresh the
+            // wrong topology. Let refresh_cache preserve the prior snapshot
+            // without extending its freshness instead.
+            return Err(anyhow!(
+                "GPTAdmin GrepMesh child registry probe was partial (reachable: {}, failures: {})",
+                peers.len(),
+                probe_failures.join("; ")
+            ));
         }
         if peers.is_empty() {
             let causes = if probe_failures.is_empty() {
@@ -852,8 +862,6 @@ mod tests {
                     {"name":"grepmesh","kind":"child_mcp","status":"online","meta":{"public_mcp_path":"/server/b-alias/mcp"}},
                     {"name":"grepmesh","kind":"child_mcp","status":"online","meta":{"public_mcp_path":"/server/self/mcp"}},
                     {"name":"grepmesh","kind":"child_mcp","status":"stale","meta":{"public_mcp_path":"/server/offline/mcp"}},
-                    {"name":"grepmesh","kind":"child_mcp","status":"online","meta":{"public_mcp_path":"https://untrusted.example/mcp"}},
-                    {"name":"grepmesh","kind":"child_mcp","status":"online","meta":{"public_mcp_path":"/server/failed/mcp"}}
                 ]}))
             }))
             .route("/server/:child/mcp", post(|axum::extract::Path(child): axum::extract::Path<String>, headers: HeaderMap, Json(body): Json<Value>| async move {
@@ -861,7 +869,6 @@ mod tests {
                 assert_eq!(body.pointer("/params/arguments/hosts"), Some(&json!("local")));
                 assert_eq!(body.pointer("/params/arguments/hop_count"), Some(&json!(1)));
                 assert_ne!(child, "offline");
-                if child == "failed" { return Json(json!({"result":{"error":"child unavailable"}})); }
                 let host = if child == "self" { "A" } else { "B" };
                 Json(json!({"result":{"isError":false,"content":[{"type":"text","text":json!({"host_id":host}).to_string()}]}}))
             }));
@@ -913,6 +920,44 @@ mod tests {
             )
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn mixed_registry_probe_success_and_failure_is_not_a_fresh_snapshot() {
+        use axum::{routing::post, Json};
+        let app = axum::Router::new().route(
+            "/server/:child/mcp",
+            post(|axum::extract::Path(child): axum::extract::Path<String>| async move {
+                if child == "failed" {
+                    return Json(json!({"result":{"error":"child unavailable"}}));
+                }
+                Json(json!({"result":{"content":[{"type":"text","text":"{\"host_id\":\"B\"}"}]}}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = GptAdminTopologyClient::from_env(
+            format!("http://{address}/mcp-relay/agents"),
+            "A",
+            None,
+            30_000,
+        );
+
+        let error = client
+            .from_registry(json!({"agents":[
+                {"name":"grepmesh","kind":"child_mcp","status":"online","meta":{"public_mcp_path":"/server/ok/mcp"}},
+                {"name":"grepmesh","kind":"child_mcp","status":"online","meta":{"public_mcp_path":"/server/failed/mcp"}}
+            ]}))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("probe was partial"));
+        assert!(error.contains("reachable: 1"));
+        assert!(error.contains("failed"));
     }
 
     #[tokio::test]
