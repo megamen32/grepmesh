@@ -356,4 +356,33 @@ class BoundedResumeTests(unittest.TestCase):
         with self.assertRaises(PermissionError):reader.read_text(target,authorized_roots=['/opt'])
         self.assertLessEqual(reader.used,64*MIB)
 
+
+class VerifiedObjectFastPathTests(unittest.TestCase):
+    def test_fast_path_skips_duplicate_stat_but_verifies_readback(self):
+        class CheckedStore:
+            def __init__(self): self.data = {}; self.put_calls = 0; self.get_calls = 0
+            def exists(self, key): raise AssertionError('redundant stat')
+            def put_immutable_object(self, key, body):
+                self.put_calls += 1
+                if key in self.data and self.data[key] != body:
+                    raise RuntimeError('Immutable object collision')
+                self.data[key] = body
+            def get(self, key, limit):
+                self.get_calls += 1
+                return self.data[key]
+        store = CheckedStore(); io = ObjectIO(store); key = 'objects/fixture'
+        ref = io.immutable(key, b'content')
+        self.assertEqual(ref['sha256'], digest(b'content'))
+        self.assertEqual((store.put_calls, store.get_calls), (1, 1))
+        with self.assertRaisesRegex(RuntimeError, 'collision'):
+            io.immutable(key, b'different')
+        self.assertEqual(store.data[key], b'content')
+
+    def test_fast_path_rejects_corrupt_readback(self):
+        class CorruptStore:
+            def put_immutable_object(self, key, body): pass
+            def get(self, key, limit): return b'wrong'
+        with self.assertRaisesRegex(RuntimeError, 'readback'):
+            ObjectIO(CorruptStore()).immutable('objects/fixture', b'content')
+
 if __name__=='__main__':unittest.main()
