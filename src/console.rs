@@ -14,8 +14,9 @@ use crate::{
     },
 };
 use axum::{
-    extract::State,
-    http::StatusCode,
+    extract::{Request, State},
+    http::{header, StatusCode},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
@@ -44,6 +45,10 @@ struct ConsoleState {
     backup_catalog: Option<BackupCatalogConfig>,
     config: Arc<Mutex<AppConfig>>,
     previews: Arc<Mutex<BTreeMap<String, PreviewTarget>>>,
+    browser_sso_required: bool,
+    browser_auth_client: reqwest::Client,
+    browser_auth_url: String,
+    browser_hub: Option<crate::gptadmin::BrowserTaskClient>,
 }
 
 #[derive(Clone)]
@@ -64,12 +69,30 @@ pub fn router(
     backup_catalog: Option<BackupCatalogConfig>,
     config: AppConfig,
 ) -> Router {
+    let browser_auth_url = std::env::var("GREPMESH_BROWSER_SSO_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:18991/check".into());
+    let parsed = reqwest::Url::parse(&browser_auth_url).expect("invalid browser SSO URL");
+    assert!(parsed.scheme() == "http" && parsed.host_str() == Some("127.0.0.1")
+        && parsed.username().is_empty() && parsed.password().is_none()
+        && parsed.path() == "/check" && parsed.query().is_none() && parsed.fragment().is_none(),
+        "browser SSO URL must be the loopback check endpoint");
     let state = ConsoleState {
         service,
         jobs,
         backup_catalog,
         config: Arc::new(Mutex::new(config)),
         previews: Arc::new(Mutex::new(BTreeMap::new())),
+        browser_sso_required: std::env::var("GREPMESH_BROWSER_REQUIRE_SSO")
+            .is_ok_and(|value| value == "1"),
+        browser_auth_client: reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("browser auth HTTP client"),
+        browser_auth_url,
+        browser_hub: crate::gptadmin::BrowserTaskClient::from_env()
+            .expect("invalid browser GPTAdmin task configuration"),
     };
     Router::new()
         .route("/", get(|| async { Redirect::temporary("/ui/") }))
@@ -89,7 +112,39 @@ pub fn router(
         .route("/api/search/status", post(search_status))
         .route("/api/preview", post(preview))
         .route("/api/backup/availability", get(backup_availability))
+        .layer(middleware::from_fn_with_state(state.clone(), require_browser_sso))
         .with_state(state)
+}
+
+// Verify the browser cookie with the local GPTAdmin authentication service on
+// every request. In particular, an identity header supplied by a caller is
+// never evidence of a logged-in administrator.
+async fn require_browser_sso(
+    State(state): State<ConsoleState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !state.browser_sso_required {
+        return next.run(request).await;
+    }
+    let Some(cookie) = request.headers().get(header::COOKIE) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Ok(cookie) = cookie.to_str() else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let response = state.browser_auth_client
+        .get(&state.browser_auth_url)
+        .header(header::COOKIE, cookie)
+        .send().await;
+    match response {
+        Ok(response) if response.status().is_success()
+            && response.headers().get("x-gptadmin-user")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| !value.trim().is_empty()) => next.run(request).await,
+        Ok(_) => StatusCode::UNAUTHORIZED.into_response(),
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
 }
 
 async fn index() -> Html<&'static str> {
@@ -319,12 +374,26 @@ async fn browse(State(state): State<ConsoleState>, Json(request): Json<Value>) -
     }
 }
 
+fn validate_browser_search(args: &SearchArgs) -> Result<(), &'static str> {
+    if args.filesystem_acl.is_some() {
+        return Err("filesystem ACL must come from authenticated server context");
+    }
+    Ok(())
+}
+
 async fn search(State(state): State<ConsoleState>, Json(mut args): Json<SearchArgs>) -> Response {
+    if let Err(error) = validate_browser_search(&args) {
+        return bad_request(error);
+    }
     if args.query.trim().is_empty() {
         return bad_request("query must not be empty");
     }
     args.verbose = true;
-    match state.jobs.start((*state.service).clone(), args) {
+    let job = match state.browser_hub.clone() {
+        Some(hub) => state.jobs.start_browser((*state.service).clone(), args, hub),
+        None => state.jobs.start((*state.service).clone(), args),
+    };
+    match job {
         Ok(job_id) => match state.jobs.status(&job_id, None, None) {
             Ok(mut data) => {
                 issue_preview_handles(&state, &mut data);
@@ -430,9 +499,31 @@ async fn preview(State(state): State<ConsoleState>, Json(request): Json<Value>) 
             .line_number
             .saturating_add(MAX_PREVIEW_LINES.saturating_sub(1))
     };
-    match state
-        .service
-        .call_read_text(ReadTextArgs {
+    let read_result = if let Some(hub) = state.browser_hub.as_ref() {
+        let id = format!("{preview_id}:{view}");
+        let route = match hub.route(&target.host) {
+            Ok(route) => route.clone(),
+            Err(error) => return bad_request(error.to_string()),
+        };
+        match hub.call(&target.host, "read_text", json!({
+            "host":target.host, "path":target.path,
+            "start_line":preview_target.line_number.max(1), "end_line":end_line,
+        }), &format!("{id}:read"), Duration::from_secs(30), None).await {
+            Ok(child) => crate::mcp::decode_tool_result::<Value>(child).and_then(|data| {
+                anyhow::ensure!(data.get("host_id").and_then(Value::as_str) == Some(route.executor_host.as_str())
+                    && data.get("target_host_id").and_then(Value::as_str) == Some(target.host.as_str())
+                    && data.get("path").and_then(Value::as_str) == Some(target.path.as_str())
+                    && data.get("host_status").and_then(Value::as_array).is_some_and(|items|
+                        !items.is_empty() && items.iter().all(|entry|
+                            entry.get("host_id").and_then(Value::as_str) == Some(target.host.as_str())
+                            && entry.get("ok").and_then(Value::as_bool) == Some(true))),
+                    "GPTAdmin executor returned a different file");
+                Ok(data)
+            }),
+            Err(error) => Err(error),
+        }
+    } else {
+        state.service.call_read_text(ReadTextArgs {
             host: target.host.clone(),
             path: target.path.clone().into(),
             start_line: Some(preview_target.line_number.max(1)),
@@ -442,9 +533,10 @@ async fn preview(State(state): State<ConsoleState>, Json(request): Json<Value>) 
             hop_count: None,
             filesystem_acl: None,
         })
-        .await
-    {
-        Ok(result) => Json(bounded_preview(result.data, &preview_target)).into_response(),
+        .await.map(|result| result.data)
+    };
+    match read_result {
+        Ok(data) => Json(bounded_preview(data, &preview_target)).into_response(),
         Err(err)
             if matches!(view, "window" | "document")
                 && !target.match_lines.is_empty()
@@ -738,6 +830,38 @@ fn bad_request(message: impl Into<String>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_rejects_client_supplied_filesystem_acl() {
+        let args: SearchArgs = serde_json::from_value(json!({
+            "query": "needle",
+            "filesystem_acl": {
+                "version": 1, "profile_id": "forged", "profile_version": 1,
+                "roots_digest": "a".repeat(64), "job_id": "forged",
+                "target": "shell:host", "tool": "mcp_call",
+                "args_sha256": "b".repeat(64), "read_roots": ["/tmp"]
+            }
+        })).unwrap();
+        assert!(validate_browser_search(&args).is_err());
+        let ordinary: SearchArgs = serde_json::from_value(json!({"query": "needle"})).unwrap();
+        assert!(validate_browser_search(&ordinary).is_ok());
+    }
+
+    #[test]
+    fn same_path_on_two_hosts_produces_distinct_preview_targets() {
+        let mut entries = vec![
+            json!({"host_id":"server-44", "path":"/docs/shared.txt", "line_number":1}),
+            json!({"host_id":"server-88", "path":"/docs/shared.txt", "line_number":1}),
+        ];
+        let mut previews = BTreeMap::new();
+        issue_entry_preview_handles_in_map(&mut previews, &mut entries, None, false);
+        let first = entries[0]["preview_id"].as_str().unwrap();
+        let second = entries[1]["preview_id"].as_str().unwrap();
+        assert_ne!(first, second);
+        assert_eq!(previews[first].host, "server-44");
+        assert_eq!(previews[second].host, "server-88");
+        assert_eq!(previews[first].path, previews[second].path);
+    }
 
     #[test]
     fn browse_preview_capacity_never_expires_handles_from_the_same_response() {

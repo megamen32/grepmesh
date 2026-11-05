@@ -43,6 +43,10 @@ async fn wait_until_ready(client: &Client, base: &str) {
 }
 
 async fn start_console(root: &Path) -> ConsoleHarness {
+    start_console_with_sso(root, false).await
+}
+
+async fn start_console_with_sso(root: &Path, require_sso: bool) -> ConsoleHarness {
     let temp = tempfile::tempdir().unwrap();
     let remote_port = free_port();
     let local_port = free_port();
@@ -61,6 +65,13 @@ async fn start_console(root: &Path) -> ConsoleHarness {
     let child = Command::new(env!("CARGO_BIN_EXE_grepmesh-mcp"))
         .arg("--config")
         .arg(config_path)
+        .env("GREPMESH_BROWSER_REQUIRE_SSO", if require_sso { "1" } else { "0" })
+        .env_remove("GREPMESH_BROWSER_HUB_TOKEN")
+        .env_remove("GREPMESH_BROWSER_SHELL_TARGETS")
+        .env_remove("GREPMESH_BROWSER_HUB_URL")
+        .env_remove("GREPMESH_BROWSER_SSO_URL")
+        .env_remove("GREPMESH_SIGNED_CLOUD_HOST")
+        .env_remove("GREPMESH_CLOUD_ACL_SECRET")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -76,6 +87,19 @@ async fn start_console(root: &Path) -> ConsoleHarness {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn protected_console_denies_missing_cookie_and_forged_identity() {
+    let fixture = tempfile::tempdir().unwrap();
+    let harness = start_console_with_sso(fixture.path(), true).await;
+    let client = Client::new();
+    for path in ["/api/search", "/api/search/status", "/api/preview"] {
+        let response = client.post(format!("{}{path}", harness.local_base))
+            .header("X-GPTAdmin-User", "admin")
+            .json(&json!({})).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+    }
+}
+
 fn assert_browser_json(response: &reqwest::Response) {
     let content_type = response
         .headers()
@@ -86,6 +110,27 @@ fn assert_browser_json(response: &reqwest::Response) {
         content_type.starts_with("application/json"),
         "expected a JSON browser API response, got {content_type:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn browser_search_rejects_client_supplied_acl_over_http() {
+    let fixture = tempfile::tempdir().unwrap();
+    let harness = start_console(fixture.path()).await;
+    let client = Client::new();
+    let forged = client.post(format!("{}/api/search", harness.local_base))
+        .json(&json!({
+            "query": "needle",
+            "filesystem_acl": {
+                "version": 1, "profile_id": "forged", "profile_version": 1,
+                "roots_digest": "a".repeat(64), "job_id": "forged",
+                "target": "shell:host", "tool": "mcp_call",
+                "args_sha256": "b".repeat(64), "read_roots": ["/tmp"]
+            }
+        })).send().await.unwrap();
+    assert_eq!(forged.status(), StatusCode::BAD_REQUEST);
+    let ordinary = client.post(format!("{}/api/search", harness.local_base))
+        .json(&json!({"query": "needle"})).send().await.unwrap();
+    assert_eq!(ordinary.status(), StatusCode::OK);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -119,7 +164,7 @@ async fn local_console_ui_and_catalog_have_a_browser_safe_success_shape() {
         assert!(ui.contains(&format!("data-sort=\"{column}\"")));
     }
     assert!(ui.contains("<script src=\"/ui/markdown-it.js?v=15.0.3\" defer></script>"));
-    assert!(ui.contains("<script src=\"/ui/console.js?v=file-preview-20261020i\" defer></script>"));
+    assert!(ui.contains("<script src=\"/ui/console.js?v=file-editor-20261021c\" defer></script>"));
     assert!(!ui.contains("Directory browsing is not available yet."));
     assert!(ui.contains("id=\"host-failures\""));
 

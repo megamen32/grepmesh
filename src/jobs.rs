@@ -81,6 +81,7 @@ struct SearchJob {
     cursors: BTreeMap<String, usize>,
     lost: bool,
     durability_error: Option<String>,
+    hub_jobs: BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -96,6 +97,8 @@ struct PersistedSearchJob {
     cursors: BTreeMap<String, usize>,
     lost: bool,
     durability_error: Option<String>,
+    #[serde(default)]
+    hub_jobs: BTreeMap<String, String>,
 }
 
 impl Default for SearchJobs {
@@ -150,6 +153,14 @@ impl SearchJobs {
     }
 
     pub fn start(&self, service: MeshService, args: SearchArgs) -> Result<String> {
+        self.start_internal(service, args, None)
+    }
+
+    pub(crate) fn start_browser(&self, service: MeshService, args: SearchArgs, hub: crate::gptadmin::BrowserTaskClient) -> Result<String> {
+        self.start_internal(service, args, Some(hub))
+    }
+
+    fn start_internal(&self, service: MeshService, args: SearchArgs, hub: Option<crate::gptadmin::BrowserTaskClient>) -> Result<String> {
         let started = Instant::now();
         let started_ms = now_ms();
         let job_id = fresh_handle("job")?;
@@ -179,6 +190,7 @@ impl SearchJobs {
                     cursors: BTreeMap::new(),
                     lost: false,
                     durability_error: None,
+                    hub_jobs: if hub.is_some() { targets.iter().map(|host| (host.clone(), String::new())).collect() } else { BTreeMap::new() },
                 },
             );
             self.persist(&job_id, jobs.get_mut(&job_id).expect("inserted job"))?;
@@ -225,6 +237,7 @@ impl SearchJobs {
             let jobs = self.clone();
             let completed_job_id = job_id.clone();
             let service = service.clone();
+            let hub = hub.clone();
             let mut host_args = args.clone();
             host_args.hosts = Some(HostsInput::One(target.clone()));
             // Each host call must have its own mesh request id. A shared id is
@@ -236,10 +249,39 @@ impl SearchJobs {
             tokio::spawn(async move {
                 let host_started = Instant::now();
                 let timeout = Duration::from_millis(service.local.limits.search_job_timeout_ms);
-                let outcome = tokio::time::timeout(
-                    timeout,
-                    service.call_search_with_overall_timeout(host_args, timeout),
-                )
+                let operation = async {
+                    if let Some(hub) = hub {
+                        let route = hub.route(&target)?.clone();
+                        let arguments = json!({"query":host_args.query,"rank":host_args.rank,
+                            "verbose":true,"hosts":route.execution_host,"wait_ms":0,"limit":host_args.limit,
+                            "context_lines":host_args.context_lines,"mode":host_args.mode,
+                            "path_globs":host_args.path_globs,"roots":host_args.roots});
+                        let recorder = jobs.clone();
+                        let record_job = completed_job_id.clone();
+                        let record_host = target.clone();
+                        let on_admitted = Box::new(move |hub_id: &str| -> Result<()> {
+                            let mut entries = recorder.inner.lock().map_err(|_| anyhow::anyhow!("search job lock poisoned"))?;
+                            let job = entries.get_mut(&record_job).ok_or_else(|| anyhow::anyhow!("search job disappeared"))?;
+                            job.hub_jobs.insert(record_host.clone(), hub_id.to_owned());
+                            recorder.persist(&record_job, job)
+                        });
+                        let child = hub.call(&target, "search_text", arguments,
+                            &format!("{completed_job_id}:{target}:search"),
+                            timeout.saturating_sub(Duration::from_secs(2)), Some(on_admitted)).await?;
+                        let data: Value = crate::mcp::decode_tool_result(child)?;
+                        let response: crate::backend::SearchResponse<SearchHit> = serde_json::from_value(data.clone())?;
+                        anyhow::ensure!(response.host_id == route.executor_host
+                            && response.results.iter().all(|hit| hit.host_id == target)
+                            && response.host_status.iter().all(|status| status.host_id == target),
+                            "GPTAdmin executor returned results for a different host");
+                        Ok(crate::mcp::ToolResult { request_id: response.request_id, origin_host: response.origin_host,
+                            hop_count: response.hop_count, host_id: response.host_id, partial: response.partial,
+                            truncated: response.truncated, host_status: response.host_status, data })
+                    } else {
+                        service.call_search_with_overall_timeout(host_args, timeout).await
+                    }
+                };
+                let outcome = tokio::time::timeout(timeout, operation)
                 .await
                 .map_err(|_| anyhow::anyhow!("search job deadline exceeded"))
                 .and_then(|result| result);
@@ -501,6 +543,7 @@ impl SearchJobs {
             "matches": page,
             "host_status": host_status,
             "pending_hosts": job.pending_hosts.iter().cloned().collect::<Vec<_>>(),
+            "hub_task_ids": job.hub_jobs,
         });
         if running || partial {
             data["artifact_id"] = Value::String(job_id.into());
@@ -714,6 +757,7 @@ impl PersistedSearchJob {
             cursors: job.cursors.clone(),
             lost: job.lost,
             durability_error: job.durability_error.clone(),
+            hub_jobs: job.hub_jobs.clone(),
         }
     }
     fn into_job(self) -> SearchJob {
@@ -735,6 +779,7 @@ impl PersistedSearchJob {
             cursors: self.cursors,
             lost: self.lost,
             durability_error: self.durability_error,
+            hub_jobs: self.hub_jobs,
         }
     }
 }
@@ -926,6 +971,7 @@ mod tests {
                     .collect(),
                 lost: false,
                 durability_error: None,
+                hub_jobs: BTreeMap::new(),
             },
         );
         let job = entries.get_mut(job_id).unwrap();
@@ -961,6 +1007,7 @@ mod tests {
                 cursors: BTreeMap::new(),
                 lost: false,
                 durability_error: None,
+                hub_jobs: BTreeMap::new(),
             },
         );
         drop(entries);
@@ -988,6 +1035,7 @@ mod tests {
             cursors: BTreeMap::new(),
             lost: false,
             durability_error: None,
+                hub_jobs: BTreeMap::new(),
         };
         SearchJobs::merge_result(
             &mut job,
@@ -1042,6 +1090,7 @@ mod tests {
                 cursors: BTreeMap::new(),
                 lost: false,
                 durability_error: None,
+                hub_jobs: BTreeMap::new(),
             },
         );
 
@@ -1103,6 +1152,7 @@ mod tests {
                 cursors: BTreeMap::new(),
                 lost: false,
                 durability_error: None,
+                hub_jobs: BTreeMap::new(),
             },
         );
         jobs.persist(job_id, entries.get_mut(job_id).unwrap())

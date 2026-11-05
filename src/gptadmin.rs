@@ -1,5 +1,6 @@
 use crate::topology_cache::{ProviderSnapshot, TopologyNode, TopologySnapshot};
 use anyhow::{anyhow, Context, Result};
+use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
@@ -16,6 +17,181 @@ pub struct GptAdminTopologyClient {
     local_host_id: String,
     ttl_ms: u64,
     client: reqwest::Client,
+}
+
+/// Browser-only task client. The credential remains in the backend; the Hub
+/// creates and revalidates a separate filesystem policy for every operation.
+#[derive(Clone)]
+pub(crate) struct BrowserTaskClient {
+    token: String,
+    targets: BTreeMap<String, BrowserRoute>,
+    client: reqwest::Client,
+    endpoint: String,
+    receipts: std::sync::Arc<std::sync::Mutex<BTreeMap<String, BrowserReceipt>>>,
+}
+
+struct BrowserReceipt { created: std::time::Instant, job_id: Option<String> }
+
+async fn bounded_browser_response(response: reqwest::Response) -> Result<Value> {
+    const LIMIT: usize = 4 * 1024 * 1024;
+    anyhow::ensure!(response.content_length().map_or(true, |length| length <= LIMIT as u64), "GPTAdmin response exceeds limit");
+    let mut stream = response.bytes_stream();
+    let mut data = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        anyhow::ensure!(data.len().saturating_add(chunk.len()) <= LIMIT, "GPTAdmin response exceeds limit");
+        data.extend_from_slice(&chunk);
+    }
+    Ok(serde_json::from_slice(&data)?)
+}
+
+#[derive(Clone, Deserialize)]
+pub(crate) struct BrowserRoute {
+    pub(crate) shell_target: String,
+    pub(crate) child_ref: String,
+    pub(crate) execution_host: String,
+    pub(crate) executor_host: String,
+}
+
+impl BrowserTaskClient {
+    pub(crate) fn from_env() -> Result<Option<Self>> {
+        let Ok(token) = env::var("GREPMESH_BROWSER_HUB_TOKEN") else { return Ok(None) };
+        anyhow::ensure!(!token.trim().is_empty(), "browser Hub credential is empty");
+        anyhow::ensure!(env::var("GREPMESH_BROWSER_REQUIRE_SSO").as_deref() == Ok("1"),
+            "browser Hub access requires browser SSO verification");
+        let targets: BTreeMap<String, BrowserRoute> = serde_json::from_str(
+            &env::var("GREPMESH_BROWSER_SHELL_TARGETS")
+                .context("browser shell target mapping is unavailable")?)?;
+        anyhow::ensure!(!targets.is_empty() && targets.iter().all(|(host, route)|
+            !host.trim().is_empty() && route.shell_target.starts_with("shell:")
+                && !route.shell_target[6..].is_empty() && !route.shell_target.contains(['/', '\\'])
+                && route.child_ref == "GrepMesh" && !route.executor_host.trim().is_empty()
+                && ((route.execution_host == "local" && route.executor_host == *host)
+                    || (route.execution_host == *host && route.executor_host != *host))),
+            "invalid browser shell target mapping");
+        let endpoint = env::var("GREPMESH_BROWSER_HUB_URL").unwrap_or_else(|_| "http://127.0.0.1:9001".into());
+        let parsed = reqwest::Url::parse(&endpoint)?;
+        anyhow::ensure!(parsed.scheme() == "http" && parsed.host_str() == Some("127.0.0.1")
+            && parsed.username().is_empty() && parsed.password().is_none()
+            && parsed.path() == "/" && parsed.query().is_none() && parsed.fragment().is_none(),
+            "browser Hub URL must be a loopback HTTP origin");
+        Ok(Some(Self { token, targets, client: reqwest::Client::builder()
+            .no_proxy().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(10)).build()?,
+            endpoint: endpoint.trim_end_matches('/').into(), receipts: Default::default() }))
+    }
+
+    pub(crate) fn route(&self, host: &str) -> Result<&BrowserRoute> {
+        self.targets.get(host).ok_or_else(|| anyhow!("no GPTAdmin executor mapped for {host}"))
+    }
+
+    pub(crate) async fn call(&self, host: &str, name: &str, args: Value, id: &str, deadline: Duration,
+        on_admitted: Option<Box<dyn Fn(&str) -> Result<()> + Send + Sync>>) -> Result<Value> {
+        let started = std::time::Instant::now();
+        anyhow::ensure!(matches!(name, "search_text" | "read_text"), "unsupported browser operation");
+        let route = self.route(host)?;
+        let known_job = {
+            let mut receipts = self.receipts.lock().map_err(|_| anyhow!("browser task receipt lock failed"))?;
+            receipts.retain(|_, entry| entry.created.elapsed() < Duration::from_secs(3600));
+            match receipts.get(id) {
+                Some(entry) => Some(entry.job_id.clone().ok_or_else(|| anyhow!("browser task admission is pending or unknown; do not resubmit"))?),
+                None => {
+                    anyhow::ensure!(receipts.len() < 4096, "browser task receipt capacity reached");
+                    receipts.insert(id.to_owned(), BrowserReceipt { created: std::time::Instant::now(), job_id: None });
+                    None
+                }
+            }
+        };
+        // The Hub authorizes a filesystem-scoped profile on the registered
+        // child target, then creates the bound shell mcp_call itself. A direct
+        // shell mcp_call is intentionally denied by its coarse policy.
+        let target = format!("mcp:{}:{}", route.shell_target, route.child_ref);
+        let mut body = json!({"target": target, "tool":name, "arguments":args,
+            "background":true, "detail":"full", "idempotency_key":id});
+        let mut result: Value = if let Some(job_id) = known_job {
+            json!({"status":"running", "job_id":job_id})
+        } else {
+        let remaining = deadline.checked_sub(started.elapsed()).filter(|d| !d.is_zero())
+            .ok_or_else(|| anyhow!("browser task deadline elapsed before submission"))?;
+        let mut response = self.client.post(format!("{}/mcp-relay/call", self.endpoint))
+            .timeout(remaining).bearer_auth(&self.token).json(&body).send().await
+            .map_err(|_| anyhow!("GPTAdmin task submission outcome unknown; do not resubmit"))?;
+        if response.status() == reqwest::StatusCode::PRECONDITION_REQUIRED {
+            let refusal = bounded_browser_response(response).await?;
+            // Only the Hub's explicit unexecuted instruction bootstrap may be
+            // retried. Approval refusals and ambiguous outcomes fail closed.
+            if !(refusal.get("executed").and_then(Value::as_bool) == Some(false)
+                && refusal.pointer("/error/code").and_then(Value::as_str) == Some("instructions_required")
+                && refusal.get("instructions").and_then(Value::as_str).is_some()) {
+                let reason = refusal.pointer("/error/code").and_then(Value::as_str)
+                    .or_else(|| refusal.get("status").and_then(Value::as_str)).unwrap_or("precondition_unknown");
+                let approval = refusal.get("approval_id").and_then(Value::as_str).unwrap_or("");
+                anyhow::bail!("GPTAdmin precondition: {} {}", safe_diagnostic(reason, 100, None, Some(&self.token)),
+                    safe_diagnostic(approval, 100, None, Some(&self.token)));
+            }
+            let context = refusal.get("context").and_then(Value::as_str)
+                .filter(|v| !v.is_empty()).ok_or_else(|| anyhow!("GPTAdmin instruction context is missing"))?;
+            body["context"] = json!(context);
+            let remaining = deadline.checked_sub(started.elapsed()).filter(|d| !d.is_zero())
+                .ok_or_else(|| anyhow!("browser task deadline elapsed before instruction continuation"))?;
+            response = self.client.post(format!("{}/mcp-relay/call", self.endpoint))
+                .timeout(remaining).bearer_auth(&self.token).json(&body).send().await
+                .map_err(|_| anyhow!("GPTAdmin task submission outcome unknown; do not resubmit"))?;
+        }
+        let status = response.status();
+        if !status.is_success() {
+            let refusal = bounded_browser_response(response).await.unwrap_or(Value::Null);
+            let reason = refusal.get("error").and_then(Value::as_str)
+                .or_else(|| refusal.pointer("/error/code").and_then(Value::as_str))
+                .or_else(|| refusal.get("detail").and_then(Value::as_str))
+                .unwrap_or("no reason supplied");
+            anyhow::bail!("GPTAdmin task admission failed: HTTP {status}: {}",
+                safe_diagnostic(reason, 300, None, Some(&self.token)));
+        }
+        let result = bounded_browser_response(response).await?;
+        if let Some(job_id) = result.get("job_id").and_then(Value::as_str) {
+            anyhow::ensure!(job_id.len() <= 128 && job_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'), "invalid GPTAdmin task ID");
+            self.receipts.lock().map_err(|_| anyhow!("browser task receipt lock failed after admission; job {job_id} must not be resubmitted"))?
+                .get_mut(id).ok_or_else(|| anyhow!("browser task receipt missing after admission; job {job_id} must not be resubmitted"))?
+                .job_id = Some(job_id.to_owned());
+            if let Some(record) = on_admitted.as_ref() {
+                record(job_id).map_err(|_| anyhow!("could not persist GPTAdmin task {job_id}; do not resubmit"))?;
+            }
+        }
+        result
+        };
+        let job_id = result.get("job_id").and_then(Value::as_str).map(str::to_owned);
+        loop {
+            match result.get("status").and_then(Value::as_str) {
+                Some("completed") => break,
+                Some("failed" | "cancelled" | "canceled") => {
+                    let reason = result.get("error").and_then(Value::as_str).unwrap_or("no reason supplied");
+                    anyhow::bail!("GPTAdmin task {} failed: {}", job_id.as_deref().unwrap_or("unknown"),
+                        safe_diagnostic(reason, 300, None, Some(&self.token)))
+                },
+                Some("running" | "queued" | "pending") => {},
+                _ => anyhow::bail!("GPTAdmin returned an invalid task state"),
+            }
+            let job_id = job_id.as_deref().ok_or_else(|| anyhow!("GPTAdmin task has no job ID"))?;
+            anyhow::ensure!(job_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'), "invalid GPTAdmin task ID");
+            let remaining = deadline.checked_sub(started.elapsed()).filter(|v| *v > Duration::from_millis(300))
+                .ok_or_else(|| anyhow!("GPTAdmin task {job_id} is still running; do not resubmit"))?;
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let poll = self.client.get(format!("{}/mcp-relay/job/{job_id}?detail=full", self.endpoint))
+                .timeout(remaining.saturating_sub(Duration::from_millis(250)))
+                .bearer_auth(&self.token).send().await
+                .map_err(|_| anyhow!("GPTAdmin task {job_id} polling failed; do not resubmit"))?;
+            anyhow::ensure!(poll.status().is_success(), "GPTAdmin task {job_id} polling returned HTTP {}; do not resubmit", poll.status());
+            result = bounded_browser_response(poll).await.map_err(|_| anyhow!("GPTAdmin task {job_id} returned malformed status; do not resubmit"))?;
+        }
+        let child = result.pointer("/response/structuredContent/result/structuredContent/result")
+            .cloned().ok_or_else(|| anyhow!("GPTAdmin task result is missing the child response"))?;
+        if child.get("isError").and_then(Value::as_bool) == Some(true) {
+            let reason = child.pointer("/content/0/text").and_then(Value::as_str).unwrap_or("no reason supplied");
+            anyhow::bail!("GrepMesh child task {} failed: {}", job_id.as_deref().unwrap_or("unknown"),
+                safe_diagnostic(reason, 300, None, Some(&self.token)));
+        }
+        Ok(child)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -731,6 +907,88 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn browser_task_handles_instruction_bootstrap_and_reads_job_once() {
+        use axum::{extract::State, http::StatusCode, routing::{get, post}, Json, Router};
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/mcp-relay/call", post(|State(calls): State<Arc<AtomicUsize>>, Json(body): Json<Value>| async move {
+                assert_eq!(body["target"], "mcp:shell:node:GrepMesh");
+                assert_eq!(body["tool"], "read_text");
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    (StatusCode::PRECONDITION_REQUIRED, Json(json!({"status":"failed","executed":false,
+                        "error":{"code":"instructions_required"},"context":"fixture-context","instructions":"fixture"})))
+                } else {
+                    assert_eq!(body["context"], "fixture-context");
+                    (StatusCode::OK, Json(json!({"status":"running","job_id":"job-fixture"})))
+                }
+            }))
+            .route("/mcp-relay/job/:id", get(|| async { Json(json!({"status":"completed",
+                "response":{"structuredContent":{"result":{"structuredContent":{"result":
+                    {"content":[{"type":"text","text":"fixture"}]}}}}}})) }))
+            .with_state(calls.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let hub = BrowserTaskClient { token:"fixture-secret-value".into(), endpoint:format!("http://{address}"),
+            client:reqwest::Client::new(), receipts:Default::default(), targets:BTreeMap::from([("node".into(), BrowserRoute {
+                shell_target:"shell:node".into(), child_ref:"GrepMesh".into(),
+                execution_host:"local".into(), executor_host:"node".into() })]) };
+        let result = hub.call("node", "read_text", json!({"host":"node","path":"/fixture"}),
+            "fixture-read", Duration::from_secs(5), None).await.unwrap();
+        assert_eq!(result["content"][0]["text"], "fixture");
+        let again = hub.call("node", "read_text", json!({"host":"node","path":"/fixture"}),
+            "fixture-read", Duration::from_secs(5), None).await.unwrap();
+        assert_eq!(again["content"][0]["text"], "fixture");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn browser_task_never_retries_approval_refusal() {
+        use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route("/mcp-relay/call", post(|State(calls): State<Arc<AtomicUsize>>| async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            (StatusCode::PRECONDITION_REQUIRED, Json(json!({"status":"approval_required","approval_id":"approval-fixture"})))
+        })).with_state(calls.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let hub = BrowserTaskClient { token:"fixture-secret-value".into(), endpoint:format!("http://{address}"),
+            client:reqwest::Client::new(), receipts:Default::default(), targets:BTreeMap::from([("node".into(), BrowserRoute {
+                shell_target:"shell:node".into(), child_ref:"GrepMesh".into(),
+                execution_host:"local".into(), executor_host:"node".into() })]) };
+        let error = hub.call("node", "read_text", json!({}), "fixture", Duration::from_secs(5), None).await.unwrap_err();
+        assert!(error.to_string().contains("approval-fixture"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn browser_task_keeps_denial_reason_without_retrying() {
+        use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route("/mcp-relay/call", post(|State(calls): State<Arc<AtomicUsize>>| async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            (StatusCode::FORBIDDEN, Json(json!({"status":"failed","error":"personal MCP requires its exact owner profile"})))
+        })).with_state(calls.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let hub = BrowserTaskClient { token:"fixture-secret-value".into(), endpoint:format!("http://{address}"),
+            client:reqwest::Client::new(), receipts:Default::default(), targets:BTreeMap::from([("node".into(), BrowserRoute {
+                shell_target:"shell:node".into(), child_ref:"GrepMesh".into(),
+                execution_host:"local".into(), executor_host:"node".into() })]) };
+        let error = hub.call("node", "read_text", json!({}), "fixture", Duration::from_secs(5), None).await.unwrap_err();
+        assert!(error.to_string().contains("personal MCP requires its exact owner profile"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
 
     #[tokio::test]
     async fn registry_outage_preserves_cached_relay_routes_across_restart() {
