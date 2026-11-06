@@ -218,11 +218,14 @@ impl BrowserTaskClient {
             json!({"status":"running", "job_id":task_id})
         } else {
             let result = response.get("structuredContent").cloned().unwrap_or(Value::Null);
-            if response.get("isError").and_then(Value::as_bool) == Some(true) || result.get("status").and_then(Value::as_str) == Some("failed") {
+            if response.get("isError").and_then(Value::as_bool) == Some(true) || result.get("status").and_then(Value::as_str) == Some("failed")
+                || (result.get("executed").and_then(Value::as_bool) == Some(false) && result.get("error").is_some()) {
+                let code = result.pointer("/error/code").and_then(Value::as_str).unwrap_or("rejected");
                 let reason = result.pointer("/error/message").and_then(Value::as_str)
                     .or_else(|| result.pointer("/error/code").and_then(Value::as_str))
                     .or_else(|| result.get("error").and_then(Value::as_str)).unwrap_or("task admission rejected");
-                anyhow::bail!("GPTAdmin task admission failed: {}", safe_diagnostic(reason, 300, None, Some(&self.token)));
+                let context = body.pointer("/params/context").and_then(Value::as_str);
+                anyhow::bail!("GPTAdmin task admission failed: {}: {}", safe_diagnostic(code, 80, context, Some(&self.token)), safe_diagnostic(reason, 300, context, Some(&self.token)));
             }
             result
         };
@@ -990,6 +993,34 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn browser_task_preserves_structured_admission_error_without_retry() {
+        use axum::{extract::State, routing::post, Json, Router};
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route("/server/mcp-shell-node-grepmesh/mcp", post(|State(calls): State<Arc<AtomicUsize>>| async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Json(json!({"jsonrpc":"2.0","id":"grepmesh-call","result":{
+                "resultType":"complete", "structuredContent":{
+                    "executed":false,"error":{"code":"fixture_denied","message":"fixture access denied"}
+                }
+            }}))
+        })).with_state(calls.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let hub = BrowserTaskClient { token:"fixture-secret-value".into(), endpoint:format!("http://{address}"),
+            client:reqwest::Client::new(), receipts:Default::default(), targets:BTreeMap::from([("node".into(), BrowserRoute {
+                shell_target:"shell:node".into(), child_ref:"GrepMesh".into(),
+                execution_host:"local".into(), executor_host:"node".into() })]) };
+        let error = hub.call("node", "search_text", json!({}), "fixture", Duration::from_secs(5), None).await.unwrap_err().to_string();
+        assert!(error.contains("fixture_denied"), "missing error code: {error}");
+        assert!(error.contains("fixture access denied"), "missing error message: {error}");
+        assert!(!error.contains("invalid task state"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
 
     #[tokio::test]
     async fn browser_task_handles_instruction_bootstrap_and_reads_job_once() {
