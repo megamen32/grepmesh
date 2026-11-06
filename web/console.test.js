@@ -34,6 +34,17 @@ function rows(f){return f.nodes.results.children.filter(x=>x.className.includes(
 function names(f){return rows(f).map(row=>row.children[0].children[1].textContent);}
 function descendants(node){return[node,...node.children.flatMap(descendants)];}
 async function browse(f){await settle();const root=f.nodes["locations-sidebar"].children[0];f.nodes["locations-sidebar"].dispatch("click",root.children[1]);await settle();}
+test("same cloud path on different source hosts stays separate in preview navigation",async()=>{
+  const f=fixture({responses:{"/api/search":{state:"complete",results:[
+    {path:"/shared/a.txt",preview_id:"first",host_id:"cloud",source_host:"server-100",line_number:1,snippet:"first"},
+    {path:"/shared/a.txt",preview_id:"second",host_id:"cloud",source_host:"server-88",line_number:1,snippet:"second"}
+  ]},"/api/preview":options=>({start_line:1,text:JSON.parse(options.body).preview_id})}});
+  await settle();f.nodes.query.value="needle";f.nodes["search-form"].dispatch("submit");await settle();
+  const row=rows(f).find(item=>item.title.startsWith("server-88"));row.click();await settle();
+  assert.equal(JSON.parse(f.requests.filter(item=>item.url==="/api/preview").at(-1).options.body).preview_id,"second");
+  assert.equal(f.nodes["next-match"].disabled,true);
+  assert.match(content(f.nodes["file-editor-sidebar"]),/server-88/);
+});
 test("nested location click browses its host; sorting covers the full list and unknown dates stay last",async()=>{
   const f=fixture();await browse(f);assert.deepEqual(JSON.parse(f.requests.find(x=>x.url==="/api/browse").options.body),{host:"server-100",path:"/etc"});assert.deepEqual(names(f),["alpha.txt","folder","zeta.txt"]);
   f.sorts[1].click();assert.deepEqual(names(f),["alpha.txt","zeta.txt","folder"]);f.sorts[1].click();assert.deepEqual(names(f),["zeta.txt","alpha.txt","folder"]);

@@ -22,6 +22,7 @@ MAX_DOCUMENT = MIB
 MAX_RAW_SHARD = 64 * MIB
 MAX_MANIFEST = 16 * MIB
 BLOOM_BYTES = 16384
+QUADGRAM_BLOOM_BYTES = 256 * 1024
 EXTENSIONS = {'.rs','.py','.go','.js','.ts','.tsx','.jsx','.vue','.proto','.mjs','.cjs','.jsonl','.md','.txt','.toml','.json','.yaml','.yml','.sh','.html','.css','.sql','.c','.h','.cpp','.cmake','.xml','.csv'}
 SECRET_NAMES = {'auth.json','credentials.json','client_secrets.json','id_rsa','id_ed25519','.env','.netrc'}
 
@@ -303,6 +304,33 @@ def might_match(encoded,query):
     return True
 
 
+def quadgram_bloom_for(texts):
+    """Optional secondary filter: every casefolded four-gram is retained."""
+    bits=bytearray(QUADGRAM_BLOOM_BYTES)
+    modulus=len(bits)*8
+    for text in texts:
+        folded=text.casefold()
+        for g in {folded[i:i+4] for i in range(max(0,len(folded)-3))}:
+            h=zlib.crc32(g.encode('utf-8'))
+            for shift in (0,10,20):
+                bit=((h>>shift)^(h*0x9E3779B1))%modulus
+                bits[bit>>3] |= 1<<(bit&7)
+    return base64.b64encode(bits).decode('ascii')
+
+
+def quadgram_might_match(encoded,query):
+    bits=encoded if isinstance(encoded,bytes) else base64.b64decode(encoded,validate=True)
+    if len(bits)!=QUADGRAM_BLOOM_BYTES:raise ValueError('Invalid quadgram filter length')
+    folded=query.casefold()
+    modulus=len(bits)*8
+    for g in {folded[i:i+4] for i in range(max(0,len(folded)-3))}:
+        h=zlib.crc32(g.encode('utf-8'))
+        for shift in (0,10,20):
+            bit=((h>>shift)^(h*0x9E3779B1))%modulus
+            if not bits[bit>>3] & (1<<(bit&7)):return False
+    return True
+
+
 def document(path,body,size=0,mtime_ns=0):
     data=body.encode('utf-8')
     if len(data)>MAX_DOCUMENT:raise ValueError('Document too large')
@@ -343,8 +371,11 @@ def scan_git(root: P, host: str, output):
 
 
 class Publisher:
-    def __init__(self,store,root,shard_text_bytes=8*MIB):
+    def __init__(self,store,root,shard_text_bytes=8*MIB, max_shard_documents=512):
+        if type(max_shard_documents) is not int or not 1 <= max_shard_documents <= 8192:
+            raise ValueError('Invalid shard document limit')
         self.store=store;self.root=P(root);self.target=max(64*1024,min(shard_text_bytes,16*MIB))
+        self.max_shard_documents=max_shard_documents
     def shard(self,docs):
         scratch=self.root/('build-'+os.urandom(8).hex()+'.sqlite')
         c=sqlite3.connect(scratch)
@@ -377,11 +408,12 @@ class Publisher:
         scratch=self.root/('path-'+os.urandom(8).hex()+'.sqlite')
         c=sqlite3.connect(scratch)
         try:
+            # Glob search scans paths and does its own case folding. A primary
+            # key plus a folded copy and index stored the same long path three
+            # times; duplicates were already rejected by publish().
             c.executescript('''PRAGMA journal_mode=OFF; PRAGMA temp_store=MEMORY;
-                CREATE TABLE paths(path TEXT PRIMARY KEY NOT NULL,size INTEGER,mtime_ns INTEGER,sha TEXT,path_fold TEXT NOT NULL);
-                CREATE INDEX paths_prefix ON paths(path_fold);''')
-            c.executemany('INSERT INTO paths VALUES(?,?,?,?,?)',
-                          ((path,size,mtime,sha,path.casefold()) for path,size,mtime,sha in entries))
+                CREATE TABLE paths(path TEXT NOT NULL,size INTEGER,mtime_ns INTEGER,sha TEXT);''')
+            c.executemany('INSERT INTO paths VALUES(?,?,?,?)', entries)
             c.commit()
             if c.execute('PRAGMA quick_check').fetchone()[0]!='ok':
                 raise RuntimeError('Path index integrity failed')
@@ -417,7 +449,7 @@ class Publisher:
             if digest(d['body'].encode())!=d['sha256']:raise ValueError('Input digest mismatch')
             seen.add(d['path']);h.update(json_bytes([d['path'],d['sha256']]));paths.append((d['path'],d['size'],d['mtime_ns'],d['sha256']))
             docs.append(d);size+=len(d['body'].encode());count+=1
-            if size>=self.target or len(docs)>=512:
+            if size>=self.target or len(docs)>=self.max_shard_documents:
                 parts.extend(self.shard(docs));docs=[];size=0
                 if len(parts)>500:raise ValueError('Scope needs further partitioning; manifest not published')
         if not end or not end.get('complete_for_policy') or end['count']!=count or end['logical_sha256']!=h.hexdigest():
@@ -482,9 +514,10 @@ def prefetched_shards(store, parts, cached, started, deadline_seconds, workers=6
 
 
 class Reader:
-    def __init__(self,store,root,scope,cache_bytes=512*MIB,allowed_host=None,allowed_root=None):
+    def __init__(self,store,root,scope,cache_bytes=512*MIB,allowed_host=None,allowed_root=None,quadgram_overlay=None):
         self.store=store;self.root=P(root);self.scope=safe_scope(scope);self.limit=cache_bytes
         self.allowed_host=allowed_host;self.allowed_root=allowed_root;self.manifest=None
+        self.quadgram_overlay=quadgram_overlay;self.quadgram_filters={}
         self.cache=collections.OrderedDict();self.used=0;self.lock=threading.RLock()
         self.directory=self.root/('cache-'+scope);self.directory.mkdir(mode=0o700,parents=True,exist_ok=True)
         for old in self.directory.glob('*.sqlite'):old.unlink()  # own reconstructible RAM cache only
@@ -504,7 +537,31 @@ class Reader:
             if part['key']!='objects/'+part['sha256']+'.sqlite.gz':raise ValueError('Shard identity mismatch')
             if part['packed_bytes']>MAX_RAW_SHARD:raise ValueError('Packed shard too large')
             if part.get('kind')!='path_index':might_match(part['bloom'],'')
-        self.manifest=m;return m
+        filters={}
+        if self.quadgram_overlay is not None:
+            spec=self.quadgram_overlay
+            if (not isinstance(spec,dict) or set(spec)!={'key','sha256'}
+                or not isinstance(spec['key'],str) or not spec['key'].startswith('overlays/quadgram/')
+                or not re.fullmatch(r'[0-9a-f]{64}',str(spec['sha256']))):
+                raise ValueError('Invalid quadgram overlay reference')
+            raw=self.store.get(valid_key(spec['key']),MAX_MANIFEST)
+            if digest(raw)!=spec['sha256']:raise ValueError('Quadgram overlay checksum mismatch')
+            overlay=json.loads(raw)
+            if (overlay.get('format')!=1 or overlay.get('scope')!=self.scope
+                or overlay.get('source_host')!=m['source_host']
+                or overlay.get('manifest_sha256')!=pointer['sha256']
+                or overlay.get('documents')!=m['documents']
+                or not isinstance(overlay.get('filters'),list)
+                or len(overlay['filters'])!=len(m['parts'])):
+                raise ValueError('Quadgram overlay source binding mismatch')
+            for part,item in zip(m['parts'],overlay['filters']):
+                if not isinstance(item,dict) or item.get('shard_sha256')!=part['sha256']:
+                    raise ValueError('Quadgram overlay shard binding mismatch')
+                bits=base64.b64decode(item.get('quadgram',''),validate=True)
+                if len(bits)!=QUADGRAM_BLOOM_BYTES:raise ValueError('Invalid quadgram filter length')
+                if part['sha256'] in filters:raise ValueError('Duplicate quadgram shard')
+                filters[part['sha256']]=bits
+        self.quadgram_filters=filters;self.manifest=m;return m
     def clear(self):
         with self.lock:
             for path in self.cache.values():path.unlink(missing_ok=True)
@@ -530,7 +587,7 @@ class Reader:
             if n!=part['raw_bytes'] or h.hexdigest()!=ident:raise ValueError('Shard raw checksum mismatch')
             os.replace(temp,path);self.cache[ident]=path;self.used+=n;return path
         finally:temp.unlink(missing_ok=True)
-    def read_text(self,path,start_line=1,end_line=None,authorized_roots=None,deadline_seconds=25):
+    def read_text(self,path,start_line=1,end_line=None,authorized_roots=None,deadline_seconds=25,source_host=None):
         """Read immutable cloud body for an exact historical path, without host filesystem IO.
 
         A candidate path is authorized before any body shard is downloaded.
@@ -555,6 +612,8 @@ class Reader:
         with self.lock:
             if not self.manifest:self.refresh()
             m=self.manifest
+            if source_host is not None and source_host != m['source_host']:
+                raise ValueError('source_host does not match this reader')
             if not under(path,m['source_root']):
                 raise PermissionError('Path outside admitted source root')
             if authorized_roots is not None:
@@ -564,7 +623,9 @@ class Reader:
                     raise PermissionError('Invalid verified filesystem read roots')
                 if not any(under(path,root) for root in authorized_roots):
                     raise PermissionError('Filesystem ACL denies historical path')
-            candidates=[part for part in m['parts'] if might_match(part['bloom'],path)]
+            candidates=[part for part in m['parts'] if might_match(part['bloom'],path)
+                        and (part['sha256'] not in self.quadgram_filters
+                             or quadgram_might_match(self.quadgram_filters[part['sha256']],path))]
             for part,downloaded in prefetched_shards(
                     self.store,candidates,self.cache,started,deadline_seconds,workers=2):
                 if time.monotonic()-started>=deadline_seconds:
@@ -656,7 +717,10 @@ class Reader:
                     'cloud_fetches':self.store.gets-reads0,
                     'elapsed_ms':round((time.monotonic()-started)*1000,2),
                     'complete_for_policy':m['complete_for_policy']}
-            candidates=[part for part in m['parts'] if glob or might_match(part['bloom'],gram_source.casefold())]
+            candidates=[part for part in m['parts'] if glob or (
+                might_match(part['bloom'],gram_source.casefold()) and
+                (part['sha256'] not in self.quadgram_filters or
+                 quadgram_might_match(self.quadgram_filters[part['sha256']],gram_source)))]
             prefetched=prefetched_shards(self.store,candidates,self.cache,started,deadline_seconds)
             for part,downloaded in prefetched:
                 if time.monotonic()-started>deadline_seconds:incomplete.append('query deadline reached; remaining shards not searched');break
@@ -820,7 +884,7 @@ def tools():
         props=dict(common)
         if name in ['search','search_text']:props['query']={'type':'string'}
         if name=='find_paths':props.update(query={'type':'string'},pattern={'type':'string'})
-        if name=='read_text':props.update(host={'type':'string'},path={'type':'string'},start_line={'type':'integer','minimum':1},end_line={'type':'integer','minimum':1},byte_offset={'type':'integer','minimum':0,'description':'Oversize document byte offset; returns base64 bytes and next offset.'},byte_limit={'type':'integer','minimum':1,'maximum':262144},expected_body_sha256={'type':'string','description':'Required for nonzero byte_offset; pins continuation to the same body.'})
+        if name=='read_text':props.update(host={'type':'string'},source_host={'type':'string','description':'Original source host from the search result; required for ambiguous paths.'},path={'type':'string'},start_line={'type':'integer','minimum':1},end_line={'type':'integer','minimum':1},byte_offset={'type':'integer','minimum':0,'description':'Oversize document byte offset; returns base64 bytes and next offset.'},byte_limit={'type':'integer','minimum':1,'maximum':262144},expected_body_sha256={'type':'string','description':'Required for nonzero byte_offset; pins continuation to the same body.'})
         required=['host','path'] if name=='read_text' else (['query'] if name in ['search','search_text'] else [])
         result.append({'name':name,'description':desc,'inputSchema':{'type':'object','properties':props,'required':required},'annotations':{'readOnlyHint':True,'destructiveHint':False}})
     return result
@@ -861,6 +925,7 @@ def serve(reader,port):
                         if args.get('host') not in ('local',HOST):raise ValueError('Wrong cloud read host')
                         allowed=forwarded_acl_roots(args,transport_acl)
                         byte_args={k:args[k] for k in ('byte_offset','byte_limit','expected_body_sha256') if k in args}
+                        if 'source_host' in args:byte_args['source_host']=args['source_host']
                         out=reader.read_text(args.get('path'),args.get('start_line',1),args.get('end_line'),authorized_roots=allowed,**byte_args)
                         out.update(envelope(args))
                         out['target_host_id']=HOST
@@ -883,17 +948,22 @@ def serve(reader,port):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('action',choices=['scan','publish','search','serve']);p.add_argument('--root',default=str(DEFAULT_ROOT));p.add_argument('--scope',default='grepmesh-source');p.add_argument('--source-root',default=os.environ.get('GREPMESH_SOURCE_ROOT',''));p.add_argument('--source-host',default=os.environ.get('GREPMESH_SOURCE_HOST',''));p.add_argument('--cache-mib',type=int,default=512);p.add_argument('--shard-kib',type=int,default=8192);p.add_argument('--query');p.add_argument('--port',type=int,default=19435);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('action',choices=['scan','publish','search','serve']);p.add_argument('--root',default=str(DEFAULT_ROOT));p.add_argument('--scope',default='grepmesh-source');p.add_argument('--source-root',default=os.environ.get('GREPMESH_SOURCE_ROOT',''));p.add_argument('--source-host',default=os.environ.get('GREPMESH_SOURCE_HOST',''));p.add_argument('--cache-mib',type=int,default=512);p.add_argument('--shard-kib',type=int,default=8192);p.add_argument('--max-shard-documents',type=int,default=512);p.add_argument('--query');p.add_argument('--port',type=int,default=19435);a=p.parse_args()
     if hasattr(os,'sched_setaffinity'):os.sched_setaffinity(0,sorted(os.sched_getaffinity(0))[:2])
     os.nice(10)
     if not a.source_root or not a.source_host:raise ValueError('Explicit --source-root and --source-host are required')
     if a.action=='scan':scan_git(P(a.source_root),a.source_host,sys.stdout);return
-    ensure_tmpfs(P(a.root));store=CloudStore()
+    ensure_tmpfs(P(a.root))
+    if a.action == 'publish' and os.environ.get('GREPMESH_REUSE_VERIFIED_SHARDS') == '1':
+        from publish_native100_rolling_private import VerifiedImmutableReuseStore
+        store=VerifiedImmutableReuseStore()
+    else:
+        store=CloudStore()
     if a.action=='publish':
         import fcntl
         with open(P(a.root)/'publisher.lock','w') as lock:
             fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-            m=Publisher(store,a.root,a.shard_kib*1024).publish(a.scope,sys.stdin)
+            m=Publisher(store,a.root,a.shard_kib*1024,a.max_shard_documents).publish(a.scope,sys.stdin)
             report={k:v for k,v in m.items() if k!='parts'};report.update(shards=len(m['parts']),cloud_bytes=sum(x['packed_bytes'] for x in m['parts']),raw_index_bytes=sum(x['raw_bytes'] for x in m['parts']),cloud_uploads=store.puts)
             (P(a.root)/'published.json').write_bytes(json_bytes(report));print(json.dumps(report,ensure_ascii=False))
     else:

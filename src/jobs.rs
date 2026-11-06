@@ -76,7 +76,7 @@ struct SearchJob {
     pending_hosts: BTreeSet<String>,
     host_status: BTreeMap<String, PerHostStatus>,
     results: Vec<SearchHit>,
-    seen_results: BTreeSet<(String, String, usize)>,
+    seen_results: BTreeSet<(String, Option<String>, String, usize)>,
     truncated: bool,
     cursors: BTreeMap<String, usize>,
     lost: bool,
@@ -588,7 +588,7 @@ impl SearchJobs {
                 let Ok(hit) = serde_json::from_value::<SearchHit>(result.clone()) else {
                     continue;
                 };
-                let key = (hit.host_id.clone(), hit.path.clone(), hit.line_number);
+                let key = (hit.host_id.clone(), hit.source_host.clone(), hit.path.clone(), hit.line_number);
                 if job.seen_results.insert(key) && job.results.len() < job.limit {
                     job.results.push(hit);
                 } else {
@@ -764,7 +764,7 @@ impl PersistedSearchJob {
         let seen_results = self
             .results
             .iter()
-            .map(|hit| (hit.host_id.clone(), hit.path.clone(), hit.line_number))
+            .map(|hit| (hit.host_id.clone(), hit.source_host.clone(), hit.path.clone(), hit.line_number))
             .collect();
         SearchJob {
             created_ms: self.created_ms,
@@ -945,6 +945,24 @@ mod tests {
     }
 
     #[test]
+    fn merge_preserves_same_path_from_different_cloud_sources() {
+        let mut job = SearchJob {
+            created_ms: now_ms(), host_id: "cloud".into(), verbose: true, limit: 10,
+            pending_hosts: BTreeSet::new(), host_status: BTreeMap::new(),
+            results: Vec::new(), seen_results: BTreeSet::new(), truncated: false,
+            cursors: BTreeMap::new(), lost: false, durability_error: None,
+            hub_jobs: BTreeMap::new(),
+        };
+        SearchJobs::merge_result(&mut job, json!({"results": [
+            {"host_id":"cloud", "source_host":"server-100", "path":"/shared/a", "line_number":1, "context":[]},
+            {"host_id":"cloud", "source_host":"server-88", "path":"/shared/a", "line_number":1, "context":[]}
+        ]}));
+        assert_eq!(job.results.len(), 2);
+        let restored = PersistedSearchJob::from_job(&job).into_job();
+        assert_eq!(restored.seen_results.len(), 2);
+    }
+
+    #[test]
     fn cursor_bookkeeping_is_bounded_and_artifacts_expire() {
         let temp = tempfile::tempdir().unwrap();
         let limits = LimitsConfig {
@@ -1085,7 +1103,7 @@ mod tests {
                     column: 1,
                     ..Default::default()
                 }],
-                seen_results: BTreeSet::from([("A".into(), "/readable/result.txt".into(), 1)]),
+                seen_results: BTreeSet::from([("A".into(), None, "/readable/result.txt".into(), 1)]),
                 truncated: false,
                 cursors: BTreeMap::new(),
                 lost: false,

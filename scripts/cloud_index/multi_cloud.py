@@ -6,24 +6,48 @@ peer per cloud corpus. Every scope's durable shards remain in Yandex.Disk,
 while each reader uses only bounded tmpfs cache. No native index is changed.
 """
 from __future__ import annotations
-import argparse, fnmatch, json, os, time
+import argparse, fnmatch, hashlib, json, os, re, time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from cloud_index import CloudStore, Reader, ensure_tmpfs, safe_scope, serve, MIB, HOST, \
     compile_bounded_regex, regex_match_positions
 from oversize_support import OversizeIndex, oversize_pointer_key
 
+def route_frozen_readers(readers, path):
+    """Narrow only complete, explicitly identified frozen partition sets.
+
+    Incomplete sets retain the ordinary search path: a partial set is never
+    assumed to prove where a document does or does not exist.
+    """
+    groups={}
+    for reader in readers:
+        match=re.fullmatch(r'frozen(100|88|44)-20261105-b(\d\d)',reader.scope)
+        if not match:continue
+        host,number=match.group(1),int(match.group(2))
+        expected=32 if host=='100' else 16
+        if reader.manifest['source_host']!='server-'+host or reader.manifest['source_root']!='/':continue
+        groups.setdefault(host,{})[number]=reader
+    selected={}
+    for host,buckets in groups.items():
+        count=32 if host=='100' else 16
+        if set(buckets)==set(range(count)):
+            bucket=int.from_bytes(hashlib.sha256(path.encode('utf-8')).digest()[:8],'big')%count
+            selected[host]=buckets[bucket]
+    return [reader for reader in readers if not any(
+        reader in groups[host].values() and reader is not selected[host]
+        for host in selected)]
+
 class MultiReader:
     def __init__(self, store, root, scopes, cache_mib=512):
-        if not 1 <= len(scopes) <= 16:
-            raise ValueError('An explicit list of 1..16 scopes is required')
+        if not 1 <= len(scopes) <= 64:
+            raise ValueError('An explicit list of 1..64 scopes is required')
         self.store=store
         self.scope='cloud-text-federation'
         self.readers=[]
         self.limit=cache_mib*MIB
         quota=self.limit//len(scopes)
-        if quota < 64*MIB:
-            raise ValueError('Give each scope at least 64 MiB of bounded cache')
+        if quota < 4*MIB:
+            raise ValueError('Give each scope at least 4 MiB of bounded cache')
         seen=set()
         self.oversize=[]
         for entry in scopes:
@@ -34,7 +58,8 @@ class MultiReader:
             if not source_host or not Path(source_root).is_absolute() or '..' in Path(source_root).parts:
                 raise ValueError('Invalid cloud source admission')
             seen.add(scope)
-            self.readers.append(Reader(store,root,scope,quota,source_host,source_root))
+            self.readers.append(Reader(store,root,scope,quota,source_host,source_root,
+                                       quadgram_overlay=entry.get('quadgram_overlay')))
             spec=entry.get('oversize')
             if spec is not None:
                 # Historical bodies above the 1 MiB shard limit live in a
@@ -43,6 +68,8 @@ class MultiReader:
                 try:pointer=oversize_pointer_key(spec['host'],spec['snapshot'])
                 except (KeyError,TypeError,ValueError) as error:
                     raise ValueError('Invalid oversize admission') from error
+                if spec['host'] != source_host:
+                    raise ValueError('Oversize source_host does not match scope')
                 if spec.get('pointer_key') and spec['pointer_key']!=pointer:
                     raise ValueError('Oversize pointer mismatch')
                 self.oversize.append({'scope':scope,'source_root':source_root,
@@ -69,6 +96,12 @@ class MultiReader:
     def refresh(self):
         def start_reader(reader):
             m=reader.refresh()
+            # Admission is based on real descriptors, not the largest shard
+            # the format could theoretically contain. Reject the whole
+            # federation before serving if any scope cannot be searched.
+            descriptors=m['parts']+([m['path_index']] if m.get('path_index') else [])
+            if any(part['raw_bytes'] > reader.limit for part in descriptors):
+                raise ValueError(reader.scope+': cache quota below largest shard')
             # Hot path-only indexes are independent per scope and stay in tmpfs.
             if m.get('path_index'):reader.load(m['path_index'])
             return m
@@ -90,18 +123,30 @@ class MultiReader:
         return self.manifest
 
     def read_text(self,path,start_line=1,end_line=None,authorized_roots=None,deadline_seconds=25,
-                  byte_offset=None,byte_limit=None,expected_body_sha256=None):
+                  byte_offset=None,byte_limit=None,expected_body_sha256=None,source_host=None):
         """Exact historical read. Hash-route the original 8-way archive, never fan out."""
         if not isinstance(path,str) or not path.startswith('/') or '..' in Path(path).parts:
             raise ValueError('Absolute historical path required')
         if self.manifest is None:self.refresh()
+        def contains(root):
+            return path==root or path.startswith(root.rstrip('/')+'/')
+        candidates=[r for r in self.readers if contains(r.manifest['source_root'])]
+        oversize=[e for e in self.oversize if contains(e['source_root'])]
+        hosts={r.manifest['source_host'] for r in candidates} | {e['source_host'] for e in oversize}
+        if source_host is not None and (not isinstance(source_host,str) or source_host not in hosts):
+            raise ValueError('source_host does not admit this path')
+        if source_host is None and len(hosts)>1:
+            raise ValueError('source_host is required for a path present in multiple sources')
+        if source_host is not None:
+            candidates=[r for r in candidates if r.manifest['source_host']==source_host]
+            oversize=[e for e in oversize if e['source_host']==source_host]
         # The 16-way server-100 provisional corpus is private and hash-routed;
         # a cold historical path must never require 16 cloud shard downloads.
         # Keep the existing 8-way server-44 behavior exactly unchanged.
-        rolling={int(r.scope.rsplit('-',1)[-1]):r for r in self.readers
+        rolling={int(r.scope.rsplit('-',1)[-1]):r for r in candidates
                  if r.scope.startswith('rolling100-20261031t233108z-5732b979-')
                  and r.scope.rsplit('-',1)[-1].isdigit()}
-        legacy={int(r.scope.rsplit('-',1)[-1]):r for r in self.readers
+        legacy={int(r.scope.rsplit('-',1)[-1]):r for r in candidates
                 if r.scope.startswith('legacy-server44-') and r.scope.rsplit('-',1)[-1].isdigit()}
         if len(rolling)==16 and set(rolling)==set(range(16)):
             import hashlib
@@ -112,10 +157,9 @@ class MultiReader:
             bucket=hashlib.sha256(path.encode('utf-8')).digest()[0]%8
             selected=[legacy[bucket]]
         else:
-            selected=sorted((r for r in self.readers
-                             if path==r.manifest['source_root'] or
-                             path.startswith(r.manifest['source_root'].rstrip('/')+'/')),
+            selected=sorted(candidates,
                             key=lambda r:len(r.manifest['source_root']),reverse=True)
+            selected=route_frozen_readers(selected,path)
         started=time.monotonic()
         for reader in selected:
             remaining=deadline_seconds-(time.monotonic()-started)
@@ -132,7 +176,7 @@ class MultiReader:
         # Route miss: oversized historical bodies live outside the search
         # shards, so consult each scope's lazily-loaded oversize index. A
         # path stays scoped to the admitting source root; nothing fans out.
-        for entry in self.oversize:
+        for entry in oversize:
             root=entry['source_root']
             if not (path==root or path.startswith(root.rstrip('/')+'/')):continue
             remaining=deadline_seconds-(time.monotonic()-started)
@@ -213,7 +257,7 @@ class MultiReader:
         return hits,warnings
 
     def query(self,query,limit=20,glob=False,case_sensitive=False,roots=None,
-              path_globs=None,deadline_seconds=25,authorized_roots=None,regex=False):
+              path_globs=None,deadline_seconds=55,authorized_roots=None,regex=False):
         if self.manifest is None:self.refresh()
         if regex and compile_bounded_regex(query) is None:
             raise ValueError('Invalid regular expression: not an empty result')
@@ -255,29 +299,17 @@ class MultiReader:
                 ident=(hit['source_host'],hit['path'])
                 if ident not in seen:
                     seen.add(ident);results.append(hit)
-        if glob and len(selected)>1:
-            # Path-only indexes are already hot in tmpfs, and independent
-            # glob searches are inexpensive to process in parallel.
+        def read_with_shared_deadline(reader):
+            budget=deadline_seconds-(time.monotonic()-started)
+            if budget<=0:
+                return reader.scope,TimeoutError('Global cloud text deadline; scope not searched')
+            return read_scope(reader,budget)
+        if selected:
+            # Four independent scopes at most. Each queued scope receives the
+            # remaining global budget, never a fresh per-scope deadline.
             with ThreadPoolExecutor(max_workers=min(4,len(selected))) as pool:
-                for name,out in pool.map(lambda r:read_scope(r,deadline_seconds),selected):
+                for name,out in pool.map(read_with_shared_deadline,selected):
                     add_result(name,out)
-        else:
-            # Cloud full-text downloads are expensive and rate-limited.
-            # Never fan out 8 readers * 6 speculative rclone subprocesses:
-            # process scopes in deterministic order, stop when the requested
-            # limit is reached, and share ONE deadline across all scopes.
-            for index,reader in enumerate(selected):
-                budget=deadline_seconds-(time.monotonic()-started)
-                if budget<=0:
-                    warnings.append('Global cloud text deadline; remaining scopes not searched')
-                    break
-                name,out=read_scope(reader,budget)
-                add_result(name,out)
-                if len(results)>=limit:
-                    # Unsearched scopes can contain additional results;
-                    # signal truncation instead of claiming exhaustive search.
-                    truncated |= index<len(selected)-1 or len(results)>limit
-                    break
         truncated |= len(results)>limit
         if self.oversize:
             if len(results)>=limit:

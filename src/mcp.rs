@@ -271,6 +271,8 @@ fn with_search_matches_alias<T: Serialize>(response: SearchResponse<T>) -> Resul
 struct CompactSearchResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_host: Option<String>,
     path: String,
     data: String,
     loc: String,
@@ -280,6 +282,7 @@ struct CompactSearchResult {
 struct CompactSearchRange {
     score: Option<f64>,
     host_id: String,
+    source_host: Option<String>,
     path: String,
     start_line: usize,
     end_line: usize,
@@ -290,6 +293,7 @@ fn compact_search_results(mut hits: Vec<SearchHit>) -> Vec<CompactSearchResult> 
     hits.sort_by(|a, b| {
         a.host_id
             .cmp(&b.host_id)
+            .then(a.source_host.cmp(&b.source_host))
             .then(a.path.cmp(&b.path))
             .then(a.line_number.cmp(&b.line_number))
     });
@@ -314,6 +318,7 @@ fn compact_search_results(mut hits: Vec<SearchHit>) -> Vec<CompactSearchResult> 
 
         if let Some(previous) = ranges.last_mut().filter(|range| {
             range.host_id == hit.host_id
+                && range.source_host == hit.source_host
                 && range.path == hit.path
                 && start_line <= range.end_line.saturating_add(1)
         }) {
@@ -333,6 +338,7 @@ fn compact_search_results(mut hits: Vec<SearchHit>) -> Vec<CompactSearchResult> 
             ranges.push(CompactSearchRange {
                 score: hit.score,
                 host_id: hit.host_id,
+                source_host: hit.source_host,
                 path: hit.path,
                 start_line,
                 end_line,
@@ -366,6 +372,7 @@ fn compact_search_results(mut hits: Vec<SearchHit>) -> Vec<CompactSearchResult> 
                 .is_some_and(|hosts| hosts.len() > 1);
             CompactSearchResult {
                 host: show_host.then_some(range.host_id),
+                source_host: range.source_host,
                 path: range.path,
                 data: range.lines.into_values().collect::<Vec<_>>().join("\n"),
                 loc: if range.start_line == range.end_line {
@@ -603,7 +610,7 @@ impl MeshService {
             });
         }
         results = dedup_hits(results, |item| {
-            (item.host_id.clone(), item.path.clone(), item.line_number)
+            (item.host_id.clone(), item.source_host.clone(), item.path.clone(), item.line_number)
         });
         truncated |= results.len() > limit;
         results.truncate(limit);
@@ -1992,6 +1999,20 @@ mod rank_optout_tests {
     }
     fn fixture(path: &str, score: Option<f64>) -> SearchHit {
         SearchHit { score, host_id:"test".into(),path:path.into(),line_number:1,text:"needle".into(),..Default::default() }
+    }
+
+    #[test]
+    fn compact_results_do_not_merge_distinct_cloud_sources() {
+        let first = SearchHit { host_id: "cloud".into(), source_host: Some("server-100".into()),
+            path: "/shared/a".into(), line_number: 1, text: "first".into(), ..Default::default() };
+        let second = SearchHit { source_host: Some("server-88".into()), text: "second".into(),
+            ..first.clone() };
+        let result = serde_json::to_value(compact_search_results(vec![first, second])).unwrap();
+        assert_eq!(result.as_array().unwrap().len(), 2);
+        assert_eq!(result[0]["source_host"], "server-100");
+        assert_eq!(result[1]["source_host"], "server-88");
+        assert_eq!(result[0]["data"], "first");
+        assert_eq!(result[1]["data"], "second");
     }
     #[test]
     fn compact_output_preserves_rank_and_opt_out() {

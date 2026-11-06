@@ -104,7 +104,7 @@
   function updateFileEditor(entry) {
     dom.fileEditorTitle.textContent=entry.name||entry.path.split(/[\\/]/).pop()||"File view";
     const sidebar=clear(dom.fileEditorSidebar);
-    sidebar.append(element("span","file-editor-kicker","FILE"),element("strong","file-editor-name",entry.name||entry.path.split(/[\\/]/).pop()),element("p","file-editor-path",entry.path),element("p","file-editor-host",`${entry.host||"Host"} · ${formatBytes(entry.size)}`));
+    sidebar.append(element("span","file-editor-kicker","FILE"),element("strong","file-editor-name",entry.name||entry.path.split(/[\\/]/).pop()),element("p","file-editor-path",entry.path),element("p","file-editor-host",`${entry.sourceHost||entry.host||"Host"} · ${formatBytes(entry.size)}`));
     if(state.matches.length>1){
       const navigation=element("section","file-editor-navigation"),controls=element("div","file-editor-match-controls"),previous=element("button","quiet-button","‹ Previous"),next=element("button","quiet-button","Next ›"),match=state.matches[state.matchIndex];
       previous.type=next.type="button";previous.disabled=state.matchIndex<=0;next.disabled=state.matchIndex>=state.matches.length-1;
@@ -112,7 +112,7 @@
       controls.append(previous,next);navigation.append(element("span","file-editor-kicker","MATCHES"),element("p","file-editor-match-position",`Match ${state.matchIndex+1} of ${state.matches.length} · line ${match?.line||entry.matchLine||1}`),controls);sidebar.append(navigation);
     }
     const metadata=element("details","file-editor-metadata"),summary=element("summary","","Metadata"),details=element("dl","detail-grid");
-    for(const [label,value] of [["Size",formatBytes(entry.size)],["Kind",entry.kind],["Created",formatDate(entry.created,true)],["Modified",formatDate(entry.modified,true)],["Host",entry.host],["Path",entry.path]])details.append(element("dt","",label),element("dd","",value));
+    for(const [label,value] of [["Size",formatBytes(entry.size)],["Kind",entry.kind],["Created",formatDate(entry.created,true)],["Modified",formatDate(entry.modified,true)],["Host",entry.sourceHost||entry.host],["Path",entry.path]])details.append(element("dt","",label),element("dd","",value));
     metadata.append(summary,details);sidebar.append(metadata);
   }
   function openFileEditor() {
@@ -144,7 +144,7 @@
     catch(error) { if(version !== state.viewVersion) return; clear(dom.results).append(element("div","empty-results",`Browse unavailable: ${errorMessage(error)}`)); dom.count.textContent = "Unavailable"; setSearchState("error",errorMessage(error)); }
   }
   function selectBrowseEntry(entry, button) { resetMatchNavigation(); state.selected = entry; document.querySelectorAll(".result.selected").forEach(item=>item.classList.remove("selected")); button.classList.add("selected"); browseEntryDetails(entry); if(entry.kind !== "directory" && entry.previewId) loadFilePreview(entry); }
-  function normalizeResults(payload) { const source = dataOf(payload); const raw = pick(source, ["results", "matches", "hits"], []); return (Array.isArray(raw) ? raw : []).map((item, index) => ({ previewId: text(pick(item, ["preview_id"], "")), host: text(pick(item, ["host_id", "host"], "local")), path: text(pick(item, ["path", "file"], "")), kind: "file", size: pick(item,["size"]), modified: pick(item,["modified_ms"]), created: pick(item,["created_ms"]), line: Number(pick(item, ["line_number", "line", "start_line"], 1)) || 1, snippet: text(pick(item, ["snippet", "text", "line_text", "match"], "")), key: `${pick(item, ["preview_id", "id"], "")}:${index}` })).filter((item) => item.path || item.previewId); }
+  function normalizeResults(payload) { const source = dataOf(payload); const raw = pick(source, ["results", "matches", "hits"], []); return (Array.isArray(raw) ? raw : []).map((item, index) => ({ previewId: text(pick(item, ["preview_id"], "")), host: text(pick(item, ["host_id", "host"], "local")), sourceHost: text(pick(item, ["source_host"], "")), path: text(pick(item, ["path", "file"], "")), kind: "file", size: pick(item,["size"]), modified: pick(item,["modified_ms"]), created: pick(item,["created_ms"]), line: Number(pick(item, ["line_number", "line", "start_line"], 1)) || 1, snippet: text(pick(item, ["snippet", "text", "line_text", "match"], "")), key: `${pick(item, ["preview_id", "id"], "")}:${index}` })).filter((item) => item.path || item.previewId); }
   function statusDetails(payload) { const source = dataOf(payload); const hostStatus = pick(source, ["host_status", "hosts"], []); const failures = (Array.isArray(hostStatus) ? hostStatus : []).filter((item) => item && item.ok === false).map((item) => ({ host: text(pick(item, ["host_id", "host", "id"], "unknown host")), error: text(pick(item, ["error", "message"], "No error detail was returned.")) })); return { partial: Boolean(pick(source, ["partial"], false)), truncated: Boolean(pick(source, ["truncated"], false)), failures }; }
   function renderHostFailures(failures) {
     const wasOpen=dom.failures.open===true;
@@ -155,7 +155,7 @@
     failures.forEach(failure=>{const item=element("div","host-failure");item.append(element("strong","",`Host ${failure.host} reported an error`),element("code","",failure.error));list.append(item);});
     dom.failures.append(list);dom.failures.open=wasOpen;dom.failures.hidden=false;
   }
-  function renderResults(results) { clear(dom.results); if(!results.length){dom.results.append(element("div","empty-results","No matching files."));return;}sortedEntries(results).forEach(result=>{const button=fileRow(result);button.title=`${result.host} · ${result.path}:${result.line}\n${result.snippet}`;button.addEventListener("click",()=>selectResult(result,button));dom.results.append(button);}); }
+  function renderResults(results) { clear(dom.results); if(!results.length){dom.results.append(element("div","empty-results","No matching files."));return;}sortedEntries(results).forEach(result=>{const button=fileRow(result);button.title=`${result.sourceHost || result.host} · ${result.path}:${result.line}\n${result.snippet}`;button.addEventListener("click",()=>selectResult(result,button));dom.results.append(button);}); }
   function renderSearch(payload) { const source = dataOf(payload); state.mode = "search"; state.hostRootView = false; state.results = normalizeResults(payload); const details = statusDetails(payload),running=pick(source,["state","status"],"") === "running"; if(running && !state.results.length) { renderSearchProgress(); dom.count.textContent = "Идёт поиск…"; } else { renderResults(state.results); dom.count.textContent = formatCount(state.results.length); } renderHostFailures(details.failures);
     if(running) { const pending=Array.isArray(source.pending_hosts) ? source.pending_hosts.length : null; setSearchState("running",`Идёт поиск${pending == null ? "…" : ` · ожидает узлов: ${pending}`}${details.failures.length ? ` · с ошибкой: ${details.failures.length}` : ""}`);return; }
     if(details.partial && details.truncated)setSearchState("partial","Partial result and truncated result set. Narrow the query, then retry.");else if(details.partial)setSearchState("partial",`Partial result: ${details.failures.length || "one or more"} host responses were unavailable.`);else if(details.truncated)setSearchState("truncated","Results are truncated to the allowed limit. Narrow the query or scope.");else setSearchState("complete",state.results.length ? "Search complete." : "Search complete with no matches.");
@@ -280,7 +280,7 @@
     await preview;
   }
   function selectResult(result) {
-    state.matches = state.results.filter(item => item.host === result.host && item.path === result.path).sort((a, b) => a.line - b.line);
+    state.matches = state.results.filter(item => item.host === result.host && item.sourceHost === result.sourceHost && item.path === result.path).sort((a, b) => a.line - b.line);
     const index = state.matches.findIndex(item => item.key === result.key);
     selectMatch(index < 0 ? 0 : index);
   }

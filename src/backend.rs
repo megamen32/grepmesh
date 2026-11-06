@@ -65,6 +65,9 @@ pub struct SearchHit {
     #[serde(default)]
     pub created_ms: Option<u64>,
     pub host_id: String,
+    /// Original machine for a federated snapshot; host_id names the reader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_host: Option<String>,
     pub path: String,
     pub line_number: usize,
     pub context: Vec<MatchLine>,
@@ -1911,9 +1914,10 @@ fn excluded_relative_path(path: &Path, exclude_globs: &[String]) -> bool {
     })
 }
 
-pub fn dedup_hits<T, F>(items: Vec<T>, key: F) -> Vec<T>
+pub fn dedup_hits<T, F, K>(items: Vec<T>, key: F) -> Vec<T>
 where
-    F: Fn(&T) -> (String, String, usize),
+    F: Fn(&T) -> K,
+    K: Ord,
 {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();

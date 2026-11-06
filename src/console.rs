@@ -55,6 +55,7 @@ struct ConsoleState {
 struct PreviewTarget {
     created: Instant,
     host: String,
+    source_host: Option<String>,
     path: String,
     line_number: usize,
     match_lines: Vec<MatchLine>,
@@ -505,14 +506,20 @@ async fn preview(State(state): State<ConsoleState>, Json(request): Json<Value>) 
             Ok(route) => route.clone(),
             Err(error) => return bad_request(error.to_string()),
         };
-        match hub.call(&target.host, "read_text", json!({
+        let mut arguments = json!({
             "host":target.host, "path":target.path,
             "start_line":preview_target.line_number.max(1), "end_line":end_line,
-        }), &format!("{id}:read"), Duration::from_secs(30), None).await {
+        });
+        if let Some(source_host) = &target.source_host {
+            arguments["source_host"] = json!(source_host);
+        }
+        match hub.call(&target.host, "read_text", arguments, &format!("{id}:read"), Duration::from_secs(30), None).await {
             Ok(child) => crate::mcp::decode_tool_result::<Value>(child).and_then(|data| {
                 anyhow::ensure!(data.get("host_id").and_then(Value::as_str) == Some(route.executor_host.as_str())
                     && data.get("target_host_id").and_then(Value::as_str) == Some(target.host.as_str())
                     && data.get("path").and_then(Value::as_str) == Some(target.path.as_str())
+                    && target.source_host.as_deref().is_none_or(|source|
+                        data.get("source_host").and_then(Value::as_str) == Some(source))
                     && data.get("host_status").and_then(Value::as_array).is_some_and(|items|
                         !items.is_empty() && items.iter().all(|entry|
                             entry.get("host_id").and_then(Value::as_str) == Some(target.host.as_str())
@@ -523,6 +530,9 @@ async fn preview(State(state): State<ConsoleState>, Json(request): Json<Value>) 
             Err(error) => Err(error),
         }
     } else {
+        if target.source_host.is_some() {
+            return bad_request("federated source requires an authenticated browser route");
+        }
         state.service.call_read_text(ReadTextArgs {
             host: target.host.clone(),
             path: target.path.clone().into(),
@@ -722,6 +732,7 @@ fn issue_entry_preview_handles_in_map(
             PreviewTarget {
                 created: Instant::now(),
                 host: host.to_string(),
+                source_host: entry.get("source_host").and_then(Value::as_str).map(str::to_owned),
                 path: path.to_string(),
                 line_number,
                 match_lines,
@@ -861,6 +872,20 @@ mod tests {
         assert_eq!(previews[first].host, "server-44");
         assert_eq!(previews[second].host, "server-88");
         assert_eq!(previews[first].path, previews[second].path);
+    }
+
+    #[test]
+    fn cloud_preview_preserves_original_source_for_identical_paths() {
+        let mut entries = vec![
+            json!({"host_id":"cloud", "source_host":"server-100", "path":"/docs/shared.txt"}),
+            json!({"host_id":"cloud", "source_host":"server-88", "path":"/docs/shared.txt"}),
+        ];
+        let mut previews = BTreeMap::new();
+        issue_entry_preview_handles_in_map(&mut previews, &mut entries, None, false);
+        let first = entries[0]["preview_id"].as_str().unwrap();
+        let second = entries[1]["preview_id"].as_str().unwrap();
+        assert_eq!(previews[first].source_host.as_deref(), Some("server-100"));
+        assert_eq!(previews[second].source_host.as_deref(), Some("server-88"));
     }
 
     #[test]
