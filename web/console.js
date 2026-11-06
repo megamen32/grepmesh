@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const api = Object.freeze({ catalog: "/api/catalog", browse: "/api/browse", search: "/api/search", searchStatus: "/api/search/status", preview: "/api/preview", backup: "/api/backup/availability" });
+  const api = Object.freeze({ catalog: "/api/catalog", browse: "/api/browse", search: "/api/search", searchEvents: "/api/search/events", preview: "/api/preview", backup: "/api/backup/availability" });
   const $ = (id) => document.getElementById(id);
   const markdownRenderer = typeof markdownit === "function" ? markdownit({ html: false, linkify: false, typographer: false }) : null;
   const dom = {
@@ -160,11 +160,22 @@
     if(running) { const pending=Array.isArray(source.pending_hosts) ? source.pending_hosts.length : null; setSearchState("running",`Идёт поиск${pending == null ? "…" : ` · ожидает узлов: ${pending}`}${details.failures.length ? ` · с ошибкой: ${details.failures.length}` : ""}`);return; }
     if(details.partial && details.truncated)setSearchState("partial","Partial result and truncated result set. Narrow the query, then retry.");else if(details.partial)setSearchState("partial",`Partial result: ${details.failures.length || "one or more"} host responses were unavailable.`);else if(details.truncated)setSearchState("truncated","Results are truncated to the allowed limit. Narrow the query or scope.");else setSearchState("complete",state.results.length ? "Search complete." : "Search complete with no matches.");
   }
-  async function pollSearch(payload,version) { let current=payload;if(version===state.viewVersion)renderSearch(current);while(pick(dataOf(current),["state"],"")==="running"){const source=dataOf(current),jobId=source.job_id;if(!jobId)throw new Error("The local API did not return a search job ID.");await new Promise(resolve=>setTimeout(resolve,Math.max(100,Math.min(500,Number(source.next_poll_after_ms)||100))));current=await request(api.searchStatus,{method:"POST",body:JSON.stringify({job_id:jobId})});if(version===state.viewVersion)renderSearch(current);}return current; }
+  async function streamSearch(payload,version) {
+    let current=payload;if(version===state.viewVersion)renderSearch(current);
+    if(pick(dataOf(current),["state"],"")!=="running")return current;
+    const jobId=dataOf(current).job_id;if(!jobId)throw new Error("The local API did not return a search job ID.");
+    const response=await fetch(api.searchEvents,{method:"POST",headers:{Accept:"text/event-stream","Content-Type":"application/json"},body:JSON.stringify({job_id:jobId})});
+    if(!response.ok||!response.body)throw new Error("Search event stream is unavailable.");
+    const reader=response.body.getReader(),decoder=new TextDecoder();let buffer="";
+    try { for(;;) { const part=await reader.read();if(part.done)break;buffer+=decoder.decode(part.value,{stream:true});if(buffer.length>8*1024*1024)throw new Error("Search event is too large.");let end;
+      while((end=buffer.indexOf("\n\n"))>=0){const event=buffer.slice(0,end);buffer=buffer.slice(end+2);const data=event.split("\n").filter(line=>line.startsWith("data:")).map(line=>line.slice(5).trimStart()).join("\n");if(!data)continue;current=JSON.parse(data);if(version===state.viewVersion)renderSearch(current);else return current;if(pick(dataOf(current),["state"],"")!=="running")return current;}
+    } } finally { await reader.cancel(); }
+    throw new Error("Search event stream ended before completion.");
+  }
   async function performSearch(event) {
     event.preventDefault();const query=dom.query.value.trim();if(!query){dom.query.focus();setSearchState("error","Enter text or a pattern before searching.");return;}
     const version=++state.viewVersion;showFiles();dom.button.disabled=true;dom.button.firstElementChild.textContent="Searching";setSearchState("running","Идёт поиск…");dom.count.textContent="Идёт поиск…";state.results=[];state.selected=null;resetPreview();renderSearchProgress();renderHostFailures([]);
-    try{const body={query};if(state.selectedHost)body.hosts=state.selectedHost;if(state.browseTarget){body.hosts=state.browseTarget.host;body.roots=[state.browseTarget.path];}await pollSearch(await request(api.search,{method:"POST",body:JSON.stringify(body)}),version);}
+    try{const body={query};if(state.selectedHost)body.hosts=state.selectedHost;if(state.browseTarget){body.hosts=state.browseTarget.host;body.roots=[state.browseTarget.path];}await streamSearch(await request(api.search,{method:"POST",body:JSON.stringify(body)}),version);}
     catch(error){if(version===state.viewVersion){dom.count.textContent="Unavailable";setSearchState("error",`Search failed: ${errorMessage(error)}`);clear(dom.results).append(element("div","empty-results","Search unavailable."));}}
     finally{dom.button.disabled=false;dom.button.firstElementChild.textContent="Search";loadTelemetry();}
   }

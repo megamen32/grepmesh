@@ -46,6 +46,41 @@ async fn start_console(root: &Path) -> ConsoleHarness {
     start_console_with_sso(root, false).await
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_event_stream_returns_all_matches_without_pages() {
+    use futures::StreamExt;
+    let fixture = tempfile::tempdir().unwrap();
+    for n in 0..40 {
+        fs::write(fixture.path().join(format!("file-{n:02}.txt")), "stream_fixture_marker\n").unwrap();
+    }
+    let harness = start_console(fixture.path()).await;
+    let client = Client::new();
+    let search: Value = client.post(format!("{}/api/search", harness.local_base))
+        .json(&json!({"query":"stream_fixture_marker", "limit":64})).send().await.unwrap().json().await.unwrap();
+    let job = search["job_id"].as_str().expect("search must retain its task ID");
+    let response = client.post(format!("{}/api/search/events", harness.local_base))
+        .json(&json!({"job_id":job})).send().await.unwrap();
+    assert!(response.headers()["content-type"].to_str().unwrap().starts_with("text/event-stream"));
+    let mut bytes = response.bytes_stream();
+    let mut buffer = String::new();
+    let final_state = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(chunk) = bytes.next().await {
+            buffer.push_str(std::str::from_utf8(&chunk.unwrap()).unwrap());
+            while let Some(end) = buffer.find("\n\n") {
+                let event = buffer.drain(..end + 2).collect::<String>();
+                if let Some(line) = event.lines().find_map(|line| line.strip_prefix("data: ")) {
+                    let data: Value = serde_json::from_str(line).unwrap();
+                    if data["state"] != "running" { return data; }
+                }
+            }
+        }
+        panic!("search event stream ended before completion")
+    }).await.unwrap();
+    assert_eq!(final_state["state"], "complete");
+    assert_eq!(final_state["results"].as_array().unwrap().len(), 40);
+    assert!(final_state.get("cursor").is_none());
+}
+
 async fn start_console_with_sso(root: &Path, require_sso: bool) -> ConsoleHarness {
     let temp = tempfile::tempdir().unwrap();
     let remote_port = free_port();
@@ -92,7 +127,7 @@ async fn protected_console_denies_missing_cookie_and_forged_identity() {
     let fixture = tempfile::tempdir().unwrap();
     let harness = start_console_with_sso(fixture.path(), true).await;
     let client = Client::new();
-    for path in ["/api/search", "/api/search/status", "/api/preview"] {
+    for path in ["/api/search", "/api/search/status", "/api/search/events", "/api/preview"] {
         let response = client.post(format!("{}{path}", harness.local_base))
             .header("X-GPTAdmin-User", "admin")
             .json(&json!({})).send().await.unwrap();
@@ -182,8 +217,8 @@ async fn local_console_ui_and_catalog_have_a_browser_safe_success_shape() {
     assert!(script.contains("browseDirectory(root)"));
     assert!(script.contains("renderHostFailures(details.failures)"));
     assert!(script.contains("Host ${failure.host} reported an error"));
-    assert!(script.contains("/api/search/status"));
-    assert!(script.contains("pollSearch"));
+    assert!(script.contains("/api/search/events"));
+    assert!(script.contains("streamSearch"));
     assert!(script.contains("/api/host-status"));
     assert!(script.contains("/api/telemetry"));
     let markdown = client

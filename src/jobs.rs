@@ -59,6 +59,7 @@ pub struct SearchJobs {
     inner: Arc<Mutex<BTreeMap<String, SearchJob>>>,
     persistence: Option<Arc<JobPersistence>>,
     telemetry: Arc<Mutex<TelemetryStore>>,
+    changes: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 struct JobPersistence {
@@ -107,6 +108,7 @@ impl Default for SearchJobs {
             inner: Arc::new(Mutex::new(BTreeMap::new())),
             persistence: None,
             telemetry: Arc::new(Mutex::new(TelemetryStore::default())),
+            changes: Arc::new(tokio::sync::watch::channel(0).0),
         }
     }
 }
@@ -143,6 +145,7 @@ impl SearchJobs {
         Ok(Self {
             inner: Arc::new(Mutex::new(BTreeMap::new())),
             telemetry: Arc::new(Mutex::new(telemetry)),
+            changes: Arc::new(tokio::sync::watch::channel(0).0),
             persistence: Some(Arc::new(JobPersistence {
                 dir,
                 ttl_ms: limits.search_job_ttl_ms.max(1_000),
@@ -365,6 +368,7 @@ impl SearchJobs {
                     ) {
                         eprintln!("search telemetry persistence failed: {error}");
                     }
+                    job_store.changes.send_modify(|revision| *revision = revision.wrapping_add(1));
                 };
             });
         }
@@ -452,6 +456,20 @@ impl SearchJobs {
         cursor: Option<&str>,
         page_size: Option<usize>,
     ) -> Result<Value> {
+        self.status_inner(job_id, cursor, page_size, false)
+    }
+
+    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
+    pub(crate) fn snapshot(&self, job_id: &str) -> Result<Value> {
+        self.status_inner(job_id, None, None, true)
+    }
+
+    fn status_inner(
+        &self, job_id: &str, cursor: Option<&str>, page_size: Option<usize>, all: bool,
+    ) -> Result<Value> {
         let mut jobs = self
             .inner
             .lock()
@@ -486,9 +504,9 @@ impl SearchJobs {
                 .ok_or_else(|| anyhow::anyhow!("invalid cursor for search job {job_id}"))?,
             None => 0,
         };
-        let page_size = page_size
+        let page_size = if all { usize::MAX } else { page_size
             .unwrap_or(DEFAULT_PAGE_SIZE)
-            .clamp(1, MAX_PAGE_SIZE);
+            .clamp(1, MAX_PAGE_SIZE) };
         let running = !job.pending_hosts.is_empty();
         // Contract: stable arrival-first limit. The first `limit` unique
         // hits are admitted and never replaced by later hosts, so a running
@@ -503,7 +521,7 @@ impl SearchJobs {
         let next_cursor = fresh_handle("page")?;
         // A cursor is returned while running even when there is no new result,
         // so the next poll cannot replay an earlier batch.
-        if running || end < job.results.len() {
+        if !all && (running || end < job.results.len()) {
             job.cursors.insert(next_cursor.clone(), end);
             while job.cursors.len() > MAX_CURSORS_PER_JOB {
                 if let Some(oldest) = job.cursors.keys().next().cloned() {
@@ -551,13 +569,13 @@ impl SearchJobs {
         if let Some(error) = &job.durability_error {
             data["error"] = Value::String(error.clone());
         }
-        if running {
+        if running && !all {
             data["next_poll_after_ms"] = Value::from(NEXT_POLL_AFTER_MS);
             data["message"] = Value::String(
                 "Search continues; poll again in 1 second. Поиск продолжается; повторите запрос через 1 секунду.".into(),
             );
         }
-        if running || end < job.results.len() {
+        if !all && (running || end < job.results.len()) {
             data["cursor"] = Value::String(next_cursor);
         }
         if let Err(error) = self.persist(job_id, job) {

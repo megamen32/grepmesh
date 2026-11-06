@@ -627,6 +627,16 @@ async fn handle_rpc_inner(state: AppState, payload: Value) -> Result<Value> {
         .unwrap_or_default();
     let params = payload.get("params").cloned().unwrap_or(Value::Null);
     let result = match method {
+        "server/discover" => json!({
+            "resultType": "complete",
+            "supportedVersions": [CURRENT_PROTOCOL_VERSION],
+            "capabilities": {"tools": {"listChanged": false}},
+            "ttlMs": 30000,
+            "cacheScope": "public",
+            "_meta": {"io.modelcontextprotocol/serverInfo": {
+                "name": "grepmesh", "version": env!("CARGO_PKG_VERSION")
+            }}
+        }),
         "initialize" => {
             let protocol_version = negotiate_protocol_version(&params);
             json!({
@@ -1196,6 +1206,16 @@ mod tests {
             }}
         });
         let client = reqwest::Client::new();
+        let discover: Value = client
+            .post(format!("http://{address}/mcp"))
+            .bearer_auth("fixture-peer-token")
+            .header("MCP-Protocol-Version", "2026-07-28")
+            .header("Mcp-Method", "server/discover")
+            .header("Accept", "application/json, text/event-stream")
+            .json(&json!({"jsonrpc":"2.0", "id":2, "method":"server/discover", "params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}))
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(discover["result"]["resultType"], "complete");
+        assert!(discover["result"]["supportedVersions"].as_array().unwrap().contains(&json!("2026-07-28")));
         let denied = client
             .post(format!("http://{address}/mcp"))
             .json(&payload)

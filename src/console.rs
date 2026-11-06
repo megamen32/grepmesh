@@ -17,7 +17,7 @@ use axum::{
     extract::{Request, State},
     http::{header, StatusCode},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{sse::{Event, Sse}, Html, IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -111,6 +111,7 @@ pub fn router(
         .route("/api/browse", post(browse))
         .route("/api/search", post(search))
         .route("/api/search/status", post(search_status))
+        .route("/api/search/events", post(search_events))
         .route("/api/preview", post(preview))
         .route("/api/backup/availability", get(backup_availability))
         .layer(middleware::from_fn_with_state(state.clone(), require_browser_sso))
@@ -395,7 +396,7 @@ async fn search(State(state): State<ConsoleState>, Json(mut args): Json<SearchAr
         None => state.jobs.start((*state.service).clone(), args),
     };
     match job {
-        Ok(job_id) => match state.jobs.status(&job_id, None, None) {
+        Ok(job_id) => match state.jobs.snapshot(&job_id) {
             Ok(mut data) => {
                 issue_preview_handles(&state, &mut data);
                 Json(data).into_response()
@@ -447,6 +448,28 @@ async fn search_status(State(state): State<ConsoleState>, Json(request): Json<Va
         }
         Err(err) => bad_request(err.to_string()),
     }
+}
+
+async fn search_events(State(state): State<ConsoleState>, Json(request): Json<Value>) -> Response {
+    let Some(job_id) = request.get("job_id").and_then(Value::as_str).map(str::to_owned) else {
+        return bad_request("job_id is required");
+    };
+    // Subscribe before the first snapshot, so completion between these two
+    // operations cannot be missed. A reconnect observes the existing job.
+    let receiver = state.jobs.subscribe();
+    let stream = futures::stream::unfold((state, job_id, receiver, true, false), |(state, job_id, mut receiver, first, done)| async move {
+        if done { return None; }
+        if !first && receiver.changed().await.is_err() { return None; }
+        let mut data = match state.jobs.snapshot(&job_id) {
+            Ok(value) => value,
+            Err(error) => json!({"state":"failed", "partial":true, "error":error.to_string()}),
+        };
+        let done = data.get("state").and_then(Value::as_str) != Some("running");
+        issue_preview_handles(&state, &mut data);
+        let event = Event::default().json_data(data).unwrap_or_else(|_| Event::default().data("{\"state\":\"failed\"}"));
+        Some((Ok::<_, std::convert::Infallible>(event), (state, job_id, receiver, false, done)))
+    });
+    Sse::new(stream).into_response()
 }
 
 fn safe_host_error(error: Option<&str>) -> Option<String> {
