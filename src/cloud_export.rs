@@ -46,7 +46,7 @@ pub fn run(config: &AppConfig, inventory: Option<&Path>) -> Result<()> {
         exclusions.add(globset::Glob::new(pattern)?);
     }
     let exclusions = exclusions.build()?;
-    let ocr = OcrEngine::new(config.ocr.clone());
+    let ocr = OcrEngine::new(runtime_ocr_config(config));
     let stt = SttEngine::new(config.stt.clone());
     let mut out = BufWriter::new(std::io::stdout().lock());
     record(
@@ -279,5 +279,73 @@ fn readable<T>(
             Ok(None)
         }
         Err(error) => Err(error.into()),
+    }
+}
+
+fn runtime_ocr_config(config: &AppConfig) -> crate::config::OcrConfig {
+    let mut ocr = config.ocr.clone();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let mut topology = config
+        .topology_cache_path
+        .as_deref()
+        .and_then(|path| crate::topology_cache::TopologySnapshot::load(path).ok())
+        .and_then(|snapshot| crate::topology::Topology::from_snapshot(snapshot, now).ok())
+        .unwrap_or_else(|| {
+            crate::topology::Topology::new(config.host_id.clone(), config.peers.clone())
+        });
+    topology.retain_known_peers(&config.peers);
+    ocr.mesh_peers = crate::compute_client::merge_compute_peers(topology, &ocr.mesh_peers);
+    if config.compute.enabled {
+        let address = config.local_bind.unwrap_or_else(|| {
+            if config.bind.ip().is_unspecified() {
+                std::net::SocketAddr::from(([127, 0, 0, 1], config.bind.port()))
+            } else {
+                config.bind
+            }
+        });
+        let url = format!("http://{address}/mcp");
+        ocr.mesh_peers.push(crate::topology::PeerConfig {
+            host_id: config.host_id.clone(),
+            local_url: url.clone(),
+            routable_url: url,
+            gptadmin_proxy_url: None,
+            gptadmin_relay_url: None,
+        });
+    }
+    ocr.mesh_topology_cache_path = config.topology_cache_path.clone();
+    ocr.mesh_peer_token_env = config.peer_auth_token_env.clone();
+    ocr.mesh_relay_token_env = config.gptadmin_token_env.clone();
+    ocr.mesh_relay_origin = config.gptadmin_topology_url.clone();
+    ocr
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn exporter_inherits_runtime_ocr_routes_auth_and_self_worker() {
+        let config: AppConfig = serde_json::from_value(json!({
+            "host_id":"source","root":"/source","bind":"0.0.0.0:9419",
+            "local_bind":"127.0.0.1:9420",
+            "peers":[{"host_id":"worker","local_url":"http://worker:9419/mcp","routable_url":"http://worker:9419/mcp"}],
+            "topology_cache_path":"/cache/topology.json",
+            "peer_auth_token_env":"PEER_AUTH","gptadmin_token_env":"RELAY_AUTH",
+            "gptadmin_topology_url":"https://hub.example/topology",
+            "compute":{"enabled":true},
+            "ocr":{"enabled":true,"backend":"mesh"}
+        })).unwrap();
+        let ocr = runtime_ocr_config(&config);
+        assert!(ocr.mesh_peers.iter().any(|p| p.host_id == "worker"));
+        assert!(ocr
+            .mesh_peers
+            .iter()
+            .any(|p| p.host_id == "source" && p.local_url == "http://127.0.0.1:9420/mcp"));
+        assert_eq!(ocr.mesh_peer_token_env, config.peer_auth_token_env);
+        assert_eq!(ocr.mesh_relay_token_env, config.gptadmin_token_env);
+        assert_eq!(ocr.mesh_relay_origin, config.gptadmin_topology_url);
+        assert_eq!(ocr.mesh_topology_cache_path, config.topology_cache_path);
     }
 }
