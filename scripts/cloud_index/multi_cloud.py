@@ -39,8 +39,8 @@ def route_frozen_readers(readers, path):
 
 class MultiReader:
     def __init__(self, store, root, scopes, cache_mib=512):
-        if not 1 <= len(scopes) <= 64:
-            raise ValueError('An explicit list of 1..64 scopes is required')
+        if not 1 <= len(scopes) <= 128:
+            raise ValueError('An explicit list of 1..128 scopes is required')
         self.store=store
         self.scope='cloud-text-federation'
         self.readers=[]
