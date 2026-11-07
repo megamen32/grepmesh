@@ -64,7 +64,7 @@ class CloudStore:
         # rclone's optional scratch/cache are also explicitly in RAM on the gateway.
         if not SOURCE_MACHINE:raise ValueError('Set GREPMESH_CLOUD_GATEWAY to an authorized existing SSH/rclone gateway')
         tmp=os.environ.get('GREPMESH_CLOUD_GATEWAY_TMP', '/run/user/1000/grepmesh-cloud-gateway')
-        cmd='umask 077; mkdir -p '+shlex.quote(tmp)+'; export TMPDIR='+shlex.quote(tmp)+'; exec '+shlex.join([RCLONE]+args+['--cache-dir',tmp])
+        cmd='umask 077; mkdir -p '+shlex.quote(tmp)+'; export TMPDIR='+shlex.quote(tmp)+'; export GOMAXPROCS=2; exec '+shlex.join([RCLONE]+args+['--cache-dir',tmp])
         if SOURCE_MACHINE == 'local':
             # On the rclone owner host, avoid an SSH round trip to itself.
             # Reuse that user's existing rclone authentication and tmpfs only.

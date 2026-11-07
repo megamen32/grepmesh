@@ -281,7 +281,12 @@ impl BrowserTaskClient {
             }
         }
         let child = result.pointer("/response/structuredContent/result/structuredContent/result")
-            .cloned().ok_or_else(|| anyhow!("GPTAdmin task result is missing the child response"))?;
+            .cloned().ok_or_else(|| {
+                let reason = result.pointer("/response/structuredContent/result/error")
+                    .and_then(Value::as_str).unwrap_or("task result is missing the child response");
+                anyhow!("GPTAdmin child task {} failed: {}", job_id.as_deref().unwrap_or("unknown"),
+                    safe_diagnostic(reason, 300, None, Some(&self.token)))
+            })?;
         if child.get("isError").and_then(Value::as_bool) == Some(true) {
             let reason = child.pointer("/content/0/text").and_then(Value::as_str).unwrap_or("no reason supplied");
             anyhow::bail!("GrepMesh child task {} failed: {}", job_id.as_deref().unwrap_or("unknown"),
