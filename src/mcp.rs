@@ -1572,7 +1572,8 @@ impl MeshService {
                 .gptadmin_client
                 .as_ref()
                 .ok_or_else(|| anyhow!("GPTAdmin relay credentials are not configured"))?
-                .call_relay(&peer.routable_url, tool, arguments)
+                .call_relay_with_timeout(&peer.routable_url, tool, arguments,
+                    Duration::from_millis(self.local.limits.peer_timeout_ms))
                 .await;
         }
         match self
@@ -1583,7 +1584,8 @@ impl MeshService {
             Err(direct_error) if is_direct_connect_error(&direct_error) => {
                 if let (Some(client), Some(url)) = (&self.gptadmin_client, &peer.gptadmin_relay_url)
                 {
-                    return client.call_relay(url, tool, arguments).await;
+                    return client.call_relay_with_timeout(url, tool, arguments,
+                        Duration::from_millis(self.local.limits.peer_timeout_ms)).await;
                 }
                 let proxy_url = peer
                     .gptadmin_proxy_url

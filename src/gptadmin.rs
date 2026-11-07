@@ -603,12 +603,21 @@ impl GptAdminTopologyClient {
     }
 
     pub async fn call_relay(&self, url: &str, tool: &str, arguments: Value) -> Result<Value> {
+        self.call_relay_with_timeout(url, tool, arguments, Duration::from_secs(10)).await
+    }
+
+    pub async fn call_relay_with_timeout(&self, url: &str, tool: &str, arguments: Value, deadline: Duration) -> Result<Value> {
+        tokio::time::timeout(deadline, self.call_relay_inner(url, tool, arguments, deadline))
+            .await.map_err(|_| anyhow!("GPTAdmin child MCP call failed (reason=relay_deadline)"))?
+    }
+
+    async fn call_relay_inner(&self, url: &str, tool: &str, arguments: Value, deadline: Duration) -> Result<Value> {
         let parsed = reqwest::Url::parse(url)?;
         if self.relay_url(parsed.path())? != url {
             return Err(anyhow!("GPTAdmin relay must use the configured Hub origin"));
         }
         let body = self
-            .send_relay_call(url, tool, &arguments, None)
+            .send_relay_call(url, tool, &arguments, None, deadline)
             .await
             .map_err(|error| {
                 anyhow!(
@@ -645,7 +654,7 @@ impl GptAdminTopologyClient {
         // Authorization. The context receipt travels only in the JSON-RPC
         // `_meta` envelope, never in the tool arguments.
         let retried = self
-            .send_relay_call(url, tool, &arguments, Some(context))
+            .send_relay_call(url, tool, &arguments, Some(context), deadline)
             .await
             .map_err(|error| {
                 let reason = retry_transport_reason(&error);
@@ -678,12 +687,13 @@ impl GptAdminTopologyClient {
         tool: &str,
         arguments: &Value,
         context: Option<&str>,
+        deadline: Duration,
     ) -> Result<Value> {
         let mut params = json!({"name":tool,"arguments":arguments});
         if let Some(context) = context {
             params["_meta"] = json!({"io.gptadmin/context":context});
         }
-        let mut request = self.client.post(url).json(&json!({
+        let mut request = self.client.post(url).timeout(deadline).json(&json!({
             "jsonrpc":"2.0", "id":1, "method":"tools/call", "params":params
         }));
         if let Some(token) = &self.token {
@@ -1007,6 +1017,29 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn relay_execution_budget_overrides_discovery_http_timeout_and_stays_bounded() {
+        use axum::{routing::post, Json};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route("/server/slow/mcp", post(|| async {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            Json(serde_json::json!({"result":{"content":[{"type":"text","text":"{\"host_id\":\"mac-m1\"}"}],"isError":false}}))
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let mut client = super::GptAdminTopologyClient::from_env(format!("http://{address}/mcp-relay/agents"), "A", None, 30_000);
+        client.client = reqwest::Client::builder().no_proxy()
+            .timeout(std::time::Duration::from_millis(30)).build().unwrap();
+        let url = format!("http://{address}/server/slow/mcp");
+        let result = client.call_relay_with_timeout(&url, "search_status", serde_json::json!({}), std::time::Duration::from_secs(1)).await.unwrap();
+        let metadata: serde_json::Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(metadata["host_id"], "mac-m1");
+        assert!(client.call_relay_with_timeout(&url, "search_status", serde_json::json!({}), std::time::Duration::from_millis(30)).await.is_err());
+        // The shared discovery client keeps its original short HTTP bound.
+        assert!(client.client.post(&url).send().await.unwrap_err().is_timeout());
+        server.abort();
+    }
+
     use super::*;
     use serde_json::json;
 
