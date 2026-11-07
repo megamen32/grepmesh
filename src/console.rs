@@ -525,6 +525,12 @@ async fn preview(State(state): State<ConsoleState>, Json(request): Json<Value>) 
     };
     let read_result = if let Some(hub) = state.browser_hub.as_ref() {
         let id = format!("{preview_id}:{view}");
+        let receipt_id = format!("{id}:read");
+        let expected_task_id = match request.get("continuation_task_id") {
+            Some(Value::String(task)) if !task.is_empty() => Some(task.as_str()),
+            Some(_) => return bad_request("invalid continuation task"),
+            None => None,
+        };
         let route = match hub.route(&target.host) {
             Ok(route) => route.clone(),
             Err(error) => return bad_request(error.to_string()),
@@ -536,7 +542,7 @@ async fn preview(State(state): State<ConsoleState>, Json(request): Json<Value>) 
         if let Some(source_host) = &target.source_host {
             arguments["source_host"] = json!(source_host);
         }
-        match hub.call(&target.host, "read_text", arguments, &format!("{id}:read"), Duration::from_secs(30), None).await {
+        match hub.call_with_expected_job(&target.host, "read_text", arguments, &receipt_id, expected_task_id, Duration::from_secs(30), None).await {
             Ok(child) => crate::mcp::decode_tool_result::<Value>(child).and_then(|data| {
                 anyhow::ensure!(data.get("host_id").and_then(Value::as_str) == Some(route.executor_host.as_str())
                     && data.get("target_host_id").and_then(Value::as_str) == Some(target.host.as_str())
@@ -550,9 +556,19 @@ async fn preview(State(state): State<ConsoleState>, Json(request): Json<Value>) 
                     "GPTAdmin executor returned a different file");
                 Ok(data)
             }),
-            Err(error) => Err(error),
+            Err(error) => {
+                if let Some(pending) = error.downcast_ref::<crate::gptadmin::BrowserTaskPending>() {
+                    return (axum::http::StatusCode::ACCEPTED, Json(json!({
+                        "state":"running", "task_id":pending.task_id
+                    }))).into_response();
+                }
+                Err(error)
+            },
         }
     } else {
+        if request.get("continuation_task_id").is_some() {
+            return bad_request("browser task receipt unavailable; read was not resubmitted");
+        }
         if target.source_host.is_some() {
             return bad_request("federated source requires an authenticated browser route");
         }

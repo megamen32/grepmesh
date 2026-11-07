@@ -32,6 +32,15 @@ pub(crate) struct BrowserTaskClient {
 
 struct BrowserReceipt { created: std::time::Instant, job_id: Option<String> }
 
+#[derive(Debug)]
+pub(crate) struct BrowserTaskPending { pub task_id: String }
+impl std::fmt::Display for BrowserTaskPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GPTAdmin task {} is still running; do not resubmit", self.task_id)
+    }
+}
+impl std::error::Error for BrowserTaskPending {}
+
 async fn bounded_browser_response(response: reqwest::Response) -> Result<Value> {
     const LIMIT: usize = 4 * 1024 * 1024;
     anyhow::ensure!(response.content_length().map_or(true, |length| length <= LIMIT as u64), "GPTAdmin response exceeds limit");
@@ -167,7 +176,13 @@ impl BrowserTaskClient {
         self.targets.get(host).ok_or_else(|| anyhow!("no GPTAdmin executor mapped for {host}"))
     }
 
-    pub(crate) async fn call(&self, host: &str, name: &str, mut args: Value, id: &str, deadline: Duration,
+    pub(crate) async fn call(&self, host: &str, name: &str, args: Value, id: &str, deadline: Duration,
+        on_admitted: Option<Box<dyn Fn(&str) -> Result<()> + Send + Sync>>) -> Result<Value> {
+        self.call_with_expected_job(host, name, args, id, None, deadline, on_admitted).await
+    }
+
+    pub(crate) async fn call_with_expected_job(&self, host: &str, name: &str, mut args: Value, id: &str,
+        expected_task_id: Option<&str>, deadline: Duration,
         on_admitted: Option<Box<dyn Fn(&str) -> Result<()> + Send + Sync>>) -> Result<Value> {
         let started = std::time::Instant::now();
         anyhow::ensure!(matches!(name, "search_text" | "read_text"), "unsupported browser operation");
@@ -186,6 +201,12 @@ impl BrowserTaskClient {
         let known_job = {
             let mut receipts = self.receipts.lock().map_err(|_| anyhow!("browser task receipt lock failed"))?;
             receipts.retain(|_, entry| entry.created.elapsed() < Duration::from_secs(3600));
+            // Validate continuation and decide admission under the same lock.
+            // A missing/expired receipt must never turn a resume into a new read.
+            if let Some(expected) = expected_task_id {
+                anyhow::ensure!(receipts.get(id).and_then(|entry| entry.job_id.as_deref()) == Some(expected),
+                    "browser task receipt expired or changed; read was not resubmitted");
+            }
             match receipts.get(id) {
                 Some(entry) => Some(entry.job_id.clone().ok_or_else(|| anyhow!("browser task admission is pending or unknown; do not resubmit"))?),
                 None => {
@@ -268,7 +289,7 @@ impl BrowserTaskClient {
             let mut reconnects = 0;
             loop {
                 let remaining = deadline.checked_sub(started.elapsed()).filter(|v| *v > Duration::from_millis(300))
-                    .ok_or_else(|| anyhow!("GPTAdmin task {job_id} is still running; do not resubmit"))?;
+                    .ok_or_else(|| anyhow!(BrowserTaskPending { task_id: job_id.to_owned() }))?;
                 match wait_for_browser_task(&self.client, &self.endpoint, &self.token, job_id, remaining).await {
                     Ok(value) => { result = value; break; }
                     Err(error) if reconnects < 3 && (error.to_string().contains("subscription interrupted")
@@ -1018,6 +1039,26 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
+    async fn preview_resume_requires_the_original_unexpired_receipt() {
+        let hub = BrowserTaskClient { token: String::new(), endpoint: String::new(),
+            targets: BTreeMap::from([("node".into(), BrowserRoute { shell_target:"shell:node".into(),
+                child_ref:"GrepMesh".into(), execution_host:"local".into(), executor_host:"node".into() })]),
+            client: reqwest::Client::new(), receipts: Default::default() };
+        for mode in ["missing", "mismatch", "expired", "evicted"] {
+            hub.receipts.lock().unwrap().clear();
+            if mode == "mismatch" || mode == "expired" {
+                hub.receipts.lock().unwrap().insert("preview:document:read".into(), BrowserReceipt {
+                    created: std::time::Instant::now() - Duration::from_secs(if mode == "expired" {3601} else {0}),
+                    job_id: Some(if mode == "mismatch" {"other-job"} else {"job-1"}.into()) });
+            }
+            let error = hub.call_with_expected_job("node", "read_text", json!({}),
+                "preview:document:read", Some("job-1"), Duration::from_secs(1), None).await.unwrap_err();
+            assert!(error.to_string().contains("receipt expired or changed"), "{mode}: {error}");
+            assert!(hub.receipts.lock().unwrap().values().all(|entry| entry.job_id.is_some()));
+        }
+    }
+
+    #[tokio::test]
     async fn relay_execution_budget_overrides_discovery_http_timeout_and_stays_bounded() {
         use axum::{routing::post, Json};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1114,8 +1155,13 @@ mod tests {
             client:reqwest::Client::new(), receipts:Default::default(), targets:BTreeMap::from([("node".into(), BrowserRoute {
                 shell_target:"shell:node".into(), child_ref:"GrepMesh".into(),
                 execution_host:"local".into(), executor_host:"node".into() })]) };
-        let result = hub.call("node", "read_text", json!({"host":"node","path":"/fixture"}),
-            "fixture-read", Duration::from_secs(5), None).await.unwrap();
+        let pending = hub.call("node", "read_text", json!({"host":"node","path":"/fixture"}),
+            "fixture-read", Duration::from_millis(250), None).await.unwrap_err();
+        let task = pending.downcast_ref::<BrowserTaskPending>().unwrap();
+        assert_eq!(task.task_id, "job-fixture");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let result = hub.call_with_expected_job("node", "read_text", json!({"host":"node","path":"/fixture"}),
+            "fixture-read", Some(&task.task_id), Duration::from_secs(5), None).await.unwrap();
         assert_eq!(result["content"][0]["text"], "fixture");
         let again = hub.call("node", "read_text", json!({"host":"node","path":"/fixture"}),
             "fixture-read", Duration::from_secs(5), None).await.unwrap();

@@ -34,6 +34,26 @@ function rows(f){return f.nodes.results.children.filter(x=>x.className.includes(
 function names(f){return rows(f).map(row=>row.children[0].children[1].textContent);}
 function descendants(node){return[node,...node.children.flatMap(descendants)];}
 async function browse(f){await settle();const root=f.nodes["locations-sidebar"].children[0];f.nodes["locations-sidebar"].dispatch("click",root.children[1]);await settle();}
+test("one preview click continues the same durable task while keeping loading",async()=>{
+  let calls=0;
+  const f=fixture({responses:{"/api/browse":{entries:[{name:"slow.txt",path:"/etc/slow.txt",kind:"file",preview_id:"slow"}]},"/api/preview":options=>{
+    const body=JSON.parse(options.body);calls++;
+    if(calls===1){assert.equal(body.continuation_task_id,undefined);return{state:"running",task_id:"durable-1"};}
+    assert.equal(body.continuation_task_id,"durable-1");assert.equal(body.preview_id,"slow");
+    return{start_line:1,text:"durable read completed"};
+  }}});
+  await browse(f);rows(f)[0].click();await settle();
+  assert.match(content(f.nodes.preview),/Loading bounded file preview/);
+  await new Promise(resolve=>setTimeout(resolve,300));await settle();
+  assert.equal(calls,2);assert.match(content(f.nodes.preview),/durable read completed/);
+});
+test("preview continuation stops when the selected file changes",async()=>{
+  let calls=0;
+  const f=fixture({responses:{"/api/browse":{entries:[{name:"slow.txt",path:"/etc/slow.txt",kind:"file",preview_id:"slow"},{name:"folder",path:"/etc/folder",kind:"directory"}]},"/api/preview":()=>{calls++;return{state:"running",task_id:"durable-1"};}}});
+  await browse(f);rows(f).find(row=>content(row).includes("slow.txt")).click();await settle();
+  rows(f).find(row=>content(row).includes("folder")).click();
+  await new Promise(resolve=>setTimeout(resolve,300));await settle();assert.equal(calls,1);
+});
 test("same cloud path on different source hosts stays separate in preview navigation",async()=>{
   const f=fixture({responses:{"/api/search":{state:"complete",results:[
     {path:"/shared/a.txt",preview_id:"first",host_id:"cloud",source_host:"server-100",line_number:1,snippet:"first"},

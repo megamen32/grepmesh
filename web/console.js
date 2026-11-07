@@ -249,20 +249,33 @@
     }
     renderSourcePreview(body,payload,state.previewEntry.matchLine);
   }
+  async function waitForPreview(entry, view, isCurrent) {
+    let taskId;
+    for(let attempt=0;attempt<8;attempt++) {
+      if(!isCurrent())return null;
+      const payload=await request(api.preview,{method:"POST",body:JSON.stringify({preview_id:entry.previewId,view,...(taskId?{continuation_task_id:taskId}:{})})});
+      if(dataOf(payload).state!=="running")return payload;
+      const next=dataOf(payload).task_id;
+      if(typeof next!=="string"||!next||(taskId&&taskId!==next))throw new Error("Preview task identity changed; read was not resubmitted.");
+      taskId=next;
+      await new Promise(resolve=>setTimeout(resolve,250));
+    }
+    throw new Error("Preview is still pending after four minutes; read was not resubmitted.");
+  }
   async function loadPreviewMode(mode) {
     const body=state.previewBody,entry=state.previewEntry;if(!body||!entry)return;
     const view=mode==="rendered"?"document":sourcePreviewView(entry),needsDocument=Boolean(entry.matchLine)&&view==="document";
     if(state.previewPayloads[view]){state.previewMode=mode;renderFilePreview();return;}
     if(!needsDocument){state.previewPayloads[view]=state.previewPayloads[view==="document"?"match":"document"]||state.previewPayload;state.previewMode=mode;renderFilePreview();return;}
     clear(body).append(element("div","preview-loading","Loading document preview…"));
-    try{const payload=await request(api.preview,{method:"POST",body:JSON.stringify({preview_id:entry.previewId,view})});if(state.previewEntry!==entry||state.previewBody!==body)return;state.previewPayloads[view]=payload;if(dataOf(payload).document_fallback){state.previewPayloads[sourcePreviewView(entry)]=payload;state.previewMode="source";}else state.previewMode=mode;renderFilePreview();}
+    try{const payload=await waitForPreview(entry,view,()=>state.previewEntry===entry&&state.previewBody===body);if(state.previewEntry!==entry||state.previewBody!==body)return;state.previewPayloads[view]=payload;if(dataOf(payload).document_fallback){state.previewPayloads[sourcePreviewView(entry)]=payload;state.previewMode="source";}else state.previewMode=mode;renderFilePreview();}
     catch(error){if(state.previewEntry!==entry||state.previewBody!==body)return;clear(body).append(element("p","preview-error",`Document preview unavailable: ${errorMessage(error)}`));}
   }
   async function loadFilePreview(entry) {
     const body=state.previewBody; if(!body||!entry.previewId)return;
     if(previewType(entry.path)==="ocr"&&!entry.line){clear(body).append(element("p","preview-note","This is a binary file. Text preview is available when search has indexed OCR text for a matching line."));return;}
     clear(body).append(element("div","preview-loading","Loading bounded file preview…"));
-    try { const type=previewType(entry.path),view=entry.line?sourcePreviewView(entry):"document",payload=await request(api.preview,{method:"POST",body:JSON.stringify({preview_id:entry.previewId,view})}); if(state.selected!==entry||state.previewBody!==body)return; state.previewEntry={...entry,matchLine:entry.line};state.previewPayload=payload;state.previewPayloads[view]=payload;state.previewMode=entry.line||type==="text"||type==="ocr"||Boolean(dataOf(payload).truncated&&type==="json")?"source":"rendered";renderFilePreview(); }
+    try { const type=previewType(entry.path),view=entry.line?sourcePreviewView(entry):"document",payload=await waitForPreview(entry,view,()=>state.selected===entry&&state.previewBody===body); if(state.selected!==entry||state.previewBody!==body)return; state.previewEntry={...entry,matchLine:entry.line};state.previewPayload=payload;state.previewPayloads[view]=payload;state.previewMode=entry.line||type==="text"||type==="ocr"||Boolean(dataOf(payload).truncated&&type==="json")?"source":"rendered";renderFilePreview(); }
     catch(error){if(state.selected!==entry||state.previewBody!==body)return;clear(body).append(element("p","preview-error",`Preview unavailable: ${errorMessage(error)}`));}
   }
   function renderMatchNavigation() {
