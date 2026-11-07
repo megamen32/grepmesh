@@ -825,6 +825,13 @@ fn bounded_preview(data: Value, target: &PreviewTarget) -> Value {
                     .unwrap_or(0);
                 if used_bytes.saturating_add(text_len) > MAX_PREVIEW_BYTES {
                     truncated = true;
+                    let mut prefix = line.clone();
+                    let mut text = line.get("text").and_then(Value::as_str).unwrap_or("").to_owned();
+                    truncate_utf8(&mut text, MAX_PREVIEW_BYTES.saturating_sub(used_bytes));
+                    if !text.is_empty() {
+                        prefix["text"] = json!(text);
+                        lines.push(prefix);
+                    }
                     break 'chunks;
                 }
                 used_bytes = used_bytes.saturating_add(text_len);
@@ -940,6 +947,19 @@ mod tests {
                 == 8
         );
         assert!(handles.iter().all(|handle| previews.contains_key(*handle)));
+    }
+
+    #[test]
+    fn bounded_preview_keeps_prefix_of_a_single_oversized_utf8_line() {
+        let mut entries = vec![json!({"kind":"file", "path":"/docs/large.jsonl", "line_number":1})];
+        let mut previews = BTreeMap::new();
+        issue_entry_preview_handles_in_map(&mut previews, &mut entries, Some("server-100"), false);
+        let target = previews.get(entries[0]["preview_id"].as_str().unwrap()).unwrap();
+        let result = bounded_preview(json!({"chunks":[{"lines":[{"line_number":1,"text":"я".repeat(MAX_PREVIEW_BYTES)}]}]}), target);
+        let text = result["text"].as_str().unwrap();
+        assert!(!text.is_empty(), "oversized first line was discarded");
+        assert_eq!(text.len(), MAX_PREVIEW_BYTES);
+        assert_eq!(result["truncated"], true);
     }
 
     #[test]

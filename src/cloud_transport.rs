@@ -3,7 +3,8 @@ use anyhow::{anyhow, Context, Result};
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
+use base64::Engine;
 use std::{collections::BTreeMap, time::Duration};
 
 #[derive(Deserialize)]
@@ -18,7 +19,65 @@ pub(crate) async fn call(host: &str, tool: &str, arguments: Value,
     call_route(route, tool, arguments, limit, timeout_ms).await.map(Some)
 }
 
-async fn call_route(route: &Route, tool: &str, mut arguments: Value, limit: usize, timeout_ms: u64) -> Result<Value> {
+async fn call_route(route: &Route, tool: &str, arguments: Value, limit: usize, timeout_ms: u64) -> Result<Value> {
+    let started = std::time::Instant::now();
+    match call_route_once(route, tool, arguments.clone(), limit, timeout_ms).await {
+        Err(error) if tool == "read_text"
+            && arguments.get("start_line").and_then(Value::as_u64).unwrap_or(1) == 1
+            && error.to_string() == "signed cloud response exceeds limit"
+            && limit >= 8192 => {
+            // A line window is not a byte bound (JSONL may contain one huge line).
+            // Retry only this idempotent read with the reader's existing prefix API.
+            let byte_limit = (limit / 16).min(64 * 1024);
+            let mut prefix_args = arguments.clone();
+            let object = prefix_args.as_object_mut().context("cloud arguments must be an object")?;
+            object.remove("start_line");
+            object.remove("end_line");
+            object.insert("byte_offset".into(), json!(0));
+            object.insert("byte_limit".into(), json!(byte_limit));
+            let remaining = timeout_ms.saturating_sub(started.elapsed().as_millis() as u64);
+            anyhow::ensure!(remaining > 0, "signed cloud read deadline exceeded");
+            let result = call_route_once(route, tool, prefix_args, limit, remaining).await?;
+            bounded_prefix_result(result, &arguments, byte_limit, limit)
+        }
+        result => result,
+    }
+}
+
+fn bounded_prefix_result(result: Value, arguments: &Value, byte_limit: usize, limit: usize) -> Result<Value> {
+    let mut data = crate::mcp::decode_tool_result::<Value>(result)?;
+    anyhow::ensure!(data.get("path") == arguments.get("path")
+        && arguments.get("source_host").filter(|v| !v.is_null()).is_none_or(|v| data.get("source_host") == Some(v))
+        && data.get("byte_offset").and_then(Value::as_u64) == Some(0), "cloud prefix identity mismatch");
+    let encoded = data.get("data_base64").and_then(Value::as_str).context("missing cloud prefix bytes")?;
+    anyhow::ensure!(encoded.len() <= byte_limit.div_ceil(3) * 4, "cloud prefix exceeds byte budget");
+    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
+    let hash = format!("{:x}", Sha256::digest(&bytes));
+    anyhow::ensure!(bytes.len() <= byte_limit
+        && data.get("part_sha256").and_then(Value::as_str) == Some(hash.as_str())
+        && data.get("next_byte_offset").and_then(Value::as_u64) == Some(bytes.len() as u64),
+        "cloud prefix integrity mismatch");
+    // The byte endpoint can end within the final UTF-8 codepoint; never invent text.
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(text) => text,
+        Err(error) if error.error_len().is_none() => std::str::from_utf8(&bytes[..error.valid_up_to()])?,
+        Err(error) => return Err(error.into()),
+    };
+    let max_lines = arguments.get("end_line").and_then(Value::as_u64).unwrap_or(200).min(200) as usize;
+    let lines: Vec<Value> = text.lines().take(max_lines).enumerate()
+        .map(|(i, text)| json!({"line_number":i+1,"text":text})).collect();
+    let end_line = lines.len();
+    data["start_line"] = json!(1);
+    data["end_line"] = json!(end_line);
+    data["truncated"] = json!(true);
+    data["chunks"] = json!([{"start_line":1,"end_line":end_line,"lines":lines}]);
+    data.as_object_mut().context("invalid cloud prefix")?.remove("data_base64");
+    let response = json!({"content":[{"type":"text","text":serde_json::to_string(&data)?}],"isError":false});
+    anyhow::ensure!(serde_json::to_vec(&response)?.len() <= limit, "signed cloud prefix response exceeds limit");
+    Ok(response)
+}
+
+async fn call_route_once(route: &Route, tool: &str, mut arguments: Value, limit: usize, timeout_ms: u64) -> Result<Value> {
     let url = reqwest::Url::parse(&route.url).context("invalid signed cloud endpoint")?;
     anyhow::ensure!(url.scheme() == "http" && url.host_str() == Some("127.0.0.1")
         && url.username().is_empty() && url.password().is_none()
@@ -74,6 +133,39 @@ async fn call_route(route: &Route, tool: &str, mut arguments: Value, limit: usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn byte_result(bytes: &[u8]) -> Value {
+        let data = json!({"path":"/docs/huge.jsonl", "source_host":"server-100", "byte_offset":0,
+            "next_byte_offset":bytes.len(), "part_sha256":format!("{:x}", Sha256::digest(bytes)),
+            "data_base64":base64::engine::general_purpose::STANDARD.encode(bytes), "eof":false});
+        json!({"content":[{"type":"text","text":data.to_string()}],"isError":false})
+    }
+
+    #[test]
+    fn oversized_prefix_preserves_verified_source_and_utf8_bounds() {
+        let args = json!({"path":"/docs/huge.jsonl","source_host":"server-100","end_line":2});
+        let bytes = b"first\nsecond\nthird\xd1";
+        let value = bounded_prefix_result(byte_result(bytes), &args, 64, 8192).unwrap();
+        let data = crate::mcp::decode_tool_result::<Value>(value).unwrap();
+        assert_eq!(data["source_host"], "server-100");
+        assert_eq!(data["chunks"][0]["lines"].as_array().unwrap().len(), 2);
+        assert_eq!(data["chunks"][0]["lines"][1]["text"], "second");
+        assert_eq!(data["truncated"], true);
+        assert!(data.get("data_base64").is_none());
+    }
+
+    #[test]
+    fn oversized_prefix_rejects_wrong_identity_hash_and_budget() {
+        let args = json!({"path":"/docs/huge.jsonl","source_host":"server-100"});
+        for (key, bad) in [("source_host", json!("server-44")), ("path",json!("/other")),
+            ("part_sha256",json!("wrong")), ("next_byte_offset",json!(99))] {
+            let mut data = crate::mcp::decode_tool_result::<Value>(byte_result(b"ok")).unwrap();
+            data[key] = bad;
+            let value = json!({"content":[{"type":"text","text":data.to_string()}],"isError":false});
+            assert!(bounded_prefix_result(value, &args, 64, 8192).is_err(), "accepted {key}");
+        }
+        assert!(bounded_prefix_result(byte_result(b"too long"), &args, 2, 8192).is_err());
+    }
+
     #[tokio::test]
     async fn unsigned_content_and_nonloopback_routes_fail_before_network() {
         let local = Route { url:"http://127.0.0.1:1/mcp".into(), secret_env:"NO_SECRET_FOR_UNSIGNED_TEST".into() };
