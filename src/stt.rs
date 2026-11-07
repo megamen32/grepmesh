@@ -146,11 +146,12 @@ impl SttEngine {
                 path.display()
             ));
         }
-        // Keep the temporary PCM file within the remote upload budget. Reaching
+        // Keep compressed mono audio within the remote upload budget. Reaching
         // the limit is an error, never a successful truncated transcript.
-        self.prepare_wav(
+        self.prepare_audio(
             path,
             Some(self.config.max_media_bytes.min(24 * 1024 * 1024)),
+            true,
         )
     }
 
@@ -269,7 +270,18 @@ impl SttEngine {
         path: &Path,
         max_bytes: Option<u64>,
     ) -> Result<Option<tempfile::TempPath>> {
-        let temp = tempfile::Builder::new().suffix(".wav").tempfile()?;
+        self.prepare_audio(path, max_bytes, false)
+    }
+
+    fn prepare_audio(
+        &self,
+        path: &Path,
+        max_bytes: Option<u64>,
+        compressed: bool,
+    ) -> Result<Option<tempfile::TempPath>> {
+        let temp = tempfile::Builder::new()
+            .suffix(if compressed { ".mp3" } else { ".wav" })
+            .tempfile()?;
         let mut command = Command::new("ffmpeg");
         command.arg("-nostdin");
         command
@@ -282,9 +294,12 @@ impl SttEngine {
             .arg("-ac")
             .arg("1")
             .arg("-ar")
-            .arg("16000")
-            .arg("-c:a")
-            .arg("pcm_s16le");
+            .arg("16000");
+        if compressed {
+            command.args(["-c:a", "libmp3lame", "-b:a", "48k"]);
+        } else {
+            command.args(["-c:a", "pcm_s16le"]);
+        }
         if let Some(limit) = max_bytes {
             if limit == 0 {
                 return Err(anyhow!("STT temporary audio size limit is zero"));
@@ -382,7 +397,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remote_video_is_wav_and_temp_is_removed_without_changing_source() {
+    fn remote_video_is_compact_audio_and_temp_is_removed_without_changing_source() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("clip.MOV");
         let output = std::process::Command::new("ffmpeg")
@@ -392,7 +407,7 @@ mod tests {
                 "-f",
                 "lavfi",
                 "-i",
-                "sine=frequency=440:duration=0.1",
+                "sine=frequency=440:duration=60",
                 "-c:a",
                 "aac",
             ])
@@ -412,8 +427,11 @@ mod tests {
             .unwrap()
             .expect("video must be converted");
         let bytes = std::fs::read(&wav).unwrap();
-        assert_eq!(&bytes[..4], b"RIFF");
-        assert_eq!(&bytes[8..12], b"WAVE");
+        assert_eq!(&bytes[..3], b"ID3");
+        assert!(
+            bytes.len() < 400_000,
+            "one minute must fit compact upload budget"
+        );
         assert_eq!(std::fs::read(&source).unwrap(), original);
         let temporary = wav.to_path_buf();
         drop(wav);
