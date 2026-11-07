@@ -467,6 +467,7 @@ impl LocalBackend {
     }
 
     pub fn list_directory(&self, path: &Path) -> Result<Vec<DirectoryEntry>> {
+        let exclusions = CompiledExclusions::new(&self.exclude_globs);
         let roots = self
             .root_paths
             .values()
@@ -481,7 +482,7 @@ impl LocalBackend {
                 path.display()
             ));
         }
-        if excluded_path(&path, &roots, &self.exclude_globs) {
+        if exclusions.excludes(&path, &roots) {
             return Err(anyhow!("path {} is excluded", path.display()));
         }
         if !path.is_dir() {
@@ -497,7 +498,7 @@ impl LocalBackend {
                 continue;
             };
             if !roots.iter().any(|root| entry_path.starts_with(root))
-                || excluded_path(&entry_path, &roots, &self.exclude_globs)
+                || exclusions.excludes(&entry_path, &roots)
             {
                 continue;
             }
@@ -1890,6 +1891,26 @@ fn normalize_absolute_path_any(roots: &[PathBuf], path: &Path) -> Result<PathBuf
         ));
     }
     Ok(resolved)
+}
+
+// Directory browsing checks many siblings; compile each rule once per listing.
+struct CompiledExclusions(Vec<(Option<globset::GlobMatcher>, Option<String>)>);
+impl CompiledExclusions {
+    fn new(patterns: &[String]) -> Self {
+        Self(patterns.iter().map(|pattern| (
+            Glob::new(pattern).ok().map(|glob| glob.compile_matcher()),
+            pattern.strip_suffix("/**").map(|prefix|
+                prefix.trim_start_matches("**/").trim_start_matches("./").to_owned()),
+        )).collect())
+    }
+    fn excludes(&self, path: &Path, roots: &[PathBuf]) -> bool {
+        roots.iter().any(|root| path.strip_prefix(root).ok().is_some_and(|relative| {
+            let path = relative.to_string_lossy().replace('\\', "/");
+            self.0.iter().any(|(matcher, prefix)|
+                matcher.as_ref().is_some_and(|matcher| matcher.is_match(&path)) ||
+                prefix.as_ref().is_some_and(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/"))))
+        }))
+    }
 }
 
 fn excluded_path(path: &Path, roots: &[PathBuf], exclude_globs: &[String]) -> bool {
