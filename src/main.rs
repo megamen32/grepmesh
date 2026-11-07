@@ -52,8 +52,7 @@ struct Args {
     compaction_batches: usize,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
@@ -102,5 +101,8 @@ async fn main() -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    run_server(config).await
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run_server(config))
 }
