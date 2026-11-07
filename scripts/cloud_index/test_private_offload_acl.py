@@ -68,12 +68,18 @@ def fixture_stream():
                  'complete_for_policy': True})
     return io.StringIO(''.join(json.dumps(row) + '\n' for row in rows))
 
-def rpc(port, name, args, auth_roots=None, tamper=False):
+def rpc(port, name, args, auth_roots=None, tamper=False, metadata=False, tamper_metadata=False):
     body = json_bytes({'jsonrpc': '2.0', 'id': 7, 'method': 'tools/call',
                        'params': {'name': name, 'arguments': args}})
     headers = {'Content-Type': 'application/json'}
     if auth_roots is not None:
         headers.update(signed(body, auth_roots))
+    if metadata:
+        headers['X-GrepMesh-Metadata-Signature'] = hmac.new(
+            os.environ[ACL_SECRET_ENV].encode(), b'grepmesh-metadata-v1\n' + body,
+            hashlib.sha256).hexdigest()
+    if tamper_metadata:
+        headers['X-GrepMesh-Metadata-Signature'] = '0' * 64
     if tamper:
         headers[ACL_SIGNATURE_HEADER] = '0' * 64
     req = urllib.request.Request('http://127.0.0.1:%d' % port,
@@ -116,6 +122,15 @@ with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
     ]:
         check('unsigned %s refused in private mode' % name,
               error(rpc(port, name, args)))
+    for name in ['search_status', 'list_locations']:
+        check('signed metadata %s succeeds' % name,
+              not error(rpc(port, name, base, metadata=True)))
+    check('forged metadata signature refused',
+          error(rpc(port, 'search_status', base, metadata=True, tamper_metadata=True)))
+    for name, args in [('search', search_args), ('find_paths', find_args),
+                       ('read_text', read_args)]:
+        check('metadata signature cannot authorize %s' % name,
+              error(rpc(port, name, args, metadata=True)))
     check('forged HMAC refused', error(rpc(port, 'search', search_args,
                                            auth_roots=['/home'], tamper=True)))
     for forbidden in [['/'], ['/dev'], ['/dev/input'], ['/home', '/dev']]:

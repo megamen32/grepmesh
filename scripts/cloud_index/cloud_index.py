@@ -860,6 +860,18 @@ def enforce_private_transport_acl(required,method,verified_acl):
     if required and method=='tools/call' and verified_acl is None:
         raise PermissionError('Private historical cloud tool call requires a signed filesystem ACL')
 
+def verify_transport_metadata(headers,body,request):
+    """Authenticate metadata only, using the existing relay key, never a read policy."""
+    if (request.get('method') != 'tools/call' or
+            request.get('params', {}).get('name') not in ('list_locations', 'search_status')):
+        return False
+    signature=headers.get('X-GrepMesh-Metadata-Signature') or ''
+    secret=acl_secret()
+    if not signature or not secret or len(secret)<32:return False
+    expected=hmac.new(secret.encode(),b'grepmesh-metadata-v1\n'+body,hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected,signature)
+
+
 def verify_transport_acl(headers,body):
     """Verify a filesystem ACL delivered over an authenticated transport.
 
@@ -917,7 +929,8 @@ def serve(reader,port):
                 # authenticated transport; the tool arguments never carry it.
                 transport_acl=verify_transport_acl(self.headers,raw)
                 req=json.loads(raw);method=req.get('method');par=req.get('params',{})
-                enforce_private_transport_acl(require_signed_acl,method,transport_acl)
+                if not verify_transport_metadata(self.headers,raw,req):
+                    enforce_private_transport_acl(require_signed_acl,method,transport_acl)
                 if method=='initialize':result={'protocolVersion':'2024-11-05','capabilities':{'tools':{}},'serverInfo':{'name':'grepmesh','version':'cloud-index-v1'}}
                 elif method=='notifications/initialized':self.send_response(202);self.end_headers();return
                 elif method=='tools/list':result={'tools':tools()}

@@ -27,7 +27,7 @@ async fn call_route(route: &Route, tool: &str, mut arguments: Value, limit: usiz
     let args = arguments.as_object_mut().context("cloud arguments must be an object")?;
     let policy = args.remove("filesystem_acl");
     // Only the mesh's already validated read policy may authorize content access.
-    // Metadata does not require (and must not invent) a user's filesystem policy.
+    // Metadata authenticates the existing relay, without inventing a read policy.
     match tool {
         "search" | "search_text" | "read_text" | "find_paths" => {
             crate::mcp::validate_filesystem_acl_value(policy.as_ref()
@@ -43,15 +43,21 @@ async fn call_route(route: &Route, tool: &str, mut arguments: Value, limit: usiz
     let client = reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_millis(timeout_ms)).build()?;
     let mut request = client.post(url).header("Content-Type", "application/json").body(body.clone());
+    let secret = std::env::var(&route.secret_env).context("cloud signer is not configured")?;
+    anyhow::ensure!(secret.len() >= 32, "cloud signer is too short");
     if let Some(policy) = policy {
         let policy = serde_json::to_string(&policy)?;
-        let secret = std::env::var(&route.secret_env).context("cloud signer is not configured")?;
-        anyhow::ensure!(secret.len() >= 32, "cloud signer is too short");
         let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
         mac.update(&body); mac.update(b"\n"); mac.update(policy.as_bytes());
         let signature = mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>();
         request = request.header("X-GrepMesh-Filesystem-Acl", policy)
             .header("X-GrepMesh-Acl-Signature", signature);
+    } else {
+        // Domain separation prevents this signature from authorizing content.
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+        mac.update(b"grepmesh-metadata-v1\n"); mac.update(&body);
+        let signature = mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>();
+        request = request.header("X-GrepMesh-Metadata-Signature", signature);
     }
     let mut response = request.send().await.map_err(|_| anyhow!("signed cloud transport failed"))?;
     anyhow::ensure!(response.status().is_success(), "signed cloud HTTP status {}", response.status());

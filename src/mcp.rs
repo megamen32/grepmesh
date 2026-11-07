@@ -1679,6 +1679,11 @@ fn hop_count_for(local: &str, target: &str, base: u8) -> Result<u8> {
 }
 
 pub fn decode_tool_result<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T> {
+    if value.get("isError").and_then(Value::as_bool) == Some(true) {
+        let message = value.pointer("/content/0/text").and_then(Value::as_str)
+            .unwrap_or("remote tool failed");
+        return Err(anyhow!("remote tool error: {}", truncate_utf8(message, 500)));
+    }
     if let Some(content) = value.get("content").and_then(Value::as_array) {
         if let Some(first) = content.first() {
             if let Some(text) = first.get("text").and_then(Value::as_str) {
@@ -1708,6 +1713,14 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remote_tool_error_is_not_decoded_as_json() {
+        let error = super::decode_tool_result::<serde_json::Value>(serde_json::json!({
+            "isError": true, "content": [{"type": "text", "text": "signed filesystem ACL required"}]
+        })).unwrap_err();
+        assert_eq!(error.to_string(), "remote tool error: signed filesystem ACL required");
+    }
+
     use super::*;
     use crate::backend::HostSearchState;
 
