@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 import uuid
+from cloud_outbox import Outbox
 
 
 def activate(policy):
@@ -77,24 +78,35 @@ def main():
         env = os.environ.copy()
         env.update(GREPMESH_CLOUD_GATEWAY='local',
                    GREPMESH_CLOUD_RCLONE=policy['rclone'], PYTHONDONTWRITEBYTECODE='1')
-        exporter = subprocess.Popen(source['command'], stdout=subprocess.PIPE,
-                                    start_new_session=True)
+        outbox_dir = policy.get('outbox_dir', str(state / 'outbox'))
+        outbox = Outbox(outbox_dir, args.host)
+        pending = outbox.load()
+        exporter = None
         try:
             command = [sys.executable, str(Path(__file__).with_name('refresh_source.py')),
                        '--host', args.host, '--source-root', '/',
                        '--root', policy['ram_root'] + '/' + args.host,
                        '--reader-config', policy['reader_config'],
-                       '--buckets', str(source['buckets'])]
-            result = subprocess.run(command, stdin=exporter.stdout, env=env,
+                       '--buckets', str(source['buckets']), '--outbox-dir', outbox_dir]
+            if pending:
+                command.append('--resume')
+            else:
+                exporter = subprocess.Popen(source['command'], stdout=subprocess.PIPE,
+                                            start_new_session=True)
+            result = subprocess.run(command, stdin=exporter.stdout if exporter else subprocess.DEVNULL, env=env,
                                     capture_output=True, timeout=source.get('timeout_seconds', 10800))
-            exporter.stdout.close()
-            exporter_code = exporter.wait(timeout=15)
+            if exporter:
+                exporter.stdout.close()
+            exporter_code = exporter.wait(timeout=15) if exporter else 0
             if result.returncode or exporter_code:
                 # Exporter diagnostics go to the service journal; never print bodies.
                 raise RuntimeError('Source/publish failed: ' + str(exporter_code) + '/' +
                                    str(result.returncode) + ' ' + result.stderr.decode(errors='replace')[-2000:])
             published = json.loads(result.stdout)
             activate(policy)
+            if published.get('outbox_pending'):
+                outbox.acknowledge(published['generation'])
+                published['outbox_pending'] = False
             receipt = {'host': args.host, 'ok': True, 'elapsed_seconds': round(time.time()-started, 1),
                        'publication': published, 'finished_at': time.time()}
             (state / (args.host + '-result.json')).write_text(json.dumps(receipt))
@@ -106,7 +118,7 @@ def main():
             (state / (args.host + '-result.json')).write_text(json.dumps(receipt))
             raise
         finally:
-            if exporter.poll() is None:
+            if exporter is not None and exporter.poll() is None:
                 os.killpg(exporter.pid, signal.SIGTERM)
                 try:
                     exporter.wait(timeout=10)

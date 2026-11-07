@@ -22,6 +22,7 @@ import tempfile
 from cloud_index import (CloudStore, Publisher, MAX_DOCUMENT, digest,
                          ensure_tmpfs, json_bytes, safe_scope, valid_key)
 from oversize_support import MAX_OVERSIZE_DOCUMENT, publish_oversize
+from cloud_outbox import Outbox
 
 
 class StagingStore:
@@ -145,6 +146,30 @@ def atomic_json(path, data):
         Path(temp).unlink(missing_ok=True)
 
 
+def deliver(args, staging_dir, entries):
+    if os.environ.get('GREPMESH_CLOUD_GATEWAY') != 'local':
+        raise ValueError('Run batch publisher on the existing rclone owner host')
+    cloud = CloudStore()
+    subprocess.run(cloud.command(['copy', str(staging_dir), cloud.prefix,
+                   '--checksum', '--transfers', '8', '--checkers', '16',
+                   '--stats', '30s', '--stats-one-line', '--stats-log-level', 'NOTICE']),
+                   stdin=subprocess.DEVNULL, check=True, timeout=10800)
+    with open(str(args.reader_config) + '.lock', 'a') as config_lock:
+        fcntl.flock(config_lock, fcntl.LOCK_EX)
+        current = json.loads(args.reader_config.read_text())
+        replacement = [x for x in current if x['source_host'] != args.host] + entries
+        if len(replacement) > 128:
+            raise ValueError('Reader scope capacity exceeded')
+        atomic_json(args.reader_config, replacement)
+        try:
+            if args.restart_service:
+                subprocess.run(['systemctl', '--user', 'restart', args.restart_service],
+                               check=True, timeout=60)
+        except BaseException:
+            atomic_json(args.reader_config, current)
+            raise
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--host', required=True)
@@ -154,6 +179,8 @@ def main():
     ap.add_argument('--buckets', type=int, default=16)
     ap.add_argument('--reserve-mib', type=int, default=2048)
     ap.add_argument('--restart-service')
+    ap.add_argument('--outbox-dir', type=Path)
+    ap.add_argument('--resume', action='store_true')
     args = ap.parse_args()
     safe_scope(args.host)
     ensure_tmpfs(args.root)
@@ -164,6 +191,18 @@ def main():
         raise ValueError('Only a GrepMesh reader service may be restarted')
     with open(args.root / 'refresh.lock', 'a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        outbox = Outbox(args.outbox_dir, args.host) if args.outbox_dir else None
+        if args.resume:
+            packet = outbox.load() if outbox else None
+            if packet is None:
+                raise ValueError('No completed pending packet to resume')
+            outbox.verify(packet)
+            deliver(args, outbox.pending / 'payload', packet['entries'])
+            print(json.dumps({'action': 'resumed', 'host': args.host,
+                              'outbox_pending': True, **packet['receipt']}))
+            return
+        if outbox and outbox.load():
+            raise RuntimeError('Resume pending cloud packet before scanning source again')
         with tempfile.TemporaryDirectory(prefix='source-', dir=args.root) as tmp:
             scratch = Path(tmp)
             reserve = args.reserve_mib * 1024 * 1024
@@ -185,33 +224,13 @@ def main():
             replacement = [x for x in current if x['source_host'] != args.host] + entries
             if len(replacement) > 128:
                 raise ValueError('Reader scope capacity exceeded')
-            # Local rclone uses the owner's existing authentication. Do not copy
-            # credentials to source hosts. A batch failure leaves config intact.
-            if os.environ.get('GREPMESH_CLOUD_GATEWAY') != 'local':
-                raise ValueError('Run batch publisher on the existing rclone owner host')
-            cloud = CloudStore()
-            subprocess.run(cloud.command(['copy', str(staging_dir), cloud.prefix,
-                           '--checksum', '--transfers', '8', '--checkers', '16',
-                           '--stats', '30s', '--stats-one-line', '--stats-log-level', 'NOTICE']),
-                           stdin=subprocess.DEVNULL, check=True, timeout=10800)
-            # Other hosts may upload concurrently using separate RAM roots.
-            # Merge against the latest config under a short shared commit lock.
-            with open(str(args.reader_config) + '.lock', 'a') as config_lock:
-                fcntl.flock(config_lock, fcntl.LOCK_EX)
-                current = json.loads(args.reader_config.read_text())
-                replacement = [x for x in current if x['source_host'] != args.host] + entries
-                if len(replacement) > 128:
-                    raise ValueError('Reader scope capacity exceeded')
-                atomic_json(args.reader_config, replacement)
-                try:
-                    if args.restart_service:
-                        subprocess.run(['systemctl', '--user', 'restart', args.restart_service],
-                                       check=True, timeout=60)
-                except BaseException:
-                    atomic_json(args.reader_config, current)
-                    raise
+            if outbox:
+                outbox.prepare(staging_dir, entries, receipt)
+                staging_dir = outbox.pending / 'payload'
+            deliver(args, staging_dir, entries)
             print(json.dumps({'action': 'published', 'host': args.host,
-                              'objects': staging.puts, **receipt}), flush=True)
+                              'objects': staging.puts, 'outbox_pending': bool(outbox),
+                              **receipt}), flush=True)
 
 
 if __name__ == '__main__':
