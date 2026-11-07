@@ -56,6 +56,11 @@ def run():
         ok('empty-cache recovery requires no source DB',len(r['results'])==1 and r['cloud_fetches']>=3)
         r=fresh.query('*.md',glob=True,limit=20);ok('filename search and case-distinct paths',len(r['results'])==5 and not r['partial'])
         ok('filename glob fetches only compact path index',r['cloud_fetches']==1)
+        path_index=fresh.manifest.pop('path_index')
+        legacy=fresh.query('one.md',glob=True,authorized_roots=['/fixture'])
+        ok('legacy shards retain path-only hits without body reads',
+           [x['path'] for x in legacy['results']]==['/fixture/one.md'] and not legacy['partial'])
+        fresh.manifest['path_index']=path_index
         r=fresh.query('case',case_sensitive=True,limit=20);ok('literal case-sensitive query',len(r['results'])==2)
         r=fresh.query(r'needle(TWO|ONE)',regex=True,limit=20)
         ok('regex alternation finds both branch bodies',

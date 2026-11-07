@@ -513,6 +513,53 @@ def prefetched_shards(store, parts, cached, started, deadline_seconds, workers=6
         pool.shutdown(wait=False, cancel_futures=True)
 
 
+
+def sql_path_rows(connection, table, pattern, roots, authorized_roots, path_globs, deadline, limit):
+    """Read only matching authorized rows from the existing immutable SQLite.
+
+    Native GLOB is a candidate filter; Python's compiled fnmatch remains the
+    authority for brackets, Unicode casefold and basename semantics. SQL applies
+    both before LIMIT, so denied/candidate rows cannot hide an authorized match.
+    """
+    if table not in ('paths', 'docs'):raise ValueError('Invalid path table')
+    folded=pattern.casefold()
+    match=re.compile(fnmatch.translate(folded)).match
+    filters=[re.compile(fnmatch.translate(g)).match for g in (path_globs or [])]
+    def exact(path):
+        p=path.casefold()
+        return bool((match(p) or match(p.rsplit('/',1)[-1])) and
+                    (not filters or any(f(path) for f in filters)))
+    connection.create_function('path_match',1,exact,deterministic=True)
+    connection.create_function('path_casefold',1,str.casefold,deterministic=True)
+    connection.set_progress_handler(lambda: time.monotonic()>=deadline,1000)
+    clauses=[];params=[]
+    for allowed in (roots,authorized_roots):
+        if allowed is None:continue
+        if not allowed:clauses.append('0');continue
+        checks=[]
+        for root in allowed:
+            prefix=root.rstrip('/')+'/'
+            checks.append('(path=? OR substr(path,1,?)=?)')
+            params.extend((root,len(prefix),prefix))
+        clauses.append('('+' OR '.join(checks)+')')
+    # Bracket syntax differs between SQLite and fnmatch. For these patterns
+    # retain the exact matcher instead of risking a false-negative prefilter.
+    if '[' not in folded:
+        # Fold once for a basename literal/prefix; absolute paths cannot match
+        # that branch directly. Avoid a per-character ASCII classification scan.
+        fold='path_casefold(path)'
+        if folded and folded[0] not in '/*?':
+            clauses.append(f'({fold}) GLOB ?')
+            params.append('*/'+folded)
+        else:
+            clauses.append(f'(({fold}) GLOB ? OR ({fold}) GLOB ?)')
+            params.extend((folded,'*/'+folded))
+    clauses.append('path_match(path)')
+    params.append(limit)
+    return connection.execute('SELECT path,size,mtime_ns,sha FROM '+table+
+                              ' WHERE '+' AND '.join(clauses)+' LIMIT ?',params)
+
+
 class Reader:
     def __init__(self,store,root,scope,cache_bytes=512*MIB,allowed_host=None,allowed_root=None,quadgram_overlay=None):
         self.store=store;self.root=P(root);self.scope=safe_scope(scope);self.limit=cache_bytes
@@ -702,16 +749,9 @@ class Reader:
                     c.execute('PRAGMA cache_size=-2048')
                     c.set_progress_handler(lambda: time.monotonic()-started>deadline_seconds,1000)
                     try:
-                        for row in c.execute('SELECT path,size,mtime_ns,sha FROM paths'):
-                            if time.monotonic()-started>deadline_seconds:
-                                raise TimeoutError('path-only lookup deadline')
+                        for row in sql_path_rows(c,'paths',query,permitted,authorized_roots,
+                                                 path_globs,started+deadline_seconds,limit+1):
                             rp=row['path']
-                            if not any(rp==v or rp.startswith(v.rstrip('/')+'/') for v in permitted):continue
-                            if authorized_roots is not None and not any(rp==v or rp.startswith(v.rstrip('/')+'/') for v in authorized_roots):continue
-                            if path_globs and not any(fnmatch.fnmatchcase(rp,g) for g in path_globs):continue
-                            pattern=query.casefold()
-                            if not (fnmatch.fnmatchcase(rp.casefold(),pattern)
-                                    or fnmatch.fnmatchcase(P(rp).name.casefold(),pattern)):continue
                             hits.append({'host_id':HOST,'source_host':m['source_host'],
                                 'path':rp,'line_number':0,'column':0,'context':[],'text':'',
                                 'size':row['size'],'modified_ms':row['mtime_ns']//1000000,
@@ -742,7 +782,9 @@ class Reader:
                     c.set_progress_handler(lambda: time.monotonic()-started>deadline_seconds,1000)
                     try:
                         gram_query=fts_gram_query(gram_source)
-                        if (gram_query and not part.get('expanding_casefold')
+                        if glob:
+                            rows=sql_path_rows(c,'docs',query,permitted,authorized_roots,path_globs,started+deadline_seconds,limit+1-len(hits))
+                        elif (gram_query and not part.get('expanding_casefold')
                             and gram_source.casefold()==gram_source.lower()):
                             sql='SELECT d.* FROM terms t JOIN docs d ON d.id=t.rowid WHERE terms MATCH ?'
                             rows=c.execute(sql,(gram_query,))
@@ -755,7 +797,10 @@ class Reader:
                             if glob:
                                 pattern=query.casefold()
                                 if not (fnmatch.fnmatchcase(r['path'].casefold(),pattern) or fnmatch.fnmatchcase(P(r['path']).name.casefold(),pattern)):continue
-                                text='';line=0
+                                hits.append({'host_id':HOST,'source_host':m['source_host'],
+                                    'path':r['path'],'line_number':0,'column':0,'context':[],'text':'',
+                                    'size':r['size'],'modified_ms':r['mtime_ns']//1000000,
+                                    'created_ms':None,'body_sha256':r['sha'],'snapshot_at':m['generated_at']})
                             else:
                                 blob=c.execute('SELECT compressed FROM bodies WHERE sha=?',(r['sha'],)).fetchone()[0]
                                 dec=zlib.decompressobj();raw=dec.decompress(blob,MAX_DOCUMENT+1)
@@ -902,7 +947,7 @@ def verify_transport_acl(headers,body):
 def tools():
     common={'hosts':{'anyOf':[{'type':'string'},{'type':'array','items':{'type':'string'}}]},'roots':{'type':'array','items':{'type':'string'}},'request_id':{'type':'string'},'origin_host':{'type':'string'},'hop_count':{'type':'integer'},'limit':{'type':'integer'},'max_matches':{'type':'integer'},'mode':{'type':'string'},'path_globs':{'type':'array','items':{'type':'string'}}}
     result=[]
-    for name,desc in [('search','Search text and paths in the declared cloud text corpus. Supports literal text and bounded regex; regex latency is bounded and partial coverage is reported honestly when the deadline stops shard scanning.'),('search_text','Native GrepMesh peer alias for literal text search; bounded regex when mode is regex.'),('find_paths','Find paths in the declared cloud text corpus.'),('read_text','Read an exact cloud-snapshot text by path with filesystem ACL.'),('list_locations','Discover this cloud-backed text corpus.'),('search_status','Cloud coverage and bounded RAM cache status.')]:
+    for name,desc in [('search','Search text and paths in the declared cloud text corpus. Use path:<glob> for path-only filename search across all declared scopes without scanning bodies. Supports literal text and bounded regex; regex latency is bounded and partial coverage is reported honestly when the deadline stops shard scanning.'),('search_text','Native GrepMesh peer alias for literal text search; bounded regex when mode is regex.'),('find_paths','Find paths in the declared cloud text corpus.'),('read_text','Read an exact cloud-snapshot text by path with filesystem ACL.'),('list_locations','Discover this cloud-backed text corpus.'),('search_status','Cloud coverage and bounded RAM cache status.')]:
         props=dict(common)
         if name in ['search','search_text']:props['query']={'type':'string'}
         if name=='find_paths':props.update(query={'type':'string'},pattern={'type':'string'})
@@ -956,7 +1001,10 @@ def serve(reader,port):
                         if name=='find_paths' and args.get('mode')=='regex':
                             raise ValueError('find_paths matches globs only; regex belongs to search')
                         allowed=forwarded_acl_roots(args,transport_acl)
-                        out=reader.query(str(args.get('pattern',args.get('query',''))),int(args.get('limit',args.get('max_matches',20))),glob=name=='find_paths',case_sensitive=args.get('mode')=='literal',roots=args.get('roots'),path_globs=args.get('path_globs'),authorized_roots=allowed,regex=args.get('mode')=='regex')
+                        query=str(args.get('pattern',args.get('query','')))
+                        path_only=name=='find_paths' or (name in ('search','search_text') and query.startswith('path:') and args.get('mode')!='regex')
+                        if name!='find_paths' and path_only:query=query[5:]
+                        out=reader.query(query,int(args.get('limit',args.get('max_matches',20))),glob=path_only,case_sensitive=args.get('mode')=='literal',roots=args.get('roots'),path_globs=args.get('path_globs'),authorized_roots=allowed,regex=args.get('mode')=='regex')
                         env=envelope(args,out['partial'],'; '.join(out['warnings']) if out['warnings'] else None);env['truncated']=out['truncated'];out.update(env)
                         if name=='find_paths':out['paths']=[{'host':HOST,'path':r['path'],'kind':'file'} for r in out['results']]
                     else:raise ValueError('Unsupported tool')

@@ -100,3 +100,15 @@ does not authorize an index deletion or a production route switch.
 The `refresh_git.py` script refreshes only explicitly allowlisted Git or source-tree projects from server-100, without reading its legacy SQLite index. It verifies the complete source stream and original cloud manifest. If unchanged it performs zero writes. If changed, it publishes a new immutable generation with the pointer written last, while retaining the previous version for rollback. Empty scans, malformed data, or sudden loss of over half the documents fail closed. Runtime source streams and SQLite shards must remain in tmpfs.
 
 This is a bounded full-scope refresh, **not incremental per-file indexing**. It supports at most 100,000 documents and 256 MiB of source-stream data per scope (64 MiB default for nonproduction use). PDF/OCR extraction refresh is not implemented. The active timer `grepmesh-cloud-projects-refresh.timer` runs every 30 minutes under a user-systemd cgroup, with a 512 MiB RAM-cached search service. See `refresh_tree_scopes.example.json` and `systemd/` for the deployed Agent Herder, ExManager, video_watching and code-only Omniroute policy; `refresh_git_scopes.example.json` remains available for the two Git pilots. An unchanged scope performs zero cloud writes. Any changed scope is published atomically and triggers the cloud search service to restart and reload its verified manifests. The scheduled refresher and manual publisher share a nonblocking `publisher.lock` in tmpfs: overlapping runs fail closed, and failed scans release the lock without changing the active cloud pointer. User authorization alone does not grant a GPT Admin connection the verified filesystem ACL required by native multi-peer full-text routing.
+
+### Filename/path-only queries through the browser
+
+Select the cloud archive device and enter `path:<glob>` in the existing search
+box, for example `path:заключение-договора.md`, `path:*.pdf`, or
+`path:/home/roomhacker/project/*.rs`. The signed public `search` method keeps
+the same filesystem policy and searches filenames/paths only, including
+declared oversized-file catalogs. Ordinary queries still search content;
+regex mode does not interpret this prefix. Globs match a whole path or basename
+with Unicode case folding, using the existing `fnmatch` semantics (`*` crosses
+directory separators). No index rebuild or new database is needed. A deadline,
+unavailable scope or result limit remains explicit in partial/truncated flags.

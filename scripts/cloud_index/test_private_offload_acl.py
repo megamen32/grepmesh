@@ -141,6 +141,16 @@ with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
     check('source_root slash does not leak /dev in signed search',
           [r['path'] for r in payload(allowed)['results']] ==
           ['/home/user/readable.md'])
+    found = rpc(port, 'search', dict(base, query='path:readable.md'), auth_roots=['/home'])
+    check('signed public search path syntax finds filename',
+          not error(found) and [r['path'] for r in payload(found)['results']]==['/home/user/readable.md']
+          and not payload(found)['partial'])
+    missing = rpc(port, 'search', dict(base, query='path:absent-qa.md'), auth_roots=['/home'])
+    check('signed public path miss is complete',
+          not error(missing) and not payload(missing)['results'] and not payload(missing)['partial'])
+    denied_path = rpc(port, 'search', dict(base, query='path:event0'), auth_roots=['/home'])
+    check('public path syntax retains content ACL',
+          not error(denied_path) and not payload(denied_path)['results'])
     check('signed /home read_text succeeds',
           not error(rpc(port, 'read_text', read_args, auth_roots=['/home'])))
     check('signed /home cannot read /dev',
