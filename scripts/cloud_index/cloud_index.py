@@ -520,7 +520,17 @@ class Reader:
         self.quadgram_overlay=quadgram_overlay;self.quadgram_filters={}
         self.cache=collections.OrderedDict();self.used=0;self.lock=threading.RLock()
         self.directory=self.root/('cache-'+scope);self.directory.mkdir(mode=0o700,parents=True,exist_ok=True)
-        for old in self.directory.glob('*.sqlite'):old.unlink()  # own reconstructible RAM cache only
+        # Reuse immutable RAM shards only after checking their content identity.
+        # Restarting a reader must not discard a previously downloaded archive.
+        for old in self.directory.glob('*.sqlite'):
+            if old.is_symlink() or not old.is_file() or not re.fullmatch(r'[0-9a-f]{64}',old.stem):continue
+            size=old.stat().st_size
+            if size>MAX_RAW_SHARD or self.used+size>self.limit:continue
+            h=hashlib.sha256()
+            with old.open('rb') as source:
+                for block in iter(lambda:source.read(MIB),b''):h.update(block)
+            if h.hexdigest()==old.stem:
+                self.cache[old.stem]=old;self.used+=size
     def refresh(self):
         pointer=json.loads(self.store.get('scopes/'+self.scope+'/latest.json',65536))
         blob=self.store.get(pointer['manifest'],MAX_MANIFEST)
