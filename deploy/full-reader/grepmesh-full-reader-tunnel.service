@@ -1,0 +1,13 @@
+[Unit]
+Description=Loopback tunnel to GrepMesh full archive reader on server88
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -N -T -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L 127.0.0.1:19461:127.0.0.1:19461 roomhacker@192.168.2.75
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

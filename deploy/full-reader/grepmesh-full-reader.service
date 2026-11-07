@@ -1,0 +1,26 @@
+[Unit]
+Description=GrepMesh full Linux archive reader (private signed access)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+UMask=0077
+EnvironmentFile=%h/.config/grepmesh-full-reader/acl-secret.env
+Environment=GREPMESH_CLOUD_GATEWAY=roomhacker@192.168.2.100
+Environment=GREPMESH_CLOUD_HOST_ID=server-88-cloud-full
+Environment=GREPMESH_CLOUD_REQUIRE_VERIFIED_ACL=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStartPre=/usr/bin/mkdir -p -m 0700 /dev/shm/grepmesh-source-host-qa-I8waXR6X/cache
+ExecStart=/usr/bin/python3 %h/.local/lib/grepmesh-full-reader/multi_cloud.py serve --config %h/.config/grepmesh-full-reader/scopes.json --root /dev/shm/grepmesh-source-host-qa-I8waXR6X/cache --cache-mib 32768 --port 19461
+Restart=on-failure
+RestartSec=30
+MemoryHigh=4G
+MemoryMax=6G
+CPUQuota=200%
+TasksMax=384
+
+[Install]
+WantedBy=default.target
