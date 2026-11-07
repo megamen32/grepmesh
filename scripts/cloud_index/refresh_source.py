@@ -122,7 +122,8 @@ def build(staging, scratch, receipt, host, source_root, buckets):
         scope = safe_scope(stem + f'-b{i:02}')
         with gzip.open(scratch / f'{i}.gz', 'rt', encoding='utf-8') as stream:
             Publisher(staging, scratch, 16 * 1024 * 1024, 8192).publish(scope, stream)
-        entries.append({'scope': scope, 'source_host': host, 'source_root': source_root})
+        entries.append({'scope': scope, 'source_host': host, 'source_root': source_root,
+                        'partition_count': buckets})
     if receipt['oversized']:
         snapshot = receipt['generation']
         with gzip.open(scratch / 'oversize.gz', 'rt', encoding='utf-8') as stream:
