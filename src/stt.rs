@@ -183,7 +183,13 @@ impl SttEngine {
                 reqwest::blocking::multipart::Part::file(upload_path)
                     .with_context(|| format!("attach media {}", path.display()))?,
             );
-        let response = reqwest::blocking::Client::new()
+        // Long recordings need more than reqwest's 30-second blocking default.
+        // Keep both connection establishment and the complete request bounded.
+        let response = reqwest::blocking::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .context("build remote STT client")?
             .post(format!("{base_url}/v1/audio/transcriptions"))
             .bearer_auth(api_key)
             .multipart(form)
