@@ -149,7 +149,22 @@ pub fn run(config: &AppConfig, inventory: Option<&Path>) -> Result<()> {
             *skipped.entry("input_size_policy".into()).or_default() += 1;
             continue;
         }
-        let body = match extract(config, ocr.as_ref(), stt.as_ref(), path, &meta) {
+        let started = std::time::Instant::now();
+        let mut retries = 0;
+        let extraction = loop {
+            let result = extract(config, ocr.as_ref(), stt.as_ref(), path, &meta);
+            let retry = result.as_ref().err().is_some_and(transient_mesh_error);
+            if !retry || retries >= 15 || started.elapsed() >= std::time::Duration::from_secs(30) {
+                break result;
+            }
+            retries += 1;
+            tracing::info!(path = %path.display(), retries, "mesh OCR busy; retrying same source file");
+            std::thread::sleep(
+                std::time::Duration::from_secs(2)
+                    .min(std::time::Duration::from_secs(30).saturating_sub(started.elapsed())),
+            );
+        };
+        let body = match extraction {
             Ok(Some(body)) => body,
             Ok(None) => {
                 *skipped.entry("unsupported_binary".into()).or_default() += 1;
@@ -348,4 +363,35 @@ mod tests {
         assert_eq!(ocr.mesh_relay_origin, config.gptadmin_topology_url);
         assert_eq!(ocr.mesh_topology_cache_path, config.topology_cache_path);
     }
+}
+
+fn transient_mesh_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.to_string().as_str(),
+            "mesh OCR deferred: no available OCR worker"
+                | "mesh OCR deferred: no available OCR worker completed extraction"
+                | "OCR worker temporarily busy"
+        )
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn export_retries_only_transient_mesh_admission() {
+    assert!(transient_mesh_error(&anyhow::anyhow!(
+        "mesh OCR deferred: no available OCR worker"
+    )));
+    assert!(transient_mesh_error(&anyhow::anyhow!(
+        "mesh OCR deferred: no available OCR worker completed extraction"
+    )));
+    assert!(transient_mesh_error(&anyhow::anyhow!(
+        "OCR worker temporarily busy"
+    )));
+    assert!(!transient_mesh_error(&anyhow::anyhow!(
+        "OCR processing failed"
+    )));
+    assert!(!transient_mesh_error(&anyhow::anyhow!(
+        "mesh OCR input is not decodable"
+    )));
 }
