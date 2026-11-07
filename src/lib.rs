@@ -1,3 +1,4 @@
+pub mod cloud_export;
 pub mod backend;
 mod cloud_transport;
 pub mod backup_catalog;

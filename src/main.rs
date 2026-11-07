@@ -35,6 +35,12 @@ fn verify_cache_compaction_resources() -> anyhow::Result<()> {
 struct Args {
     #[arg(long)]
     config: PathBuf,
+    /// Export an explicit sorted JSONL inventory of canonical source file paths, then exit.
+    #[arg(long, conflicts_with = "compact_cache_bodies")]
+    cloud_export: Option<PathBuf>,
+    /// Walk configured roots and export originals without a persistent index.
+    #[arg(long, conflicts_with_all = ["cloud_export", "compact_cache_bodies"])]
+    cloud_export_roots: bool,
     /// Compact one bounded batch of verified duplicate extraction-cache bodies and exit.
     #[arg(long)]
     compact_cache_bodies: bool,
@@ -50,12 +56,16 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
         .with_target(false)
         .compact()
         .init();
 
     let args = Args::parse();
     let config = AppConfig::from_path(&args.config)?;
+    if args.cloud_export_roots || args.cloud_export.is_some() {
+        return grepmesh::cloud_export::run(&config, args.cloud_export.as_deref());
+    }
     if args.compact_cache_bodies {
         verify_cache_compaction_resources()?;
         let index_path = config
