@@ -37,6 +37,29 @@ def route_frozen_readers(readers, path):
         reader in groups[host].values() and reader is not selected[host]
         for host in selected)]
 
+def route_live_readers(readers, path):
+    """Hash-route only explicitly sized, complete live snapshot partitions."""
+    groups={}
+    for reader in readers:
+        match=re.fullmatch(r'(live-.+)-b(\d{2,})',reader.scope)
+        if match:
+            groups.setdefault(match.group(1),[]).append((int(match.group(2)),reader))
+    skipped=set()
+    for group,entries in groups.items():
+        first=entries[0][1]
+        count=getattr(first,'partition_count',None)
+        if type(count) is not int or not 1<=count<=128:continue
+        host=first.manifest['source_host'];root=first.manifest['source_root']
+        if not group.startswith('live-'+host+'-'):continue
+        if len(entries)!=count or {i for i,_ in entries}!=set(range(count)):continue
+        if any(getattr(r,'partition_count',None)!=count
+               or type(getattr(r,'partition_count',None)) is not int
+               or r.manifest['source_host']!=host or r.manifest['source_root']!=root
+               for _,r in entries):continue
+        bucket=int.from_bytes(hashlib.sha256(path.encode('utf-8')).digest()[:8],'big')%count
+        skipped.update(id(r) for i,r in entries if i!=bucket)
+    return [r for r in readers if id(r) not in skipped]
+
 class MultiReader:
     def __init__(self, store, root, scopes, cache_mib=512):
         if not 1 <= len(scopes) <= 128:
@@ -60,6 +83,7 @@ class MultiReader:
             seen.add(scope)
             self.readers.append(Reader(store,root,scope,quota,source_host,source_root,
                                        quadgram_overlay=entry.get('quadgram_overlay')))
+            self.readers[-1].partition_count=entry.get('partition_count')
             spec=entry.get('oversize')
             if spec is not None:
                 # Historical bodies above the 1 MiB shard limit live in a
@@ -159,7 +183,7 @@ class MultiReader:
         else:
             selected=sorted(candidates,
                             key=lambda r:len(r.manifest['source_root']),reverse=True)
-            selected=route_frozen_readers(selected,path)
+            selected=route_live_readers(route_frozen_readers(selected,path),path)
         started=time.monotonic()
         for reader in selected:
             remaining=deadline_seconds-(time.monotonic()-started)
