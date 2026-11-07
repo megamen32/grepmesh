@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh GrepMesh cloud source %i without a native index
+After=network-online.target
+[Service]
+Type=oneshot
+UMask=0077
+Nice=10
+ExecStart=/usr/bin/python3 /home/roomhacker/.local/lib/grepmesh-cloud-refresh/refresh_fleet.py --policy /home/roomhacker/.local/state/grepmesh-cloud-refresh-20261107/policy.json --host %i
+TimeoutStartSec=3h
+KillMode=control-group

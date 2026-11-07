@@ -112,3 +112,26 @@ regex mode does not interpret this prefix. Globs match a whole path or basename
 with Unicode case folding, using the existing `fnmatch` semantics (`*` crosses
 directory separators). No index rebuild or new database is needed. A deadline,
 unavailable scope or result limit remains explicit in partial/truncated flags.
+
+## Source refresh without native SQLite
+
+`grepmesh-mcp --config CONFIG --cloud-export-roots` streams configured source
+roots using the existing text/document/OCR/STT extractors. It does not open a
+native index. Pipe the JSONL stream into `refresh_source.py --host HOST
+--source-root / --root /dev/shm/grepmesh-refresh/HOST --reader-config scopes.json`.
+The publisher stages compressed partitions and cloud objects in RAM, uploads
+with one rclone batch, and replaces only that host's reader scopes after success.
+`stream_native_seed.py` is a one-time read-only import of existing indexed history;
+it must not be represented as a current filesystem scan.
+
+`refresh_fleet.py --policy POLICY.json --host HOST` runs the configured exporter
+command, publishes, and activates the existing reader over SSH. Policy holds
+command arrays and paths, never credentials. The rclone owner retains cloud
+authentication; source services retain their own OCR/STT environment files.
+The systemd templates run an initial refresh after boot and then daily; manual
+service start refreshes immediately. Failed scans retain the previous cloud
+generation. They write a failure receipt and do not recreate any native index.
+
+Source files are preserved. Old cloud objects/history remain available; only the
+reader's current source generation changes. Local durable files are configuration,
+small receipts and executable code; full index/content staging is tmpfs only.

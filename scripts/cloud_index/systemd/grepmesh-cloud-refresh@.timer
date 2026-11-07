@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily cloud refresh of GrepMesh source %i
+[Timer]
+OnBootSec=15min
+OnUnitInactiveSec=24h
+RandomizedDelaySec=10min
+Unit=grepmesh-cloud-refresh@%i.service
+[Install]
+WantedBy=timers.target
