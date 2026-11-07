@@ -41,9 +41,18 @@ with tempfile.TemporaryDirectory(dir=BASE) as tmp:
         barrier.wait(timeout=2.0)
         return original_query(self,*args,**kwargs)
     with patch.object(Reader,'query',synchronized_query):
-        concurrent=a.query('*.md',glob=True)
-    check('independent path-scope queries actually run concurrently',
-          len(concurrent['results'])==1 and not concurrent['partial'])
+        concurrent=a.query('shared')
+    check('independent text-scope queries still run concurrently',
+          len(concurrent['results'])==2 and not concurrent['partial'])
+    path_threads=[]
+    def path_query_thread(self,*args,**kwargs):
+        path_threads.append(threading.get_ident())
+        return original_query(self,*args,**kwargs)
+    with patch.object(Reader,'query',path_query_thread):
+        path_result=a.query('*.md',glob=True)
+    check('path SQL scopes avoid concurrent Python callbacks',
+          path_threads==[threading.get_ident()]*2 and len(path_result['results'])==1
+          and not path_result['partial'])
     check('RAM cache budget',a.used<=128*1024*1024)
     check('source-root narrowing',len(a.query('shared',roots=['/src/code'])['results'])==1)
     check('ACL isolates restricted source',len(a.query('shared',authorized_roots=['/src/documents'])['results'])==1)

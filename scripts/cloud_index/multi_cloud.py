@@ -307,9 +307,16 @@ class MultiReader:
         if selected:
             # Four independent scopes at most. Each queued scope receives the
             # remaining global budget, never a fresh per-scope deadline.
-            with ThreadPoolExecutor(max_workers=min(4,len(selected))) as pool:
-                for name,out in pool.map(read_with_shared_deadline,selected):
+            if glob:
+                # Path SQL uses Python casefold callbacks. Parallel SQLite scans
+                # contend on the GIL; the warm archive is faster on one thread.
+                for reader in selected:
+                    name,out=read_with_shared_deadline(reader)
                     add_result(name,out)
+            else:
+                with ThreadPoolExecutor(max_workers=min(4,len(selected))) as pool:
+                    for name,out in pool.map(read_with_shared_deadline,selected):
+                        add_result(name,out)
         truncated |= len(results)>limit
         if self.oversize:
             if len(results)>=limit:
