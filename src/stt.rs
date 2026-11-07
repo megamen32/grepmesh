@@ -100,16 +100,44 @@ impl SttEngine {
         Ok(output)
     }
 
+    fn is_video(path: &Path) -> bool {
+        path.extension()
+            .and_then(|v| v.to_str())
+            .is_some_and(|ext| {
+                matches!(
+                    ext.to_ascii_lowercase().as_str(),
+                    "mp4" | "mkv" | "mov" | "webm" | "avi" | "m4v"
+                )
+            })
+    }
+
+    fn video_has_audio(path: &Path) -> Result<bool> {
+        let output = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=index",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(path)
+            .output()
+            .context("ffprobe is required to inspect video audio")?;
+        if !output.status.success() {
+            return Err(anyhow!(
+                "ffprobe failed for {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(!output.stdout.iter().all(u8::is_ascii_whitespace))
+    }
+
     fn prepare_remote_media(&self, path: &Path) -> Result<Option<tempfile::TempPath>> {
-        let extension = path
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if !matches!(
-            extension.as_str(),
-            "mp4" | "mkv" | "mov" | "webm" | "avi" | "m4v"
-        ) {
+        if !Self::is_video(path) {
             return Ok(None);
         }
         if path.metadata()?.len() > self.config.max_media_bytes {
@@ -127,6 +155,10 @@ impl SttEngine {
     }
 
     fn transcribe_remote(&self, path: &Path) -> Result<String> {
+        if Self::is_video(path) && !Self::video_has_audio(path)? {
+            tracing::info!(path = %path.display(), "video has no audio stream; no transcript");
+            return Ok(String::new());
+        }
         let base_url = self
             .config
             .remote_base_url
@@ -396,6 +428,37 @@ mod tests {
             .prepare_remote_media(Path::new("voice.mp3"))
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn remote_silent_video_has_no_transcript_but_invalid_video_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("silent.mov");
+        let output = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=size=16x16:duration=0.1",
+                "-c:v",
+                "mpeg4",
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let engine = SttEngine::new(SttConfig {
+            enabled: true,
+            backend: "remote".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!SttEngine::video_has_audio(&source).unwrap());
+        assert_eq!(engine.transcribe_remote(&source).unwrap(), "");
+        std::fs::write(&source, b"invalid video").unwrap();
+        assert!(engine.transcribe_remote(&source).is_err());
     }
 
     #[cfg(feature = "local-stt")]
