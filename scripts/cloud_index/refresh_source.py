@@ -102,7 +102,8 @@ def partition(stream, root, host, source_root, buckets, reserve):
                       'complete_for_policy': True, 'skipped': footer.get('skipped', {})}) + '\n')
     # Include policy and per-document metadata in publication identity: body-only
     # equality must not make a changed source policy reuse an old manifest.
-    identity = hashlib.sha256(json_bytes(header))
+    identity = hashlib.sha256(json_bytes({'header': header,
+                                         'layout': 'source-refresh-v2-oversize-4m'}))
     for i in range(buckets):
         with gzip.open(root / f'{i}.gz', 'rb') as f:
             for block in iter(lambda: f.read(1024 * 1024), b''):
