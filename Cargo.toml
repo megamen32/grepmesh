@@ -37,6 +37,7 @@ ureq = "2"
 bzip2 = "0.4"
 base64 = "0.22"
 sha2 = "0.10.9"
+hmac = "0.12"
 tar = "0.4"
 tempfile = "3"
 oar-ocr = { version = "0.9.1", features = ["auto-download"], optional = true }

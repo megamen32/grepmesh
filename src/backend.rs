@@ -246,6 +246,8 @@ pub struct SearchResponse<T> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_host: Option<String>,
     pub request_id: String,
     pub origin_host: String,
     pub hop_count: u8,

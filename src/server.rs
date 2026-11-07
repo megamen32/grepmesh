@@ -753,6 +753,7 @@ fn tool_meta(name: &str, description: &str) -> Value {
             "required": ["host", "path"],
             "properties": {
                 "host": {"type": "string"}, "path": {"type": "string"},
+                "source_host": {"type": "string", "description": "Original source host returned by a federated cloud search."},
                 "start_line": {"type": "integer", "minimum": 1},
                 "end_line": {"type": "integer", "minimum": 1}
             }

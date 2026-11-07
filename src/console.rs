@@ -557,6 +557,7 @@ async fn preview(State(state): State<ConsoleState>, Json(request): Json<Value>) 
             return bad_request("federated source requires an authenticated browser route");
         }
         state.service.call_read_text(ReadTextArgs {
+            source_host: None,
             host: target.host.clone(),
             path: target.path.clone().into(),
             start_line: Some(preview_target.line_number.max(1)),

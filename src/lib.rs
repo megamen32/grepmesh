@@ -1,4 +1,5 @@
 pub mod backend;
+mod cloud_transport;
 pub mod backup_catalog;
 pub mod compute;
 mod compute_ratings;

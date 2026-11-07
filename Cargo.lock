@@ -1451,6 +1451,7 @@ dependencies = [
  "futures",
  "getrandom 0.4.3",
  "globset",
+ "hmac",
  "http",
  "image",
  "libc",

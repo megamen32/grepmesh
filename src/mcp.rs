@@ -175,6 +175,8 @@ struct DuplicateResult {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReadTextArgs {
     pub host: String,
+    #[serde(default)]
+    pub source_host: Option<String>,
     pub path: PathBuf,
     #[serde(default)]
     pub start_line: Option<usize>,
@@ -893,6 +895,7 @@ impl MeshService {
     pub async fn call_read_text(&self, args: ReadTextArgs) -> Result<ToolResult> {
         let ReadTextArgs {
             host,
+            source_host,
             path,
             start_line,
             end_line,
@@ -925,8 +928,11 @@ impl MeshService {
             anyhow::bail!("remote read requires a verified GPTAdmin filesystem ACL")
         }
         let response = if target == self.local.host_id {
+            anyhow::ensure!(source_host.as_deref().is_none_or(|source| source == self.local.host_id),
+                "local read source host mismatch");
             let chunks = self.local.read_text(&path, start_line, end_line)?;
             ReadResponse {
+                source_host: source_host.clone(),
                 request_id: normalized.request_id.clone(),
                 origin_host: normalized.origin_host.clone(),
                 hop_count: normalized.hop_count,
@@ -951,6 +957,7 @@ impl MeshService {
                     json!({
                         "host": "local",
                         "path": path,
+                        "source_host": source_host,
                         "start_line": start_line,
                         "end_line": end_line,
                         "request_id": normalized.request_id.clone(),
@@ -961,6 +968,12 @@ impl MeshService {
                 )
                 .await?;
             let mut response = decode_tool_result::<ReadResponse>(value)?;
+            anyhow::ensure!(response.host_id == target && response.target_host_id == target
+                && response.host_status.iter().all(|status| status.host_id == target),
+                "remote reader identity mismatch");
+            anyhow::ensure!(response.path == path.to_string_lossy()
+                && source_host.as_deref().is_none_or(|source| response.source_host.as_deref() == Some(source)),
+                "remote reader returned a different source document");
             normalize_host_statuses(&mut response.host_status, response.partial);
             response.host_id = self.local.host_id.clone();
             response.target_host_id = target.clone();
@@ -1550,6 +1563,10 @@ impl MeshService {
         tool: &str,
         arguments: Value,
     ) -> Result<Value> {
+        if let Some(value) = crate::cloud_transport::call(&peer.host_id, tool, arguments.clone(),
+            self.local.limits.max_response_bytes, self.local.limits.peer_timeout_ms).await? {
+            return Ok(value);
+        }
         if peer.gptadmin_relay_url.as_deref() == Some(peer.routable_url.as_str()) {
             return self
                 .gptadmin_client

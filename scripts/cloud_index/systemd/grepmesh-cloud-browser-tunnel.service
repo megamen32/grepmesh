@@ -1,0 +1,11 @@
+[Unit]
+Description=GrepMesh browser access to signed cloud readers over SSH
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/ssh -NT -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -L 127.0.0.1:19445:127.0.0.1:19435 -L 127.0.0.1:19446:127.0.0.1:19436 roomhacker@192.168.2.5
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
