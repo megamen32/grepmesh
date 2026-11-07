@@ -33,7 +33,9 @@ source=pathlib.Path(source);target=pathlib.Path(target)
 incoming=source.read_bytes();current=target.read_bytes()
 data=json.loads(incoming)
 assert isinstance(data,list) and 1<=len(data)<=128
-if incoming==current:
+fingerprint=hashlib.sha256(incoming).hexdigest()
+marker=target.with_name(target.name+'.active-sha256')
+if incoming==current and marker.exists() and marker.read_text()==fingerprint:
  source.unlink();print('reader unchanged');raise SystemExit(0)
 backup=target.with_name(target.name+'.previous')
 backup.write_bytes(current);backup.chmod(0o600)
@@ -52,7 +54,8 @@ except BaseException:
  os.replace(backup,target)
  subprocess.run(['systemctl','--user','restart',service],timeout=90)
  raise
-print('reader activated '+hashlib.sha256(incoming).hexdigest())
+marker.write_text(fingerprint);marker.chmod(0o600)
+print('reader activated '+fingerprint)
 '''
         command = shlex.join(['python3', '-', temporary, target, policy['reader_service']])
         subprocess.run(['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8',
