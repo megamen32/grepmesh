@@ -125,7 +125,8 @@ def build(staging, scratch, receipt, host, source_root, buckets):
     if receipt['oversized']:
         snapshot = receipt['generation']
         with gzip.open(scratch / 'oversize.gz', 'rt', encoding='utf-8') as stream:
-            publish_oversize(staging, host, snapshot, (json.loads(x) for x in stream))
+            publish_oversize(staging, host, snapshot, (json.loads(x) for x in stream),
+                             chunk_bytes=4 * 1024 * 1024)
         entries[0]['oversize'] = {'host': host, 'snapshot': snapshot}
     return entries
 
@@ -188,7 +189,8 @@ def main():
                 raise ValueError('Run batch publisher on the existing rclone owner host')
             cloud = CloudStore()
             subprocess.run(cloud.command(['copy', str(staging_dir), cloud.prefix,
-                           '--checksum', '--transfers', '4', '--checkers', '8']),
+                           '--checksum', '--transfers', '8', '--checkers', '16',
+                           '--stats', '30s', '--stats-one-line', '--stats-log-level', 'NOTICE']),
                            stdin=subprocess.DEVNULL, check=True, timeout=10800)
             # Other hosts may upload concurrently using separate RAM roots.
             # Merge against the latest config under a short shared commit lock.
