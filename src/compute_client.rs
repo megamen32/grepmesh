@@ -20,7 +20,7 @@ const MAX_INPUT_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 const MIN_FREE_GPU_BYTES: u64 = 5 * 1024 * 1024 * 1024 / 2;
 const STATUS_TTL: Duration = Duration::from_secs(10);
-const FAILED_PEER_COOLDOWN: Duration = Duration::from_secs(60);
+pub(crate) const FAILED_PEER_COOLDOWN: Duration = Duration::from_secs(60);
 const MAX_PEERS: usize = 8;
 // Workers cache a short native load snapshot; avoid overlapping observations
 // from this index's three clients while leaving inference fully parallel.

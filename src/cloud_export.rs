@@ -11,6 +11,9 @@ use std::{
 };
 
 const MAX_DOCUMENT: usize = 64 * 1024 * 1024;
+// Outlast the compute client's 60s failed-probe cooldown, then allow re-admission.
+const MESH_RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(90);
+const MESH_RETRY_LIMIT: usize = 45;
 
 fn record(out: &mut impl Write, value: &Value) -> Result<()> {
     serde_json::to_writer(&mut *out, value)?;
@@ -154,14 +157,14 @@ pub fn run(config: &AppConfig, inventory: Option<&Path>) -> Result<()> {
         let extraction = loop {
             let result = extract(config, ocr.as_ref(), stt.as_ref(), path, &meta);
             let retry = result.as_ref().err().is_some_and(transient_mesh_error);
-            if !retry || retries >= 15 || started.elapsed() >= std::time::Duration::from_secs(30) {
+            if !retry || retries >= MESH_RETRY_LIMIT || started.elapsed() >= MESH_RETRY_WINDOW {
                 break result;
             }
             retries += 1;
             tracing::info!(path = %path.display(), retries, "mesh OCR busy; retrying same source file");
             std::thread::sleep(
                 std::time::Duration::from_secs(2)
-                    .min(std::time::Duration::from_secs(30).saturating_sub(started.elapsed())),
+                    .min(MESH_RETRY_WINDOW.saturating_sub(started.elapsed())),
             );
         };
         let body = match extraction {
@@ -394,4 +397,13 @@ fn export_retries_only_transient_mesh_admission() {
     assert!(!transient_mesh_error(&anyhow::anyhow!(
         "mesh OCR input is not decodable"
     )));
+}
+
+#[cfg(test)]
+#[test]
+fn export_retry_allows_failed_worker_to_leave_cooldown() {
+    // A transient failed status probe must not poison every retry of this file.
+    let recovery = crate::compute_client::FAILED_PEER_COOLDOWN + std::time::Duration::from_secs(2);
+    assert!(MESH_RETRY_WINDOW > recovery);
+    assert!(std::time::Duration::from_secs(2 * MESH_RETRY_LIMIT as u64) > recovery);
 }
