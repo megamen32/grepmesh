@@ -4,9 +4,9 @@ use anyhow::{anyhow, Context, Result};
 use bzip2::read::BzDecoder;
 #[cfg(feature = "local-stt")]
 use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineTransducerModelConfig, Wave};
-use std::path::Path;
 #[cfg(feature = "local-stt")]
-use std::{fs, io, path::PathBuf, process::Command, sync::Mutex};
+use std::{fs, io, path::PathBuf, sync::Mutex};
+use std::{path::Path, process::Command};
 #[cfg(feature = "local-stt")]
 use tar::Archive;
 
@@ -64,7 +64,7 @@ impl SttEngine {
     #[cfg(feature = "local-stt")]
     fn transcribe_local(&self, path: &Path) -> Result<String> {
         let model_dir = self.ensure_model()?;
-        let wav = self.prepare_wav(path)?;
+        let wav = self.prepare_wav(path, None)?;
         let wave_path = wav.as_deref().unwrap_or(path);
         let wave = Wave::read(&wave_path.to_string_lossy())
             .ok_or_else(|| anyhow!("cannot decode WAV {}", wave_path.display()))?;
@@ -100,6 +100,32 @@ impl SttEngine {
         Ok(output)
     }
 
+    fn prepare_remote_media(&self, path: &Path) -> Result<Option<tempfile::TempPath>> {
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !matches!(
+            extension.as_str(),
+            "mp4" | "mkv" | "mov" | "webm" | "avi" | "m4v"
+        ) {
+            return Ok(None);
+        }
+        if path.metadata()?.len() > self.config.max_media_bytes {
+            return Err(anyhow!(
+                "video exceeds STT max_media_bytes: {}",
+                path.display()
+            ));
+        }
+        // Keep the temporary PCM file within the remote upload budget. Reaching
+        // the limit is an error, never a successful truncated transcript.
+        self.prepare_wav(
+            path,
+            Some(self.config.max_media_bytes.min(24 * 1024 * 1024)),
+        )
+    }
+
     fn transcribe_remote(&self, path: &Path) -> Result<String> {
         let base_url = self
             .config
@@ -114,12 +140,14 @@ impl SttEngine {
         } else {
             self.config.model.as_str()
         };
+        let wav = self.prepare_remote_media(path)?;
+        let upload_path = wav.as_deref().unwrap_or(path);
         let form = reqwest::blocking::multipart::Form::new()
             .text("model", model.to_string())
             .text("response_format", "json")
             .part(
                 "file",
-                reqwest::blocking::multipart::Part::file(path)
+                reqwest::blocking::multipart::Part::file(upload_path)
                     .with_context(|| format!("attach media {}", path.display()))?,
             );
         let response = reqwest::blocking::Client::new()
@@ -204,10 +232,15 @@ impl SttEngine {
         Ok(model_dir)
     }
 
-    #[cfg(feature = "local-stt")]
-    fn prepare_wav(&self, path: &Path) -> Result<Option<tempfile::TempPath>> {
+    fn prepare_wav(
+        &self,
+        path: &Path,
+        max_bytes: Option<u64>,
+    ) -> Result<Option<tempfile::TempPath>> {
         let temp = tempfile::Builder::new().suffix(".wav").tempfile()?;
-        let output = Command::new("ffmpeg")
+        let mut command = Command::new("ffmpeg");
+        command.arg("-nostdin");
+        command
             .arg("-v")
             .arg("error")
             .arg("-y")
@@ -219,11 +252,26 @@ impl SttEngine {
             .arg("-ar")
             .arg("16000")
             .arg("-c:a")
-            .arg("pcm_s16le")
-            .arg(temp.path())
-            .output();
+            .arg("pcm_s16le");
+        if let Some(limit) = max_bytes {
+            if limit == 0 {
+                return Err(anyhow!("STT temporary audio size limit is zero"));
+            }
+            command.arg("-fs").arg(limit.to_string());
+        }
+        let output = command.arg(temp.path()).output();
         match output {
-            Ok(output) if output.status.success() => Ok(Some(temp.into_temp_path())),
+            Ok(output) if output.status.success() => {
+                if max_bytes.is_some_and(|limit| {
+                    temp.as_file().metadata().map_or(true, |m| m.len() >= limit)
+                }) {
+                    return Err(anyhow!(
+                        "converted audio exceeds STT temporary upload limit: {}",
+                        path.display()
+                    ));
+                }
+                Ok(Some(temp.into_temp_path()))
+            }
             Ok(output) => Err(anyhow!(
                 "ffmpeg failed for {}: {}",
                 path.display(),
@@ -300,6 +348,55 @@ fn format_timestamp(seconds: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_video_is_wav_and_temp_is_removed_without_changing_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("clip.MOV");
+        let output = std::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.1",
+                "-c:a",
+                "aac",
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let original = std::fs::read(&source).unwrap();
+        let engine = SttEngine::new(SttConfig {
+            enabled: true,
+            backend: "remote".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let wav = engine
+            .prepare_remote_media(&source)
+            .unwrap()
+            .expect("video must be converted");
+        let bytes = std::fs::read(&wav).unwrap();
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        let temporary = wav.to_path_buf();
+        drop(wav);
+        assert!(!temporary.exists());
+        assert!(engine
+            .prepare_wav(&source, Some(128))
+            .unwrap_err()
+            .to_string()
+            .contains("limit"));
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert!(engine
+            .prepare_remote_media(Path::new("voice.mp3"))
+            .unwrap()
+            .is_none());
+    }
 
     #[cfg(feature = "local-stt")]
     #[test]
