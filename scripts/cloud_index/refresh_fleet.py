@@ -27,7 +27,7 @@ def activate(policy):
         fcntl.flock(lock, fcntl.LOCK_EX)
         subprocess.run(['scp', '-q', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8',
                         str(config), remote + ':' + temporary], check=True, timeout=60)
-        script = '''import hashlib,json,os,pathlib,subprocess,sys
+        script = '''import hashlib,json,os,pathlib,subprocess,sys,socket,time
 source,target,service=map(str,sys.argv[1:])
 source=pathlib.Path(source);target=pathlib.Path(target)
 incoming=source.read_bytes();current=target.read_bytes()
@@ -40,6 +40,14 @@ backup.write_bytes(current);backup.chmod(0o600)
 source.chmod(0o600);os.replace(source,target)
 try:
  subprocess.run(['systemctl','--user','restart',service],check=True,timeout=90)
+ deadline=time.monotonic()+180
+ while True:
+  try:
+   with socket.create_connection(('127.0.0.1',19461),timeout=2):pass
+   break
+  except OSError:
+   if time.monotonic()>=deadline:raise TimeoutError('reader did not bind after loading cloud scopes')
+   time.sleep(2)
 except BaseException:
  os.replace(backup,target)
  subprocess.run(['systemctl','--user','restart',service],timeout=90)
@@ -48,7 +56,7 @@ print('reader activated '+hashlib.sha256(incoming).hexdigest())
 '''
         command = shlex.join(['python3', '-', temporary, target, policy['reader_service']])
         subprocess.run(['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8',
-                        remote, command], input=script.encode(), check=True, timeout=200)
+                        remote, command], input=script.encode(), check=True, timeout=300)
 
 
 def main():
