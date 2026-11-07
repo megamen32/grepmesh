@@ -563,9 +563,8 @@ impl LocalBackend {
                     paths.clone()
                 } else {
                     let requested = Path::new(name);
-                    let Ok(requested) = fs::canonicalize(requested) else {
-                        return Ok(self.default_search_roots());
-                    };
+                    let requested = fs::canonicalize(requested)
+                        .map_err(|_| anyhow::anyhow!("unknown search root"))?;
                     let allowed = self
                         .root_paths
                         .values()
@@ -573,7 +572,7 @@ impl LocalBackend {
                         .filter_map(|path| fs::canonicalize(path).ok())
                         .any(|path| requested.starts_with(path));
                     if !allowed {
-                        return Ok(self.default_search_roots());
+                        anyhow::bail!("search root is outside configured roots");
                     }
                     vec![requested]
                 };
@@ -1932,6 +1931,18 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explicit_search_root_never_falls_back_to_a_broader_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        let allowed = temp.path().join("allowed");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let backend = super::LocalBackend::new("qa", &allowed, Default::default());
+        assert!(backend.selected_roots(&[outside.to_string_lossy().into_owned()]).is_err());
+        assert!(backend.selected_roots(&["missing-root".into()]).is_err());
+        assert_eq!(backend.selected_roots(&[]).unwrap(), vec![allowed]);
+    }
     #[tokio::test]
     async fn find_duplicates_hashes_only_an_explicit_bounded_root_without_mutating_files() {
         let temp = tempfile::tempdir().unwrap();

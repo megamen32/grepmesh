@@ -302,7 +302,7 @@ impl PersistentIndex {
         }
         let trigger_ready: Option<String> = connection
             .query_row(
-                "SELECT value FROM grepmesh_metadata WHERE key='cache_update_trigger_v2'",
+                "SELECT value FROM grepmesh_metadata WHERE key='cache_update_trigger_v3'",
                 [],
                 |row| row.get(0),
             )
@@ -381,7 +381,7 @@ impl PersistentIndex {
         let mut connection = self.connection()?;
         let migrated: Option<String> = connection
             .query_row(
-                "SELECT value FROM grepmesh_metadata WHERE key='cache_update_trigger_v2'",
+                "SELECT value FROM grepmesh_metadata WHERE key='cache_update_trigger_v3'",
                 [],
                 |row| row.get(0),
             )
@@ -397,7 +397,12 @@ impl PersistentIndex {
             .execute_batch(
                 "DROP TRIGGER IF EXISTS grepmesh_cache_rows_after_update;\
                  CREATE TRIGGER grepmesh_cache_rows_after_update \
-                 AFTER UPDATE OF path ON grepmesh_extraction_cache BEGIN \
+                 AFTER UPDATE ON grepmesh_extraction_cache \
+                 WHEN OLD.path IS NOT NEW.path OR EXISTS (\
+                   SELECT 1 FROM grepmesh_document_rows AS mapped \
+                   WHERE mapped.path=OLD.path AND NOT EXISTS (\
+                     SELECT 1 FROM grepmesh_documents \
+                     WHERE rowid=mapped.fts_rowid AND path=NEW.path)) BEGIN \
                    DELETE FROM grepmesh_document_rows \
                    WHERE path=OLD.path OR path=NEW.path; \
                    DELETE FROM grepmesh_metadata WHERE key='document_rows_v1'; \
@@ -406,10 +411,15 @@ impl PersistentIndex {
             .map_err(|error| error.to_string())?;
         transaction
             .execute(
-                "INSERT INTO grepmesh_metadata(key,value) VALUES('cache_update_trigger_v2','1') \
+                "INSERT INTO grepmesh_metadata(key,value) VALUES('cache_update_trigger_v3','1') \
                  ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 [],
             )
+            .map_err(|error| error.to_string())?;
+        // The v2 trigger may already have left stale mappings behind. Reuse
+        // startup reconciliation once when upgrading, before compaction or writes.
+        transaction
+            .execute("DELETE FROM grepmesh_metadata WHERE key='document_rows_v1'", [])
             .map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())
     }
@@ -5510,6 +5520,36 @@ mod tests {
             plan.iter().any(|detail| detail.ends_with("INDEX 0:=")),
             "FTS lookup must constrain rowid instead of scanning every document: {plan:?}"
         );
+    }
+
+    #[test]
+    fn v3_upgrade_repairs_an_already_stale_v2_row_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.sqlite");
+        let document = dir.path().join("document.txt");
+        fs::write(&document, "preserved searchable text").unwrap();
+        let index = PersistentIndex::open(db.clone()).unwrap();
+        index.replace_document(&document, "preserved searchable text").unwrap();
+        let connection = index.connection().unwrap();
+        connection.execute_batch(
+            "DELETE FROM grepmesh_metadata WHERE key='cache_update_trigger_v3';
+             INSERT OR REPLACE INTO grepmesh_metadata VALUES('cache_update_trigger_v2','1');
+             DROP TRIGGER grepmesh_cache_rows_after_update;
+             CREATE TRIGGER grepmesh_cache_rows_after_update
+             AFTER UPDATE OF path ON grepmesh_extraction_cache BEGIN
+               DELETE FROM grepmesh_document_rows WHERE path=OLD.path;
+             END;
+             UPDATE grepmesh_documents SET rowid=rowid+100;
+             UPDATE grepmesh_extraction_cache SET body='preserved searchable text';"
+        ).unwrap();
+        drop(connection);
+        drop(index);
+        let reopened = PersistentIndex::open(db).unwrap();
+        assert_eq!(reopened.compact_duplicate_cache_bodies_batch(10).unwrap().cleared_rows, 1);
+        reopened.replace_document(&document, "replacement searchable text").unwrap();
+        assert_eq!(reopened.document_count().unwrap(), 1);
+        assert_eq!(reopened.candidates("replacement").unwrap(), vec![document]);
+        assert!(reopened.candidates("preserved").unwrap().is_empty());
     }
 
     #[test]

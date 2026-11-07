@@ -167,10 +167,21 @@ impl BrowserTaskClient {
         self.targets.get(host).ok_or_else(|| anyhow!("no GPTAdmin executor mapped for {host}"))
     }
 
-    pub(crate) async fn call(&self, host: &str, name: &str, args: Value, id: &str, deadline: Duration,
+    pub(crate) async fn call(&self, host: &str, name: &str, mut args: Value, id: &str, deadline: Duration,
         on_admitted: Option<Box<dyn Fn(&str) -> Result<()> + Send + Sync>>) -> Result<Value> {
         let started = std::time::Instant::now();
         anyhow::ensure!(matches!(name, "search_text" | "read_text"), "unsupported browser operation");
+        // Use the public child schema at the Hub boundary. search_text is an
+        // internal peer alias; absent optional values must not be JSON null.
+        let name = if name == "search_text" { "search" } else { name };
+        if let Some(arguments) = args.as_object_mut() {
+            arguments.retain(|_, value| !value.is_null());
+            if name == "search" {
+                if let Some(limit) = arguments.remove("limit") {
+                    arguments.insert("max_matches".into(), limit);
+                }
+            }
+        }
         let route = self.route(host)?;
         let known_job = {
             let mut receipts = self.receipts.lock().map_err(|_| anyhow!("browser task receipt lock failed"))?;
@@ -999,8 +1010,14 @@ mod tests {
         use axum::{extract::State, routing::post, Json, Router};
         use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
         let calls = Arc::new(AtomicUsize::new(0));
-        let app = Router::new().route("/server/mcp-shell-node-grepmesh/mcp", post(|State(calls): State<Arc<AtomicUsize>>| async move {
+        let app = Router::new().route("/server/mcp-shell-node-grepmesh/mcp", post(|State(calls): State<Arc<AtomicUsize>>, Json(body): Json<Value>| async move {
             calls.fetch_add(1, Ordering::SeqCst);
+            // The live child advertises search, not its private search_text alias.
+            assert_eq!(body["params"]["name"], "search");
+            assert_eq!(body["params"]["arguments"]["max_matches"], 20);
+            assert!(body["params"]["arguments"].get("limit").is_none());
+            assert!(body["params"]["arguments"].get("roots").is_none());
+            assert!(body["params"]["arguments"].get("mode").is_none());
             Json(json!({"jsonrpc":"2.0","id":"grepmesh-call","result":{
                 "resultType":"complete", "structuredContent":{
                     "executed":false,"error":{"code":"fixture_denied","message":"fixture access denied"}
@@ -1014,7 +1031,7 @@ mod tests {
             client:reqwest::Client::new(), receipts:Default::default(), targets:BTreeMap::from([("node".into(), BrowserRoute {
                 shell_target:"shell:node".into(), child_ref:"GrepMesh".into(),
                 execution_host:"local".into(), executor_host:"node".into() })]) };
-        let error = hub.call("node", "search_text", json!({}), "fixture", Duration::from_secs(5), None).await.unwrap_err().to_string();
+        let error = hub.call("node", "search_text", json!({"query":"fixture", "limit":20, "roots":null, "mode":null}), "fixture", Duration::from_secs(5), None).await.unwrap_err().to_string();
         assert!(error.contains("fixture_denied"), "missing error code: {error}");
         assert!(error.contains("fixture access denied"), "missing error message: {error}");
         assert!(!error.contains("invalid task state"));
@@ -2067,11 +2084,11 @@ mod tests {
 
     #[tokio::test]
     async fn initial_registry_transport_error_has_a_safe_classification() {
-        use std::net::TcpListener as StdTcpListener;
-
-        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
+        // Reserve a non-listening TCP socket. Dropping a listener lets another
+        // parallel test reuse its port and accidentally answer this request.
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = socket.local_addr().unwrap();
         let client = GptAdminTopologyClient {
             endpoint: format!("http://{address}/mcp-relay/agents"),
             token: Some("hub-only".into()),
