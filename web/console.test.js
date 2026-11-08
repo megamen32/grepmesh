@@ -213,3 +213,20 @@ test("status polling recovers offline host health and locations without replacin
 test("older recovered node without roots requests one catalog refresh",async()=>{let catalogs=0;const f=fixture({responses:{"/api/catalog":()=>{catalogs++;return{hosts:[{id:"server-100",health:"offline",roots:catalogs>1 ? ["/etc"] : []}]};},"/api/host-status":{nodes:[{host_id:"server-100",index_state:"Ready"}],host_status:[{host_id:"server-100",ok:true}]}}});await settle();await settle();assert.equal(catalogs,2);assert.match(content(f.nodes["locations-sidebar"]),/etc/);assert.match(content(f.nodes["host-sidebar"]),/healthy/);f.pollStatus();await settle();assert.equal(catalogs,2);});
 test("bookmark opened before catalog enables allowed breadcrumbs when roots arrive",async()=>{let finishCatalog;const storage=new Map([["grepmesh.bookmarks",JSON.stringify([{host:"server-100",path:"/Users/operator/Documents/work"}])]]);const f=fixture({storage,responses:{"/api/catalog":()=>new Promise(resolve=>finishCatalog=resolve),"/api/host-status":{nodes:[]}}});await settle();f.nodes["bookmarks-sidebar"].children[0].children[0].click();await settle();assert.equal(f.nodes.breadcrumbs.children.find(node=>node.textContent==="Documents").disabled,true);const before=names(f);finishCatalog({hosts:[{id:"server-100",roots:["/Users/operator/Documents"]}]});await settle();assert.equal(f.nodes.breadcrumbs.children.find(node=>node.textContent==="Documents").disabled,false);assert.equal(f.nodes["browser-heading"].textContent,"work");assert.deepEqual(names(f),before);f.nodes.breadcrumbs.children.find(node=>node.textContent==="Documents").click();await settle();assert.equal(JSON.parse(f.requests.filter(item=>item.url==="/api/browse").at(-1).options.body).path,"/Users/operator/Documents");});
 test("status root hydration refreshes breadcrumb permissions",async()=>{let status={nodes:[],host_status:[{host_id:"server-100",ok:false}]};const storage=new Map([["grepmesh.bookmarks",JSON.stringify([{host:"server-100",path:"/etc/folder"}])]]);const f=fixture({storage,catalog:{hosts:[{id:"server-100",health:"offline",roots:[]}]},responses:{"/api/host-status":()=>status}});await settle();f.nodes["bookmarks-sidebar"].children[0].children[0].click();await settle();assert.equal(f.nodes.breadcrumbs.children.find(node=>node.textContent==="etc").disabled,true);status={nodes:[{host_id:"server-100",roots:["/etc"],index_state:"Ready"}],host_status:[{host_id:"server-100",ok:true}]};f.pollStatus();await settle();assert.equal(f.nodes.breadcrumbs.children.find(node=>node.textContent==="etc").disabled,false);assert.equal(f.nodes["browser-heading"].textContent,"folder");});
+
+test("profile browser keeps search usable without folder or settings access",async()=>{
+  const f=fixture({catalog:{hosts:[{id:"server-100",roots:["/etc"],health:"unknown"}],roots:["/etc"],browser_permissions:{browse:false,settings:false}}});
+  await settle();
+  const root=f.nodes["locations-sidebar"].children[0];
+  f.nodes["locations-sidebar"].dispatch("click",root.children[1]);
+  await settle();
+  assert.equal(f.requests.filter(request=>request.url==="/api/browse").length,0);
+  assert.equal(f.nodes["settings-link"].hidden,true);
+  assert.match(content(f.nodes.results),/поиск|Поиск|запрос/);
+  f.nodes.query.value="needle";
+  f.nodes["search-form"].dispatch("submit");
+  await settle();
+  const call=f.requests.find(request=>request.url==="/api/search");
+  assert.ok(call);
+  assert.deepEqual(JSON.parse(call.options.body).roots,["/etc"]);
+});

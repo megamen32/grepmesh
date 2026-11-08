@@ -16,7 +16,7 @@
     <div class="sidebar-footer">
       <button id="refresh-catalog" class="icon-button" title="Refresh hosts and index status" aria-label="Refresh hosts and index status">↻</button>
       <button id="show-telemetry" class="sidebar-link" type="button">◷ Search history</button>
-      <a href="/ui/settings" class="icon-button" title="Settings" aria-label="Settings">⚙</a>
+      <a id="settings-link" href="/ui/settings" class="icon-button" title="Settings" aria-label="Settings">⚙</a>
     </div>
   </aside>
   <section class="finder-browser" aria-label="Files">
@@ -55,7 +55,7 @@
     </nav>
     <section class="inspector"><div id="preview" class="preview-empty"><span class="file-icon folder large"></span><p>Select a file or folder</p><small>Details appear here</small></div></section>
     <section id="host-detail" class="host-detail" aria-label="Host index"></section>
-    <details class="backup-card"><summary>Backup catalog <span id="backup-badge" class="backup-state">Checking…</span></summary><div id="backup-body" class="backup-body"></div></details>
+    <details id="backup-section" class="backup-card"><summary>Backup catalog <span id="backup-badge" class="backup-state">Checking…</span></summary><div id="backup-body" class="backup-body"></div></details>
   </aside>
 </main>
 <dialog id="file-editor-dialog" class="file-editor-dialog" aria-labelledby="file-editor-title">

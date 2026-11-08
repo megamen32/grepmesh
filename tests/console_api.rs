@@ -108,7 +108,7 @@ async fn start_console_with_sso(root: &Path, require_sso: bool) -> ConsoleHarnes
         .env_remove("GREPMESH_SIGNED_CLOUD_HOST")
         .env_remove("GREPMESH_CLOUD_ACL_SECRET")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::inherit())
         .spawn()
         .unwrap();
     let client = Client::new();
@@ -162,7 +162,7 @@ async fn browser_search_rejects_client_supplied_acl_over_http() {
                 "args_sha256": "b".repeat(64), "read_roots": ["/tmp"]
             }
         })).send().await.unwrap();
-    assert_eq!(forged.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(forged.status(), StatusCode::FORBIDDEN);
     let ordinary = client.post(format!("{}/api/search", harness.local_base))
         .json(&json!({"query": "needle"})).send().await.unwrap();
     assert_eq!(ordinary.status(), StatusCode::OK);
@@ -736,4 +736,42 @@ async fn backup_availability_is_local_only_and_separate_from_search_results() {
         .await
         .unwrap();
     assert_eq!(remote_ui.status(), StatusCode::NOT_FOUND);
+}
+
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_delegated_read_denies_other_roots_and_symlink_escape() {
+    let fixture = tempfile::tempdir().unwrap();
+    let allowed = fixture.path().join("allowed");
+    let outside = fixture.path().join("outside");
+    fs::create_dir_all(&allowed).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(allowed.join("note.txt"), "ALLOWED_NATIVE_FIXTURE").unwrap();
+    fs::write(outside.join("note.txt"), "DENIED_NATIVE_FIXTURE").unwrap();
+    let harness = start_console(fixture.path()).await;
+    let client = Client::new();
+    let acl = json!({"version":1,"profile_id":"fixture","profile_version":1,
+        "roots_digest":"a".repeat(64),"job_id":"fixture-job","target":"shell:local",
+        "tool":"mcp_call","args_sha256":"b".repeat(64),"read_roots":[allowed]});
+    let mut cases = vec![(allowed.join("note.txt"),true),(outside.join("note.txt"),false),
+        (allowed.join("../outside/note.txt"),false)];
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&outside,allowed.join("escape")).unwrap();
+        cases.push((allowed.join("escape/note.txt"),false));
+    }
+    for (path, admitted) in cases {
+        let response: Value = client.post(format!("{}/mcp",harness.local_base))
+            .json(&json!({"jsonrpc":"2.0","id":"fixture-read","method":"tools/call",
+                "params":{"name":"read_text","arguments":{"host":"local","path":path},
+                    "_meta":{"io.gptadmin/filesystem-acl":acl}}}))
+            .send().await.unwrap().json().await.unwrap();
+        if admitted {
+            assert!(response.to_string().contains("ALLOWED_NATIVE_FIXTURE"),"{response}");
+            assert!(response.get("error").is_none(),"{response}");
+        } else {
+            assert!(!response.to_string().contains("DENIED_NATIVE_FIXTURE"),"{path:?}: {response}");
+            assert!(response.to_string().contains("filesystem ACL"),"{path:?}: {response}");
+        }
+    }
 }

@@ -139,3 +139,5 @@
 .json-primitive.boolean,.json-primitive.null { color:#edc47c; }
 .preview-toolbar button:focus-visible,.json-tree-actions button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
 @media(max-width:850px){.preview-frame{height:42vh;min-height:220px;}.file-editor-layout{grid-template-columns:minmax(145px,185px) minmax(0,1fr);}.file-editor-sidebar{padding:15px 11px;}}
+
+#settings-link[hidden], #backup-section[hidden] { display: none; }

@@ -35,7 +35,7 @@
     const rootValues = pick(source, ["roots", "available_roots"], []);
     const roots = hosts.flatMap((host) => host.roots);
     if (!roots.length) { const host = hosts.length === 1 ? hosts[0].id : ""; roots.push(...(Array.isArray(rootValues) ? rootValues : []).map((entry) => ({ host: text(typeof entry === "string" ? host : pick(entry, ["host", "host_id"], host)), path: text(typeof entry === "string" ? entry : pick(entry, ["id", "path", "root"])), name: text(typeof entry === "string" ? entry : pick(entry, ["name", "label", "path", "root", "id"])) })).filter((root) => root.path)); }
-    return { hosts, roots: roots.filter((root, index, items) => items.findIndex((candidate) => candidate.host === root.host && candidate.path === root.path) === index) };
+    return { hosts, permissions: source.browser_permissions || {}, roots: roots.filter((root, index, items) => items.findIndex((candidate) => candidate.host === root.host && candidate.path === root.path) === index) };
   }
   function visibleRoots() {
     const host = state.catalog?.hosts.find((item) => item.id === state.selectedHost);
@@ -66,12 +66,18 @@
   }
   function rootEntries() { return visibleRoots().map(root => ({ host: root.host, name: root.name && root.name !== root.path ? root.name : basename(root.path), path: root.path, kind: "directory", size: null, modified: null, created: null, key: `root:${root.host}:${root.path}` })); }
   function renderHostRootEntries() {
+    if (state.catalog?.permissions?.browse === false) { renderSearchReady(); return; }
     const entries = rootEntries(); state.results = entries;
     if (!entries.length) { clear(dom.results).append(element("div","empty-results",state.selectedHost ? "No configured folders are available for this Device." : "No configured folders are available.")); dom.count.textContent = "0 folders"; setSearchState("complete","No folders configured."); return; }
     renderBrowseEntries(entries); dom.count.textContent = `${entries.length} ${entries.length === 1 ? "folder" : "folders"}`; setSearchState("complete","Locations ready.");
   }
   function selectHost(hostId) { state.viewVersion++; state.selectedHost = hostId; state.selectedRoot = null; state.browseTarget = null; state.hostRootView = true; state.selected = null; state.results = []; state.mode = "browse"; renderHosts(); renderLocations(); renderHostRootEntries(); resetPreview(); renderPath(); renderHostDetail(); renderHostFailures([]); showFiles(); }
-  function selectRoot(root) { state.selectedRoot = root; state.browseTarget = root; state.hostRootView = false; state.selected = null; state.mode = "browse"; renderLocations(); resetPreview(); browseDirectory(root); }
+  function selectRoot(root) {
+    if (state.catalog?.permissions?.browse === false) {
+      state.viewVersion++; state.selectedHost = root.host; state.selectedRoot = root; state.browseTarget = root;
+      state.hostRootView = false; state.selected = null; state.mode = "search";
+      renderHosts(); renderLocations(); renderPath(); resetPreview(); renderSearchReady(); return;
+    } state.selectedRoot = root; state.browseTarget = root; state.hostRootView = false; state.selected = null; state.mode = "browse"; renderLocations(); resetPreview(); browseDirectory(root); }
   function selectLocation(event) { const button = event.target?.closest?.(".location-item"); if (!button || !dom.locations.contains(button)) return; const root = visibleRoots().find((candidate) => candidate.host === button.dataset.host && candidate.path === button.dataset.root); if (root) selectRoot(root); }
   function renderLocations() {
     const locations = clear(dom.locations); const roots = visibleRoots();
@@ -81,8 +87,14 @@
       button.title = root.path; button.append(element("span", "file-icon folder"), element("span", "location-name", basename(root.path)), element("small", "", root.host || "configured drive")); locations.append(button);
     });
   }
-  function renderBrowsePlaceholder() { clear(dom.results); dom.count.textContent = "Choose a Location"; const empty = element("div", "empty-results"); empty.append(element("span", "empty-icon", "▱"), element("p", "", "Select a Location to browse its immediate entries."), element("small", "", "Devices and Locations stay available in the sidebar while you browse.")); dom.results.append(empty); }
-  function renderCatalog(payload) { state.catalog = catalogEntries(payload); reconcileHostStatus(); if (state.selectedHost && !state.catalog.hosts.some((host) => host.id === state.selectedHost)) state.selectedHost = ""; if (state.selectedRoot && !state.catalog.roots.some((root) => root.host === state.selectedRoot.host && root.path === state.selectedRoot.path)) state.selectedRoot = null; renderHosts(); renderLocations(); renderPath(); if (!state.browseTarget && state.mode === "browse") { if (state.hostRootView) renderHostRootEntries(); else renderBrowsePlaceholder(); } setConnection("ready", state.catalog.hosts.length ? `${state.catalog.hosts.length} hosts configured` : "Catalog is ready"); }
+  function renderSearchReady() {
+    clear(dom.results).append(element("div", "empty-results", "Введите запрос для поиска в доступных файлах. Выбор папки ограничивает область поиска."));
+    dom.count.textContent = "Поиск"; setSearchState("idle", "Поиск и просмотр файлов");
+  }
+  function renderBrowsePlaceholder() { if (state.catalog?.permissions?.browse === false) { renderSearchReady(); return; } clear(dom.results); dom.count.textContent = "Choose a Location"; const empty = element("div", "empty-results"); empty.append(element("span", "empty-icon", "▱"), element("p", "", "Select a Location to browse its immediate entries."), element("small", "", "Devices and Locations stay available in the sidebar while you browse.")); dom.results.append(empty); }
+  function renderCatalog(payload) { state.catalog = catalogEntries(payload);
+    $("settings-link").hidden = state.catalog.permissions.settings === false;
+    $("backup-section").hidden = state.catalog.permissions.settings === false; reconcileHostStatus(); if (state.selectedHost && !state.catalog.hosts.some((host) => host.id === state.selectedHost)) state.selectedHost = ""; if (state.selectedRoot && !state.catalog.roots.some((root) => root.host === state.selectedRoot.host && root.path === state.selectedRoot.path)) state.selectedRoot = null; renderHosts(); renderLocations(); renderPath(); if (!state.browseTarget && state.mode === "browse") { if (state.hostRootView) renderHostRootEntries(); else renderBrowsePlaceholder(); } setConnection("ready", state.catalog.hosts.length ? `${state.catalog.hosts.length} hosts configured` : "Catalog is ready"); }
   async function loadCatalog() { setConnection("", "Loading catalog…"); try { renderCatalog(await request(api.catalog)); } catch (error) { clear(dom.hosts).append(element("p", "sidebar-empty", "Catalog unavailable")); clear(dom.locations).append(element("p", "sidebar-empty", "Catalog unavailable")); clear(dom.results).append(element("div", "empty-results", `Catalog unavailable: ${errorMessage(error)}`)); setConnection("error", "Catalog unavailable"); setSearchState("error", `Catalog unavailable: ${errorMessage(error)}`); } }
   function normalizeEntries(payload, host) { const source = dataOf(payload); return (Array.isArray(source.entries) ? source.entries : []).map((entry, index) => ({ host: text(pick(entry, ["host_id", "host"], host)), name: text(pick(entry, ["name"], "Unnamed entry")), path: text(pick(entry, ["path"], "")), kind: text(pick(entry, ["kind"], "other")), previewId: text(pick(entry, ["preview_id"], "")), previewUnavailable: text(pick(entry, ["preview_unavailable"], "")), size: pick(entry, ["size"]), modified: pick(entry, ["modified_ms"]), created: pick(entry, ["created_ms"]), key: `${host}:${pick(entry, ["path"], index)}` })).filter((entry) => entry.path); }
   function browseEntryDetails(entry) {
@@ -134,6 +146,7 @@
   }
   function renderSearchProgress() { const progress=element("div","search-progress"); progress.setAttribute("role","status"); progress.append(element("span","search-progress-spinner"),element("span","","Идёт поиск…")); clear(dom.results).append(progress); }
   async function browseDirectory(target, remember = true) {
+    if (state.catalog?.permissions?.browse === false) { if (target?.host && target?.path) selectRoot(target); return; }
     if (!target?.host || !target?.path) return;
     const version = ++state.viewVersion; state.mode = "browse"; state.browseTarget = target; state.selectedHost = target.host; state.selected = null; showFiles();
     state.selectedRoot = (state.catalog?.roots || []).filter(root=>root.host === target.host && pathContains(root.path,target.path)).sort((a,b)=>b.path.length-a.path.length)[0] || target;

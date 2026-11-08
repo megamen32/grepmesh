@@ -930,7 +930,8 @@ impl MeshService {
         let response = if target == self.local.host_id {
             anyhow::ensure!(source_host.as_deref().is_none_or(|source| source == self.local.host_id),
                 "local read source host mismatch");
-            let chunks = self.local.read_text(&path, start_line, end_line)?;
+            let read_roots = filesystem_acl.as_ref().map(FilesystemAcl::validate_read).transpose()?;
+            let chunks = self.local.read_text_with_acl_roots(&path, start_line, end_line, read_roots)?;
             ReadResponse {
                 source_host: source_host.clone(),
                 request_id: normalized.request_id.clone(),

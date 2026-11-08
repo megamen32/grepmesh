@@ -1204,12 +1204,30 @@ impl LocalBackend {
         start_line: Option<usize>,
         end_line: Option<usize>,
     ) -> Result<Vec<ReadChunk>> {
+        self.read_text_with_acl_roots(path, start_line, end_line, None)
+    }
+
+    pub(crate) fn read_text_with_acl_roots(
+        &self,
+        path: &Path,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+        read_roots: Option<&[String]>,
+    ) -> Result<Vec<ReadChunk>> {
         // Search defaults may omit the primary root when named roots exist.
         // Reading a selected result is authorized against every configured root.
         let roots = std::iter::once(self.root.clone())
             .chain(self.root_paths.values().flatten().cloned())
             .collect::<Vec<_>>();
         let abs = normalize_absolute_path_any(&roots, path)?;
+        // Intersect the resolved document with the delegated roots before
+        // opening it. A lexical ACL prefix alone admits symlink escapes into
+        // another configured root of this native backend.
+        if let Some(read_roots) = read_roots {
+            let allowed = read_roots.iter().map(PathBuf::from).collect::<Vec<_>>();
+            normalize_absolute_path_any(&allowed, &abs)
+                .map_err(|_| anyhow!("filesystem ACL denies the resolved document path"))?;
+        }
         let size = fs::metadata(&abs)
             .with_context(|| format!("metadata {}", abs.display()))?
             .len();

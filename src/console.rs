@@ -9,6 +9,7 @@ use crate::{
     backup_catalog::{read_fixture_availability, BackupCatalogConfig},
     config::{AppConfig, SttConfig},
     jobs::SearchJobs,
+    gptadmin::{BrowserAuthorizationError, BrowserIdentity, BrowserTaskClient},
     mcp::{
         ListDirectoryArgs, ListLocationsArgs, MeshService, ReadTextArgs, SearchArgs, StatusArgs,
     },
@@ -19,7 +20,7 @@ use axum::{
     middleware::{self, Next},
     response::{sse::{Event, Sse}, Html, IntoResponse, Redirect, Response},
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use serde_json::{json, Value};
 use std::{
@@ -33,6 +34,8 @@ use std::{
 };
 
 const MAX_PREVIEW_HANDLES: usize = 512;
+const MAX_BROWSER_JOB_OWNERS: usize = 256;
+const BROWSER_JOB_TTL: Duration = Duration::from_secs(3600);
 const PREVIEW_HANDLE_TTL: Duration = Duration::from_secs(300);
 const MAX_PREVIEW_LINES: usize = 200;
 const MAX_PREVIEW_BYTES: usize = 64 * 1024;
@@ -46,13 +49,18 @@ struct ConsoleState {
     config: Arc<Mutex<AppConfig>>,
     previews: Arc<Mutex<BTreeMap<String, PreviewTarget>>>,
     browser_sso_required: bool,
-    browser_auth_client: reqwest::Client,
-    browser_auth_url: String,
-    browser_hub: Option<crate::gptadmin::BrowserTaskClient>,
+    browser_hub: Option<BrowserTaskClient>,
+    job_owners: Arc<Mutex<BTreeMap<String, BrowserJobOwner>>>,
+}
+
+struct BrowserJobOwner {
+    created: Instant,
+    identity: BrowserIdentity,
 }
 
 #[derive(Clone)]
 struct PreviewTarget {
+    owner: Option<BrowserIdentity>,
     created: Instant,
     host: String,
     source_host: Option<String>,
@@ -70,13 +78,6 @@ pub fn router(
     backup_catalog: Option<BackupCatalogConfig>,
     config: AppConfig,
 ) -> Router {
-    let browser_auth_url = std::env::var("GREPMESH_BROWSER_SSO_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:18991/check".into());
-    let parsed = reqwest::Url::parse(&browser_auth_url).expect("invalid browser SSO URL");
-    assert!(parsed.scheme() == "http" && parsed.host_str() == Some("127.0.0.1")
-        && parsed.username().is_empty() && parsed.password().is_none()
-        && parsed.path() == "/check" && parsed.query().is_none() && parsed.fragment().is_none(),
-        "browser SSO URL must be the loopback check endpoint");
     let state = ConsoleState {
         service,
         jobs,
@@ -84,16 +85,15 @@ pub fn router(
         config: Arc::new(Mutex::new(config)),
         previews: Arc::new(Mutex::new(BTreeMap::new())),
         browser_sso_required: std::env::var("GREPMESH_BROWSER_REQUIRE_SSO")
-            .is_ok_and(|value| value == "1"),
-        browser_auth_client: reqwest::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(3))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("browser auth HTTP client"),
-        browser_auth_url,
-        browser_hub: crate::gptadmin::BrowserTaskClient::from_env()
-            .expect("invalid browser GPTAdmin task configuration"),
+            .is_ok_and(|value| value != "0"),
+        browser_hub: match BrowserTaskClient::from_env() {
+            Ok(client) => client,
+            Err(error) => {
+                tracing::warn!(reason = %error, "browser authority is unavailable");
+                None
+            }
+        },
+        job_owners: Arc::new(Mutex::new(BTreeMap::new())),
     };
     Router::new()
         .route("/", get(|| async { Redirect::temporary("/ui/") }))
@@ -118,35 +118,135 @@ pub fn router(
         .with_state(state)
 }
 
-// Verify the browser cookie with the local GPTAdmin authentication service on
-// every request. In particular, an identity header supplied by a caller is
-// never evidence of a logged-in administrator.
+// The Hub resolves the browser session to a current user AccessProfile.
+// A frontend identity header or a shared backend bearer is never authority.
 async fn require_browser_sso(
     State(state): State<ConsoleState>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     if !state.browser_sso_required {
         return next.run(request).await;
     }
-    let Some(cookie) = request.headers().get(header::COOKIE) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let Some(cookie) = request.headers().get(header::COOKIE).and_then(|v| v.to_str().ok()) else {
+        return browser_error(StatusCode::UNAUTHORIZED, "browser session is required");
     };
-    let Ok(cookie) = cookie.to_str() else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let Some(authority) = state.browser_hub.as_ref() else {
+        return browser_error(StatusCode::SERVICE_UNAVAILABLE, "browser authorization broker is unavailable");
     };
-    let response = state.browser_auth_client
-        .get(&state.browser_auth_url)
-        .header(header::COOKIE, cookie)
-        .send().await;
-    match response {
-        Ok(response) if response.status().is_success()
-            && response.headers().get("x-gptadmin-user")
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(|value| !value.trim().is_empty()) => next.run(request).await,
-        Ok(_) => StatusCode::UNAUTHORIZED.into_response(),
-        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    if request.method() != http::Method::GET && request.method() != http::Method::HEAD
+        && request.headers().get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(authority.origin())
+    {
+        return browser_error(StatusCode::FORBIDDEN, "browser origin is not authorized");
     }
+    let hub = match authority.authenticate(cookie).await {
+        Ok(hub) => hub,
+        Err(error) => return authorization_error(&error),
+    };
+    // Legacy local metadata and configuration are not profile-scoped. The
+    // protected UI uses only the catalogue supplied by the verified authority.
+    match request.uri().path() {
+        "/api/catalog" => return Json(browser_catalog(&hub)).into_response(),
+        "/api/host-status" => return Json(json!({
+            "nodes": hub.authorized_hosts().iter().map(|host| json!({
+                "host_id":host, "index_state":"Unknown"
+            })).collect::<Vec<_>>(),
+            "host_status":[], "partial":true
+        })).into_response(),
+        "/api/telemetry" => {
+            let mut data = match state.jobs.telemetry() {
+                Ok(data) => data,
+                Err(error) => return bad_request(error.to_string()),
+            };
+            if let Some(records) = data.get_mut("records").and_then(Value::as_array_mut) {
+                records.retain(|record| record.get("job_id").and_then(Value::as_str)
+                    .is_some_and(|id| check_job_owner(&state, id, Some(&hub)).is_ok()));
+            }
+            return Json(data).into_response();
+        }
+        "/api/settings" | "/ui/settings" | "/api/browse" | "/api/backup/availability" => {
+            return browser_error(StatusCode::FORBIDDEN, "this browser session supports search and file previews");
+        }
+        _ => {}
+    }
+    request.extensions_mut().insert(hub.clone());
+    let response = next.run(request).await;
+    // Recheck after work as well as before admission. SSE performs the same
+    // check for every event because its body outlives this middleware.
+    if let Err(error) = hub.revalidate().await {
+        return authorization_error(&error);
+    }
+    response
+}
+
+fn browser_catalog(hub: &BrowserTaskClient) -> Value {
+    let roots = hub.identity().map(|identity| identity.read_roots.clone()).unwrap_or_default();
+    json!({
+        "hosts":hub.authorized_hosts().iter().map(|host| json!({
+            "id":host, "roots":roots, "health":"unknown", "last_error":null
+        })).collect::<Vec<_>>(),
+        "roots":roots, "host_status":[], "partial":false,
+        "browser_permissions":{"browse":false,"settings":false},
+        "mode":"search"
+    })
+}
+
+fn browser_error(status: StatusCode, message: &str) -> Response {
+    (status, Json(json!({"error":message}))).into_response()
+}
+
+fn authorization_error(error: &anyhow::Error) -> Response {
+    let status = error.downcast_ref::<BrowserAuthorizationError>()
+        .map_or(StatusCode::SERVICE_UNAVAILABLE, |error| error.status);
+    browser_error(status, "browser authorization failed or changed")
+}
+
+fn request_browser<'a>(
+    state: &ConsoleState,
+    browser: &'a Option<Extension<BrowserTaskClient>>,
+) -> Result<Option<&'a BrowserTaskClient>, Response> {
+    if !state.browser_sso_required { return Ok(None); }
+    browser.as_ref().map(|Extension(hub)| Some(hub))
+        .ok_or_else(|| browser_error(StatusCode::SERVICE_UNAVAILABLE, "browser authorization context is missing"))
+}
+
+fn reject_browser_metadata(request: &Value) -> Result<(), Response> {
+    if let Some(object) = request.as_object() {
+        if ["filesystem_acl","_meta","origin_host","hop_count","request_id"].iter()
+            .any(|name| object.contains_key(*name))
+        {
+            return Err(browser_error(StatusCode::FORBIDDEN, "browser cannot supply ACL or peer metadata"));
+        }
+    }
+    Ok(())
+}
+
+fn check_job_owner(state: &ConsoleState, job: &str, hub: Option<&BrowserTaskClient>) -> Result<(), Response> {
+    if !state.browser_sso_required { return Ok(()); }
+    let identity = hub.and_then(|client| client.identity().ok());
+    let allowed = state.job_owners.lock().ok().is_some_and(|owners| {
+        owners.get(job).is_some_and(|owner| {
+            owner.created.elapsed() < BROWSER_JOB_TTL
+                && identity.is_some_and(|identity| owner.identity.same_authority(identity))
+        })
+    });
+    if !allowed {
+        return Err(browser_error(StatusCode::FORBIDDEN, "search job does not belong to current browser authority"));
+    }
+    Ok(())
+}
+
+fn remember_job_owner(state: &ConsoleState, job: &str, identity: &BrowserIdentity) -> Result<(), Response> {
+    let mut owners = state.job_owners.lock().map_err(|_| {
+        browser_error(StatusCode::SERVICE_UNAVAILABLE, "browser authorization state is unavailable")
+    })?;
+    owners.retain(|_, owner| owner.created.elapsed() < BROWSER_JOB_TTL);
+    while owners.len() >= MAX_BROWSER_JOB_OWNERS {
+        let Some(oldest) = owners.iter().min_by_key(|(_, owner)| owner.created).map(|(id,_)| id.clone()) else { break; };
+        owners.remove(&oldest);
+    }
+    owners.insert(job.to_owned(), BrowserJobOwner { created:Instant::now(), identity:identity.clone() });
+    Ok(())
 }
 
 async fn index() -> Html<&'static str> {
@@ -383,27 +483,63 @@ fn validate_browser_search(args: &SearchArgs) -> Result<(), &'static str> {
     Ok(())
 }
 
-async fn search(State(state): State<ConsoleState>, Json(mut args): Json<SearchArgs>) -> Response {
-    if let Err(error) = validate_browser_search(&args) {
-        return bad_request(error);
-    }
-    if args.query.trim().is_empty() {
-        return bad_request("query must not be empty");
+async fn search(
+    State(state): State<ConsoleState>,
+    browser: Option<Extension<BrowserTaskClient>>,
+    Json(mut request): Json<Value>,
+) -> Response {
+    if let Err(error) = reject_browser_metadata(&request) { return error; }
+    if let Some(object) = request.as_object_mut() { object.insert("verbose".into(), Value::Bool(true)); }
+    let mut args: SearchArgs = match serde_json::from_value(request.clone()) {
+        Ok(args) => args,
+        Err(error) => return bad_request(format!("invalid search arguments: {error}")),
+    };
+    if let Err(error) = validate_browser_search(&args) { return bad_request(error); }
+    if args.query.trim().is_empty() { return bad_request("query must not be empty"); }
+    let hub = match request_browser(&state, &browser) { Ok(hub) => hub, Err(error) => return error };
+    if let Some(hub) = hub {
+        let permitted = hub.authorized_hosts();
+        let mut hosts = match state.service.resolve_search_hosts(&args) {
+            Ok(hosts) => hosts,
+            Err(error) => return bad_request(error.to_string()),
+        };
+        let explicit = request.get("hosts").is_some_and(|hosts| match hosts {
+            Value::String(host) => host != "*",
+            Value::Array(hosts) => !hosts.is_empty() && !hosts.iter().any(|host| host == "*"),
+            _ => true,
+        });
+        if explicit && hosts.iter().any(|host| !permitted.contains(host)) {
+            return browser_error(StatusCode::FORBIDDEN, "search host is outside current browser authority");
+        }
+        hosts.retain(|host| permitted.contains(host));
+        if hosts.is_empty() {
+            return browser_error(StatusCode::FORBIDDEN, "no search host is authorized for this browser session");
+        }
+        args.hosts = match serde_json::from_value(json!(hosts)) {
+            Ok(hosts) => Some(hosts),
+            Err(_) => return bad_request("invalid authorized host set"),
+        };
     }
     args.verbose = true;
-    let job = match state.browser_hub.clone() {
-        Some(hub) => state.jobs.start_browser((*state.service).clone(), args, hub),
+    let job = match hub {
+        Some(hub) => state.jobs.start_browser((*state.service).clone(), args, hub.clone()),
         None => state.jobs.start((*state.service).clone(), args),
     };
     match job {
-        Ok(job_id) => match state.jobs.snapshot(&job_id) {
-            Ok(mut data) => {
-                issue_preview_handles(&state, &mut data);
-                Json(data).into_response()
+        Ok(job_id) => {
+            let owner = hub.and_then(|hub| hub.identity().ok());
+            if let Some(owner) = owner {
+                if let Err(error) = remember_job_owner(&state, &job_id, owner) { return error; }
             }
-            Err(err) => bad_request(err.to_string()),
-        },
-        Err(err) => bad_request(err.to_string()),
+            match state.jobs.snapshot(&job_id) {
+                Ok(mut data) => {
+                    issue_preview_handles(&state, &mut data, owner);
+                    Json(data).into_response()
+                }
+                Err(error) => bad_request(error.to_string()),
+            }
+        }
+        Err(error) => bad_request(error.to_string()),
     }
 }
 
@@ -430,45 +566,87 @@ async fn telemetry(State(state): State<ConsoleState>) -> Response {
     }
 }
 
-async fn search_status(State(state): State<ConsoleState>, Json(request): Json<Value>) -> Response {
+async fn search_status(
+    State(state): State<ConsoleState>,
+    browser: Option<Extension<BrowserTaskClient>>,
+    Json(request): Json<Value>,
+) -> Response {
+    if let Err(error) = reject_browser_metadata(&request) { return error; }
     let Some(job_id) = request.get("job_id").and_then(Value::as_str) else {
         return bad_request("job_id is required");
     };
+    let hub = match request_browser(&state, &browser) { Ok(hub) => hub, Err(error) => return error };
+    if let Err(error) = check_job_owner(&state, job_id, hub) { return error; }
     match state.jobs.status(
         job_id,
         request.get("cursor").and_then(Value::as_str),
-        request
-            .get("page_size")
-            .and_then(Value::as_u64)
-            .map(|value| value as usize),
+        request.get("page_size").and_then(Value::as_u64).map(|value| value as usize),
     ) {
         Ok(mut data) => {
-            issue_preview_handles(&state, &mut data);
+            issue_preview_handles(&state, &mut data, hub.and_then(|hub| hub.identity().ok()));
             Json(data).into_response()
         }
-        Err(err) => bad_request(err.to_string()),
+        Err(error) => bad_request(error.to_string()),
     }
 }
 
-async fn search_events(State(state): State<ConsoleState>, Json(request): Json<Value>) -> Response {
+async fn search_events(
+    State(state): State<ConsoleState>,
+    browser: Option<Extension<BrowserTaskClient>>,
+    Json(request): Json<Value>,
+) -> Response {
+    if let Err(error) = reject_browser_metadata(&request) { return error; }
     let Some(job_id) = request.get("job_id").and_then(Value::as_str).map(str::to_owned) else {
         return bad_request("job_id is required");
     };
-    // Subscribe before the first snapshot, so completion between these two
-    // operations cannot be missed. A reconnect observes the existing job.
+    let hub = match request_browser(&state, &browser) {
+        Ok(hub) => hub.cloned(), Err(error) => return error,
+    };
+    if let Err(error) = check_job_owner(&state, &job_id, hub.as_ref()) { return error; }
+    // Subscribe before the snapshot so a completion is not lost. Reconnect
+    // observes the existing owned job and never admits another search.
     let receiver = state.jobs.subscribe();
-    let stream = futures::stream::unfold((state, job_id, receiver, true, false), |(state, job_id, mut receiver, first, done)| async move {
-        if done { return None; }
-        if !first && receiver.changed().await.is_err() { return None; }
-        let mut data = match state.jobs.snapshot(&job_id) {
-            Ok(value) => value,
-            Err(error) => json!({"state":"failed", "partial":true, "error":error.to_string()}),
-        };
-        let done = data.get("state").and_then(Value::as_str) != Some("running");
-        issue_preview_handles(&state, &mut data);
-        let event = Event::default().json_data(data).unwrap_or_else(|_| Event::default().data("{\"state\":\"failed\"}"));
-        Some((Ok::<_, std::convert::Infallible>(event), (state, job_id, receiver, false, done)))
-    });
+    let stream = futures::stream::unfold(
+        (state, job_id, receiver, hub, true, false),
+        |(state, job_id, mut receiver, hub, first, done)| async move {
+            if done { return None; }
+            let mut authorized = true;
+            if !first {
+                loop {
+                    tokio::select! {
+                        changed = receiver.changed() => {
+                            if changed.is_err() { return None; }
+                            break;
+                        }
+                        _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                            if let Some(hub) = hub.as_ref() {
+                                if hub.revalidate().await.is_err() { authorized = false; break; }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(hub) = hub.as_ref() {
+                authorized = authorized && hub.revalidate().await.is_ok();
+            }
+            authorized = authorized && check_job_owner(&state, &job_id, hub.as_ref()).is_ok();
+            let mut data = if authorized {
+                match state.jobs.snapshot(&job_id) {
+                    Ok(value) => value,
+                    Err(error) => json!({"state":"failed","partial":true,"error":error.to_string()}),
+                }
+            } else {
+                json!({"state":"failed","partial":true,"error":"browser authorization failed or changed"})
+            };
+            let done = data.get("state").and_then(Value::as_str) != Some("running");
+            if authorized {
+                issue_preview_handles(&state, &mut data, hub.as_ref().and_then(|hub| hub.identity().ok()));
+            }
+            let event = Event::default().json_data(data)
+                .unwrap_or_else(|_| Event::default().data("{\"state\":\"failed\"}"));
+            Some((Ok::<_, std::convert::Infallible>(event), (state, job_id, receiver, hub, false, done)))
+        },
+    );
     Sse::new(stream).into_response()
 }
 
@@ -487,13 +665,24 @@ fn safe_host_error(error: Option<&str>) -> Option<String> {
     })
 }
 
-async fn preview(State(state): State<ConsoleState>, Json(request): Json<Value>) -> Response {
+async fn preview(
+    State(state): State<ConsoleState>,
+    browser: Option<Extension<BrowserTaskClient>>,
+    Json(request): Json<Value>,
+) -> Response {
+    if let Err(error) = reject_browser_metadata(&request) { return error; }
+    let hub = match request_browser(&state, &browser) { Ok(hub) => hub, Err(error) => return error };
     let Some(preview_id) = request.get("preview_id").and_then(Value::as_str) else {
         return bad_request("preview_id is required");
     };
     let Some(target) = take_preview_target(&state, preview_id) else {
         return bad_request("unknown or expired preview_id");
     };
+    if state.browser_sso_required && !target.owner.as_ref().is_some_and(|owner| {
+        hub.and_then(|hub| hub.identity().ok()).is_some_and(|identity| owner.same_authority(identity))
+    }) {
+        return browser_error(StatusCode::FORBIDDEN, "preview does not belong to current browser authority");
+    }
     let view = request
         .get("view")
         .and_then(Value::as_str)
@@ -505,7 +694,9 @@ async fn preview(State(state): State<ConsoleState>, Json(request): Json<Value>) 
     if view == "document" {
         preview_target.line_number = 1;
     }
-    if view == "match" && !target.match_lines.is_empty() {
+    // A protected preview must authorize the exact read_text operation even
+    // when an indexed match is already cached. Search permission is separate.
+    if hub.is_none() && view == "match" && !target.match_lines.is_empty() {
         preview_target.line_number = target.match_lines[0].line_number;
         let data = json!({"chunks": [{"lines": target.match_lines}]});
         return Json(bounded_preview(data, &preview_target)).into_response();
@@ -523,7 +714,7 @@ async fn preview(State(state): State<ConsoleState>, Json(request): Json<Value>) 
             .line_number
             .saturating_add(MAX_PREVIEW_LINES.saturating_sub(1))
     };
-    let read_result = if let Some(hub) = state.browser_hub.as_ref() {
+    let read_result = if let Some(hub) = hub {
         let id = format!("{preview_id}:{view}");
         let receipt_id = format!("{id}:read");
         let expected_task_id = match request.get("continuation_task_id") {
@@ -587,6 +778,7 @@ async fn preview(State(state): State<ConsoleState>, Json(request): Json<Value>) 
     };
     match read_result {
         Ok(data) => Json(bounded_preview(data, &preview_target)).into_response(),
+        Err(err) if err.downcast_ref::<BrowserAuthorizationError>().is_some() => authorization_error(&err),
         Err(err)
             if matches!(view, "window" | "document")
                 && !target.match_lines.is_empty()
@@ -629,11 +821,11 @@ async fn backup_availability(State(state): State<ConsoleState>) -> Json<Value> {
     )
 }
 
-fn issue_preview_handles(state: &ConsoleState, data: &mut Value) {
+fn issue_preview_handles(state: &ConsoleState, data: &mut Value, owner: Option<&BrowserIdentity>) {
     let Some(results) = data.get_mut("results").and_then(Value::as_array_mut) else {
         return;
     };
-    issue_entry_preview_handles(state, results, None, false);
+    issue_entry_preview_handles(state, results, None, false, owner);
     data["matches"] = Value::Array(results.clone());
 }
 
@@ -641,7 +833,7 @@ fn issue_browse_preview_handles(state: &ConsoleState, data: &mut Value, host: &s
     let Some(entries) = data.get_mut("entries").and_then(Value::as_array_mut) else {
         return;
     };
-    issue_entry_preview_handles(state, entries, Some(host), true);
+    issue_entry_preview_handles(state, entries, Some(host), true, None);
 }
 
 fn issue_entry_preview_handles(
@@ -649,12 +841,13 @@ fn issue_entry_preview_handles(
     entries: &mut [Value],
     fallback_host: Option<&str>,
     files_only: bool,
+    owner: Option<&BrowserIdentity>,
 ) {
     let mut previews = match state.previews.lock() {
         Ok(previews) => previews,
         Err(_) => return,
     };
-    issue_entry_preview_handles_in_map(&mut previews, entries, fallback_host, files_only);
+    issue_entry_preview_handles_in_map(&mut previews, entries, fallback_host, files_only, owner);
 }
 
 fn issue_entry_preview_handles_in_map(
@@ -662,6 +855,7 @@ fn issue_entry_preview_handles_in_map(
     entries: &mut [Value],
     fallback_host: Option<&str>,
     files_only: bool,
+    owner: Option<&BrowserIdentity>,
 ) {
     prune_preview_handles(previews);
     let eligible_count = entries
@@ -770,6 +964,7 @@ fn issue_entry_preview_handles_in_map(
         previews.insert(
             preview_id.clone(),
             PreviewTarget {
+                owner: owner.cloned(),
                 created: Instant::now(),
                 host: host.to_string(),
                 source_host: entry.get("source_host").and_then(Value::as_str).map(str::to_owned),
@@ -912,7 +1107,7 @@ mod tests {
             json!({"host_id":"server-88", "path":"/docs/shared.txt", "line_number":1}),
         ];
         let mut previews = BTreeMap::new();
-        issue_entry_preview_handles_in_map(&mut previews, &mut entries, None, false);
+        issue_entry_preview_handles_in_map(&mut previews, &mut entries, None, false, None);
         let first = entries[0]["preview_id"].as_str().unwrap();
         let second = entries[1]["preview_id"].as_str().unwrap();
         assert_ne!(first, second);
@@ -928,7 +1123,7 @@ mod tests {
             json!({"host_id":"cloud", "source_host":"server-88", "path":"/docs/shared.txt"}),
         ];
         let mut previews = BTreeMap::new();
-        issue_entry_preview_handles_in_map(&mut previews, &mut entries, None, false);
+        issue_entry_preview_handles_in_map(&mut previews, &mut entries, None, false, None);
         let first = entries[0]["preview_id"].as_str().unwrap();
         let second = entries[1]["preview_id"].as_str().unwrap();
         assert_eq!(previews[first].source_host.as_deref(), Some("server-100"));
@@ -947,7 +1142,7 @@ mod tests {
             .collect();
         let mut previews = BTreeMap::new();
 
-        issue_entry_preview_handles_in_map(&mut previews, &mut entries, Some("server-100"), true);
+        issue_entry_preview_handles_in_map(&mut previews, &mut entries, Some("server-100"), true, None);
 
         let handles: Vec<&str> = entries
             .iter()
@@ -969,7 +1164,7 @@ mod tests {
     fn bounded_preview_keeps_prefix_of_a_single_oversized_utf8_line() {
         let mut entries = vec![json!({"kind":"file", "path":"/docs/large.jsonl", "line_number":1})];
         let mut previews = BTreeMap::new();
-        issue_entry_preview_handles_in_map(&mut previews, &mut entries, Some("server-100"), false);
+        issue_entry_preview_handles_in_map(&mut previews, &mut entries, Some("server-100"), false, None);
         let target = previews.get(entries[0]["preview_id"].as_str().unwrap()).unwrap();
         let result = bounded_preview(json!({"chunks":[{"lines":[{"line_number":1,"text":"я".repeat(MAX_PREVIEW_BYTES)}]}]}), target);
         let text = result["text"].as_str().unwrap();
@@ -991,7 +1186,7 @@ mod tests {
         })];
         let mut previews = BTreeMap::new();
 
-        issue_entry_preview_handles_in_map(&mut previews, &mut entries, Some("server-100"), false);
+        issue_entry_preview_handles_in_map(&mut previews, &mut entries, Some("server-100"), false, None);
 
         let preview = previews
             .get(entries[0]["preview_id"].as_str().unwrap())

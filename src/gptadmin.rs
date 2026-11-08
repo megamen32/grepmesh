@@ -2,6 +2,7 @@ use crate::topology_cache::{ProviderSnapshot, TopologyNode, TopologySnapshot};
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -19,15 +20,55 @@ pub struct GptAdminTopologyClient {
     client: reqwest::Client,
 }
 
-/// Browser-only task client. The credential remains in the backend; the Hub
-/// creates and revalidates a separate filesystem policy for every operation.
+/// Browser client for the existing Hub authority and GPT-Node task dispatcher.
+/// Each authenticated clone carries only its caller's cookie, never a service token.
 #[derive(Clone)]
 pub(crate) struct BrowserTaskClient {
-    token: String,
+    cookie: String,
+    origin: String,
+    identity: Option<BrowserIdentity>,
     targets: BTreeMap<String, BrowserRoute>,
     client: reqwest::Client,
     endpoint: String,
     receipts: std::sync::Arc<std::sync::Mutex<BTreeMap<String, BrowserReceipt>>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct BrowserIdentity {
+    pub(crate) principal: String,
+    pub(crate) profile_id: String,
+    pub(crate) profile_version: i64,
+    pub(crate) roots_digest: String,
+    pub(crate) authz_fingerprint: String,
+    #[serde(default)]
+    pub(crate) read_roots: Vec<String>,
+    #[serde(default)]
+    pub(crate) allowed_targets: Vec<String>,
+}
+
+impl BrowserIdentity {
+    pub(crate) fn same_authority(&self, other: &Self) -> bool {
+        self.principal == other.principal && self.authz_fingerprint == other.authz_fingerprint
+    }
+
+    fn valid(&self) -> bool {
+        let digest = |value: &str| value.len() == 64 && value.bytes().all(|c| c.is_ascii_hexdigit());
+        !self.principal.trim().is_empty() && !self.profile_id.trim().is_empty()
+            && self.profile_version > 0 && digest(&self.roots_digest) && digest(&self.authz_fingerprint)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct BrowserAuthorizationError { pub(crate) status: http::StatusCode }
+impl std::fmt::Display for BrowserAuthorizationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "browser authorization failed or changed")
+    }
+}
+impl std::error::Error for BrowserAuthorizationError {}
+
+fn browser_authorization_error(status: http::StatusCode) -> anyhow::Error {
+    BrowserAuthorizationError { status }.into()
 }
 
 struct BrowserReceipt { created: std::time::Instant, job_id: Option<String> }
@@ -63,9 +104,9 @@ fn mcp_slug(value: &str) -> String {
     slug.trim_end_matches('-').to_owned()
 }
 
-async fn submit_browser_task(client: &reqwest::Client, endpoint: &str, token: &str,
+async fn submit_browser_task(client: &reqwest::Client, endpoint: &str, cookie: &str, origin: &str,
     name: &str, body: &Value, deadline: Duration) -> Result<Value> {
-    let response = client.post(endpoint).timeout(deadline).bearer_auth(token)
+    let response = client.post(endpoint).timeout(deadline).header("Cookie", cookie).header("Origin", origin)
         .header("Accept", "application/json, text/event-stream")
         .header("MCP-Protocol-Version", "2026-07-28")
         .header("Mcp-Method", "tools/call").header("Mcp-Name", name)
@@ -75,12 +116,16 @@ async fn submit_browser_task(client: &reqwest::Client, endpoint: &str, token: &s
     if !status.is_success() || payload.get("error").is_some() {
         let reason = payload.pointer("/error/message").and_then(Value::as_str)
             .or_else(|| payload.get("error").and_then(Value::as_str)).unwrap_or("request rejected");
-        anyhow::bail!("GPTAdmin task admission failed: HTTP {status}: {}", safe_diagnostic(reason, 300, None, Some(token)));
+        let detail = format!("GPTAdmin task admission failed: HTTP {status}: {}", safe_diagnostic(reason, 300, None, Some(cookie)));
+        if matches!(status, http::StatusCode::UNAUTHORIZED | http::StatusCode::FORBIDDEN) {
+            return Err(browser_authorization_error(status).context(detail));
+        }
+        anyhow::bail!(detail);
     }
     payload.get("result").cloned().ok_or_else(|| anyhow!("GPTAdmin task admission returned no result"))
 }
 
-async fn wait_for_browser_task(client: &reqwest::Client, endpoint: &str, token: &str,
+async fn wait_for_browser_task(client: &reqwest::Client, endpoint: &str, cookie: &str, origin: &str,
     task_id: &str, deadline: Duration) -> Result<Value> {
     let request = json!({"jsonrpc":"2.0", "id":"grepmesh-listen", "method":"subscriptions/listen",
         "params":{"notifications":{"taskIds":[task_id]}, "_meta":{
@@ -88,12 +133,15 @@ async fn wait_for_browser_task(client: &reqwest::Client, endpoint: &str, token: 
             "io.modelcontextprotocol/clientInfo":{"name":"grepmesh-browser", "version":env!("CARGO_PKG_VERSION")},
             "io.modelcontextprotocol/clientCapabilities":{"extensions":{"io.modelcontextprotocol/tasks":{}}}}}});
     let response = client.post(format!("{endpoint}/mcp"))
-        .timeout(deadline).bearer_auth(token)
+        .timeout(deadline).header("Cookie", cookie).header("Origin", origin)
         .header("Accept", "application/json, text/event-stream")
         .header("MCP-Protocol-Version", "2026-07-28")
         .header("Mcp-Method", "subscriptions/listen")
         .json(&request).send().await
         .map_err(|_| anyhow!("GPTAdmin task {task_id} subscription failed; do not resubmit"))?;
+    if matches!(response.status(), http::StatusCode::UNAUTHORIZED | http::StatusCode::FORBIDDEN) {
+        return Err(browser_authorization_error(response.status()));
+    }
     anyhow::ensure!(response.status().is_success(), "GPTAdmin task {task_id} subscription rejected: HTTP {}; do not resubmit", response.status());
     anyhow::ensure!(response.headers().get("content-type").and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.starts_with("text/event-stream")), "GPTAdmin task {task_id} subscription unavailable; do not resubmit");
@@ -147,10 +195,12 @@ pub(crate) struct BrowserRoute {
 
 impl BrowserTaskClient {
     pub(crate) fn from_env() -> Result<Option<Self>> {
-        let Ok(token) = env::var("GREPMESH_BROWSER_HUB_TOKEN") else { return Ok(None) };
-        anyhow::ensure!(!token.trim().is_empty(), "browser Hub credential is empty");
-        anyhow::ensure!(env::var("GREPMESH_BROWSER_REQUIRE_SSO").as_deref() == Ok("1"),
-            "browser Hub access requires browser SSO verification");
+        match env::var("GREPMESH_BROWSER_REQUIRE_SSO") {
+            Err(env::VarError::NotPresent) => return Ok(None),
+            Ok(value) if value == "0" => return Ok(None),
+            Ok(value) if value == "1" => {},
+            _ => anyhow::bail!("browser protection mode must be 0 or 1"),
+        }
         let targets: BTreeMap<String, BrowserRoute> = serde_json::from_str(
             &env::var("GREPMESH_BROWSER_SHELL_TARGETS")
                 .context("browser shell target mapping is unavailable")?)?;
@@ -167,13 +217,73 @@ impl BrowserTaskClient {
             && parsed.username().is_empty() && parsed.password().is_none()
             && parsed.path() == "/" && parsed.query().is_none() && parsed.fragment().is_none(),
             "browser Hub URL must be a loopback HTTP origin");
-        Ok(Some(Self { token, targets, client: reqwest::Client::builder()
-            .no_proxy().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(10)).build()?,
-            endpoint: endpoint.trim_end_matches('/').into(), receipts: Default::default() }))
+        let origin = env::var("GREPMESH_BROWSER_ORIGIN").context("browser origin is unavailable")?;
+        let parsed_origin = reqwest::Url::parse(&origin)?;
+        anyhow::ensure!(matches!(parsed_origin.scheme(), "http" | "https")
+            && parsed_origin.host_str().is_some() && parsed_origin.username().is_empty()
+            && parsed_origin.password().is_none() && parsed_origin.path() == "/"
+            && parsed_origin.query().is_none() && parsed_origin.fragment().is_none()
+            && parsed_origin.origin().ascii_serialization() == origin,
+            "browser origin must be an exact HTTP origin");
+        Ok(Some(Self { cookie: String::new(), origin, identity: None, targets,
+            client: reqwest::Client::builder().no_proxy()
+                .redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(10)).build()?,
+            endpoint: format!("{}/api/browser/grepmesh", endpoint.trim_end_matches('/')),
+            receipts: Default::default() }))
+    }
+
+    pub(crate) fn origin(&self) -> &str { &self.origin }
+
+    pub(crate) fn identity(&self) -> Result<&BrowserIdentity> {
+        self.identity.as_ref().ok_or_else(|| browser_authorization_error(http::StatusCode::UNAUTHORIZED))
+    }
+
+    async fn session(&self, cookie: &str) -> Result<BrowserIdentity> {
+        let unavailable = || browser_authorization_error(http::StatusCode::SERVICE_UNAVAILABLE);
+        let response = self.client.get(format!("{}/session", self.endpoint))
+            .timeout(Duration::from_secs(3)).header("Cookie", cookie).send().await
+            .map_err(|_| unavailable())?;
+        if !response.status().is_success() {
+            return Err(browser_authorization_error(match response.status() {
+                http::StatusCode::UNAUTHORIZED => http::StatusCode::UNAUTHORIZED,
+                http::StatusCode::FORBIDDEN => http::StatusCode::FORBIDDEN,
+                _ => http::StatusCode::SERVICE_UNAVAILABLE,
+            }));
+        }
+        let identity: BrowserIdentity = serde_json::from_value(
+            bounded_browser_response(response).await.map_err(|_| unavailable())?
+        ).map_err(|_| unavailable())?;
+        if !identity.valid() { return Err(unavailable()); }
+        Ok(identity)
+    }
+
+    pub(crate) async fn authenticate(&self, cookie: &str) -> Result<Self> {
+        let identity = self.session(cookie).await?;
+        let mut client = self.clone();
+        client.cookie = cookie.to_owned();
+        client.identity = Some(identity);
+        Ok(client)
+    }
+
+    pub(crate) async fn revalidate(&self) -> Result<()> {
+        let current = self.session(&self.cookie).await?;
+        if !self.identity()?.same_authority(&current) {
+            return Err(browser_authorization_error(http::StatusCode::FORBIDDEN));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn authorized_hosts(&self) -> Vec<String> {
+        self.targets.keys().filter(|host| self.route(host).is_ok()).cloned().collect()
     }
 
     pub(crate) fn route(&self, host: &str) -> Result<&BrowserRoute> {
-        self.targets.get(host).ok_or_else(|| anyhow!("no GPTAdmin executor mapped for {host}"))
+        let route = self.targets.get(host).ok_or_else(|| anyhow!("no GPTAdmin executor mapped for {host}"))?;
+        let target = format!("mcp:{}:{}", route.shell_target, route.child_ref);
+        if !self.identity()?.allowed_targets.contains(&target) {
+            return Err(browser_authorization_error(http::StatusCode::FORBIDDEN));
+        }
+        Ok(route)
     }
 
     pub(crate) async fn call(&self, host: &str, name: &str, args: Value, id: &str, deadline: Duration,
@@ -198,6 +308,15 @@ impl BrowserTaskClient {
             }
         }
         let route = self.route(host)?;
+        let scoped_id = format!("{}:{id}", self.identity()?.authz_fingerprint);
+        let id = scoped_id.as_str();
+        if let Some(expected) = expected_task_id {
+            let receipts = self.receipts.lock().map_err(|_| anyhow!("browser task receipt lock failed"))?;
+            anyhow::ensure!(receipts.get(id).filter(|entry| entry.created.elapsed() < Duration::from_secs(3600))
+                .and_then(|entry| entry.job_id.as_deref()) == Some(expected),
+                "browser task receipt expired or changed; read was not resubmitted");
+        }
+        self.revalidate().await?;
         let known_job = {
             let mut receipts = self.receipts.lock().map_err(|_| anyhow!("browser task receipt lock failed"))?;
             receipts.retain(|_, entry| entry.created.elapsed() < Duration::from_secs(3600));
@@ -221,18 +340,19 @@ impl BrowserTaskClient {
         // shell mcp_call is intentionally denied by its coarse policy.
         let slug = mcp_slug(&format!("mcp:{}:{}", route.shell_target, route.child_ref));
         let target_url = format!("{}/server/{slug}/mcp", self.endpoint);
+        let idempotency_key = format!("{:x}", Sha256::digest(id.as_bytes()));
         let mut body = json!({"jsonrpc":"2.0", "id":"grepmesh-call", "method":"tools/call", "params":{
             "name":name, "arguments":args, "_meta":{
                 "io.modelcontextprotocol/protocolVersion":"2026-07-28",
                 "io.modelcontextprotocol/clientInfo":{"name":"grepmesh-browser", "version":env!("CARGO_PKG_VERSION")},
                 "io.modelcontextprotocol/clientCapabilities":{"extensions":{"io.modelcontextprotocol/tasks":{}}},
-                "com.gptadmin/idempotencyKey":id}}});
+                "com.gptadmin/idempotencyKey":idempotency_key}}});
         let mut result: Value = if let Some(job_id) = known_job {
             json!({"status":"running", "job_id":job_id})
         } else {
         let remaining = deadline.checked_sub(started.elapsed()).filter(|d| !d.is_zero())
             .ok_or_else(|| anyhow!("browser task deadline elapsed before submission"))?;
-        let mut response = submit_browser_task(&self.client, &target_url, &self.token, name, &body, remaining).await?;
+        let mut response = submit_browser_task(&self.client, &target_url, &self.cookie, &self.origin, name, &body, remaining).await?;
         let refusal = response.get("structuredContent").cloned().unwrap_or(Value::Null);
         if refusal.get("executed").and_then(Value::as_bool) == Some(false)
             && refusal.pointer("/error/code").and_then(Value::as_str) == Some("instructions_required")
@@ -242,7 +362,7 @@ impl BrowserTaskClient {
             body["params"]["context"] = json!(context);
             let remaining = deadline.checked_sub(started.elapsed()).filter(|d| !d.is_zero())
                 .ok_or_else(|| anyhow!("browser task deadline elapsed before instruction continuation"))?;
-            response = submit_browser_task(&self.client, &target_url, &self.token, name, &body, remaining).await?;
+            response = submit_browser_task(&self.client, &target_url, &self.cookie, &self.origin, name, &body, remaining).await?;
         }
         let result = if response.get("resultType").and_then(Value::as_str) == Some("task") {
             let task_id = response.get("taskId").and_then(Value::as_str)
@@ -257,7 +377,7 @@ impl BrowserTaskClient {
                     .or_else(|| result.pointer("/error/code").and_then(Value::as_str))
                     .or_else(|| result.get("error").and_then(Value::as_str)).unwrap_or("task admission rejected");
                 let context = body.pointer("/params/context").and_then(Value::as_str);
-                anyhow::bail!("GPTAdmin task admission failed: {}: {}", safe_diagnostic(code, 80, context, Some(&self.token)), safe_diagnostic(reason, 300, context, Some(&self.token)));
+                anyhow::bail!("GPTAdmin task admission failed: {}: {}", safe_diagnostic(code, 80, context, Some(&self.cookie)), safe_diagnostic(reason, 300, context, Some(&self.cookie)));
             }
             result
         };
@@ -279,7 +399,7 @@ impl BrowserTaskClient {
                 Some("failed" | "cancelled" | "canceled") => {
                     let reason = result.get("error").and_then(Value::as_str).unwrap_or("no reason supplied");
                     anyhow::bail!("GPTAdmin task {} failed: {}", job_id.as_deref().unwrap_or("unknown"),
-                        safe_diagnostic(reason, 300, None, Some(&self.token)))
+                        safe_diagnostic(reason, 300, None, Some(&self.cookie)))
                 },
                 Some("running" | "queued" | "pending") => {},
                 _ => anyhow::bail!("GPTAdmin returned an invalid task state"),
@@ -290,7 +410,7 @@ impl BrowserTaskClient {
             loop {
                 let remaining = deadline.checked_sub(started.elapsed()).filter(|v| *v > Duration::from_millis(300))
                     .ok_or_else(|| anyhow!(BrowserTaskPending { task_id: job_id.to_owned() }))?;
-                match wait_for_browser_task(&self.client, &self.endpoint, &self.token, job_id, remaining).await {
+                match wait_for_browser_task(&self.client, &self.endpoint, &self.cookie, &self.origin, job_id, remaining).await {
                     Ok(value) => { result = value; break; }
                     Err(error) if reconnects < 3 && (error.to_string().contains("subscription interrupted")
                         || error.to_string().contains("subscription ended")) => {
@@ -306,13 +426,14 @@ impl BrowserTaskClient {
                 let reason = result.pointer("/response/structuredContent/result/error")
                     .and_then(Value::as_str).unwrap_or("task result is missing the child response");
                 anyhow!("GPTAdmin child task {} failed: {}", job_id.as_deref().unwrap_or("unknown"),
-                    safe_diagnostic(reason, 300, None, Some(&self.token)))
+                    safe_diagnostic(reason, 300, None, Some(&self.cookie)))
             })?;
         if child.get("isError").and_then(Value::as_bool) == Some(true) {
             let reason = child.pointer("/content/0/text").and_then(Value::as_str).unwrap_or("no reason supplied");
             anyhow::bail!("GrepMesh child task {} failed: {}", job_id.as_deref().unwrap_or("unknown"),
-                safe_diagnostic(reason, 300, None, Some(&self.token)));
+                safe_diagnostic(reason, 300, None, Some(&self.cookie)));
         }
+        self.revalidate().await?;
         Ok(child)
     }
 }
@@ -1038,16 +1159,27 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    fn browser_identity() -> BrowserIdentity {
+        BrowserIdentity { principal:"fixture-user".into(), profile_id:"fixture-profile".into(),
+            profile_version:1, roots_digest:"a".repeat(64), authz_fingerprint:"b".repeat(64),
+            read_roots:vec!["/fixture".into()], allowed_targets:vec!["mcp:shell:node:GrepMesh".into()] }
+    }
+
+    async fn fixture_browser_session() -> axum::Json<Value> {
+        axum::Json(json!({"principal":"fixture-user","profile_id":"fixture-profile","profile_version":1,
+            "roots_digest":"a".repeat(64),"authz_fingerprint":"b".repeat(64),
+            "read_roots":["/fixture"],"allowed_targets":["mcp:shell:node:GrepMesh"]}))
+    }
     #[tokio::test]
     async fn preview_resume_requires_the_original_unexpired_receipt() {
-        let hub = BrowserTaskClient { token: String::new(), endpoint: String::new(),
+        let hub = BrowserTaskClient { cookie: String::new(), origin:"https://grepmesh.test".into(), identity:Some(browser_identity()), endpoint: String::new(),
             targets: BTreeMap::from([("node".into(), BrowserRoute { shell_target:"shell:node".into(),
                 child_ref:"GrepMesh".into(), execution_host:"local".into(), executor_host:"node".into() })]),
             client: reqwest::Client::new(), receipts: Default::default() };
         for mode in ["missing", "mismatch", "expired", "evicted"] {
             hub.receipts.lock().unwrap().clear();
             if mode == "mismatch" || mode == "expired" {
-                hub.receipts.lock().unwrap().insert("preview:document:read".into(), BrowserReceipt {
+                hub.receipts.lock().unwrap().insert(format!("{}:preview:document:read", browser_identity().authz_fingerprint), BrowserReceipt {
                     created: std::time::Instant::now() - Duration::from_secs(if mode == "expired" {3601} else {0}),
                     job_id: Some(if mode == "mismatch" {"other-job"} else {"job-1"}.into()) });
             }
@@ -1089,7 +1221,8 @@ mod tests {
         use axum::{extract::State, routing::post, Json, Router};
         use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
         let calls = Arc::new(AtomicUsize::new(0));
-        let app = Router::new().route("/server/mcp-shell-node-grepmesh/mcp", post(|State(calls): State<Arc<AtomicUsize>>, Json(body): Json<Value>| async move {
+        let app = Router::new().route("/session", axum::routing::get(fixture_browser_session))
+            .route("/server/mcp-shell-node-grepmesh/mcp", post(|State(calls): State<Arc<AtomicUsize>>, Json(body): Json<Value>| async move {
             calls.fetch_add(1, Ordering::SeqCst);
             // The live child advertises search, not its private search_text alias.
             assert_eq!(body["params"]["name"], "search");
@@ -1106,7 +1239,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let hub = BrowserTaskClient { token:"fixture-secret-value".into(), endpoint:format!("http://{address}"),
+        let hub = BrowserTaskClient { cookie:"qa_session=fixture-secret-value".into(), origin:"https://grepmesh.test".into(), identity:Some(browser_identity()), endpoint:format!("http://{address}"),
             client:reqwest::Client::new(), receipts:Default::default(), targets:BTreeMap::from([("node".into(), BrowserRoute {
                 shell_target:"shell:node".into(), child_ref:"GrepMesh".into(),
                 execution_host:"local".into(), executor_host:"node".into() })]) };
@@ -1124,7 +1257,7 @@ mod tests {
         use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
         let calls = Arc::new(AtomicUsize::new(0));
         let subscriptions = Arc::new(AtomicUsize::new(0));
-        let app = Router::new()
+        let app = Router::new().route("/session", axum::routing::get(fixture_browser_session))
             .route("/server/mcp-shell-node-grepmesh/mcp", post(|State(calls): State<Arc<AtomicUsize>>, Json(body): Json<Value>| async move {
                 assert_eq!(body["method"], "tools/call");
                 assert_eq!(body["params"]["name"], "read_text");
@@ -1151,7 +1284,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let hub = BrowserTaskClient { token:"fixture-secret-value".into(), endpoint:format!("http://{address}"),
+        let hub = BrowserTaskClient { cookie:"qa_session=fixture-secret-value".into(), origin:"https://grepmesh.test".into(), identity:Some(browser_identity()), endpoint:format!("http://{address}"),
             client:reqwest::Client::new(), receipts:Default::default(), targets:BTreeMap::from([("node".into(), BrowserRoute {
                 shell_target:"shell:node".into(), child_ref:"GrepMesh".into(),
                 execution_host:"local".into(), executor_host:"node".into() })]) };
@@ -1176,14 +1309,14 @@ mod tests {
         use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
         use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
         let calls = Arc::new(AtomicUsize::new(0));
-        let app = Router::new().route("/server/mcp-shell-node-grepmesh/mcp", post(|State(calls): State<Arc<AtomicUsize>>| async move {
+        let app = Router::new().route("/session", axum::routing::get(fixture_browser_session)).route("/server/mcp-shell-node-grepmesh/mcp", post(|State(calls): State<Arc<AtomicUsize>>| async move {
             calls.fetch_add(1, Ordering::SeqCst);
             (StatusCode::PRECONDITION_REQUIRED, Json(json!({"error":"approval-fixture"})))
         })).with_state(calls.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let hub = BrowserTaskClient { token:"fixture-secret-value".into(), endpoint:format!("http://{address}"),
+        let hub = BrowserTaskClient { cookie:"qa_session=fixture-secret-value".into(), origin:"https://grepmesh.test".into(), identity:Some(browser_identity()), endpoint:format!("http://{address}"),
             client:reqwest::Client::new(), receipts:Default::default(), targets:BTreeMap::from([("node".into(), BrowserRoute {
                 shell_target:"shell:node".into(), child_ref:"GrepMesh".into(),
                 execution_host:"local".into(), executor_host:"node".into() })]) };
@@ -1198,14 +1331,14 @@ mod tests {
         use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
         use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
         let calls = Arc::new(AtomicUsize::new(0));
-        let app = Router::new().route("/server/mcp-shell-node-grepmesh/mcp", post(|State(calls): State<Arc<AtomicUsize>>| async move {
+        let app = Router::new().route("/session", axum::routing::get(fixture_browser_session)).route("/server/mcp-shell-node-grepmesh/mcp", post(|State(calls): State<Arc<AtomicUsize>>| async move {
             calls.fetch_add(1, Ordering::SeqCst);
             (StatusCode::FORBIDDEN, Json(json!({"status":"failed","error":"personal MCP requires its exact owner profile"})))
         })).with_state(calls.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let hub = BrowserTaskClient { token:"fixture-secret-value".into(), endpoint:format!("http://{address}"),
+        let hub = BrowserTaskClient { cookie:"qa_session=fixture-secret-value".into(), origin:"https://grepmesh.test".into(), identity:Some(browser_identity()), endpoint:format!("http://{address}"),
             client:reqwest::Client::new(), receipts:Default::default(), targets:BTreeMap::from([("node".into(), BrowserRoute {
                 shell_target:"shell:node".into(), child_ref:"GrepMesh".into(),
                 execution_host:"local".into(), executor_host:"node".into() })]) };
